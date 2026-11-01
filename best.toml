@@ -1,5 +1,5 @@
 # The recommendation per hardware class, in order. `use best` picks the first recipe in the
-# matching class that fits the machine; later entries are fallbacks for static reasons only.
+# exact gpu/ram_class pair that fits the machine; later entries are fallbacks for static reasons only.
 # A recipe may be listed only for classes it has a measurement record for.
 
 [[class]]

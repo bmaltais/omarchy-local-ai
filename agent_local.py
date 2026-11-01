@@ -123,49 +123,6 @@ def say(message):
   print(message, flush=True)
 
 
-# ---------------------------------------------------------------- TOML out
-
-
-def _toml_value(value):
-  if isinstance(value, bool):
-    return "true" if value else "false"
-  if isinstance(value, (int, float)):
-    return repr(value)
-  if isinstance(value, str):
-    return json.dumps(value, ensure_ascii=False)
-  if isinstance(value, list):
-    return "[" + ", ".join(_toml_value(item) for item in value) + "]"
-  if isinstance(value, dict):
-    return "{ " + ", ".join(f"{_toml_key(k)} = {_toml_value(v)}" for k, v in value.items() if v is not None) + " }"
-  raise TypeError(f"cannot write {type(value).__name__} to TOML")
-
-
-def _toml_key(key):
-  return key if re.match(r"^[A-Za-z0-9_-]+$", key) else json.dumps(key)
-
-
-def toml_dumps(data, prefix=""):
-  scalars, tables, arrays = [], [], []
-  for key, value in data.items():
-    if value is None:
-      continue
-    if isinstance(value, dict):
-      tables.append((key, value))
-    elif isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
-      arrays.append((key, value))
-    else:
-      scalars.append(f"{_toml_key(key)} = {_toml_value(value)}")
-  out = "\n".join(scalars)
-  for key, value in tables:
-    name = f"{prefix}{_toml_key(key)}"
-    out += f"\n\n[{name}]\n" + toml_dumps(value, name + ".")
-  for key, items in arrays:
-    name = f"{prefix}{_toml_key(key)}"
-    for item in items:
-      out += f"\n\n[[{name}]]\n" + toml_dumps(item, name + ".")
-  return out.strip("\n") + ("\n" if prefix == "" else "")
-
-
 # ---------------------------------------------------------------- machine profile
 
 
@@ -272,10 +229,6 @@ def choose_gpu(profile, family=None):
   return best
 
 
-def write_profile_cache(profile):
-  write_atomic(os.path.join(state_dir(), "profile.json"), json.dumps(profile, indent=2) + "\n")
-
-
 # ---------------------------------------------------------------- validation
 
 
@@ -334,8 +287,6 @@ def validate_runtime(rid, runtime, root=None):
   if not isinstance(port, int) or not 1 <= port <= 65535:
     errors.append(f"{where}.port: must be 1-65535")
   health = runtime.get("health", {})
-  if not isinstance(health, dict) or not isinstance(health.get("path"), str) or not health.get("path", "").startswith("/"):
-    errors.append(f"{where}.health.path: must start with /")
   probe = health.get("probe") if isinstance(health, dict) else None
   if not isinstance(probe, list) or not probe:
     errors.append(f"{where}.health.probe: must be a non-empty list")
@@ -360,7 +311,16 @@ def validate_runtime(rid, runtime, root=None):
     if option not in RUN_OPTIONS:
       errors.append(f"{where}.run.{option}: not an allowed run option ({', '.join(sorted(list(RUN_OPTIONS) + ['shm_size_gib']))})")
       continue
-    values = value if isinstance(value, list) else [value]
+    if option == "devices":
+      if not isinstance(value, list):
+        errors.append(f"{where}.run.devices: must be a list")
+        continue
+      values = value
+    else:
+      if not isinstance(value, str):
+        errors.append(f"{where}.run.{option}: must be a scalar string")
+        continue
+      values = [value]
     for item in values:
       if item not in RUN_OPTIONS[option]:
         errors.append(f"{where}.run.{option}: '{item}' is not allowed ({', '.join(RUN_OPTIONS[option])})")
@@ -531,9 +491,11 @@ def validate_best(best, recipes):
       continue
     if entry.get("ram_class") not in RAM_CLASSES:
       errors.append(f"{where}.ram_class: must be one of {RAM_CLASSES}")
-    if not entry.get("gpu") and not entry.get("platform"):
-      errors.append(f"{where}: needs gpu or platform")
-    selectors = (entry.get("gpu"), entry.get("platform"), entry.get("ram_class"))
+    if not _safe_string(entry.get("gpu"), f"{where}.gpu", errors):
+      continue
+    if "platform" in entry:
+      errors.append(f"{where}.platform: not a class selector; use gpu and ram_class")
+    selectors = (entry.get("gpu"), entry.get("ram_class"))
     if selectors in seen:
       errors.append(f"{where}: same selectors as class[{seen[selectors]}]")
     seen[selectors] = index
@@ -548,8 +510,7 @@ def validate_best(best, recipes):
         continue
       qualified = any(
         hw.get("ram_class") == entry.get("ram_class")
-        and (not entry.get("gpu") or hw.get("gpu") == entry.get("gpu"))
-        and (not entry.get("platform") or hw.get("platform") in (None, entry.get("platform")))
+        and hw.get("gpu") == entry.get("gpu")
         for hw in recipe.get("hardware", []) if isinstance(hw, dict)
       )
       if not qualified:
@@ -579,13 +540,6 @@ class Catalog:
     self.recipes = _load_toml_dir(root, "recipes")
     with open(os.path.join(root, "best.toml"), "rb") as handle:
       self.best = tomllib.load(handle)
-    self.overrides = set()
-
-  def apply_user_overrides(self):
-    for sub, target in (("runtimes", self.runtimes), ("recipes", self.recipes)):
-      for rid, item in _load_toml_dir(config_dir(), sub).items():
-        target[rid] = item
-        self.overrides.add(f"{sub}/{rid}")
 
   def errors(self):
     errors = []
@@ -615,11 +569,6 @@ def load_catalog():
   errors = catalog.errors()
   if errors:
     raise LocalError("Catalog failed validation:\n  " + "\n  ".join(errors))
-  catalog.apply_user_overrides()
-  if catalog.overrides:
-    errors = catalog.errors()
-    if errors:
-      raise LocalError("Your local recipe or runtime overrides are invalid:\n  " + "\n  ".join(errors))
   return catalog
 
 
@@ -678,22 +627,8 @@ def compatibility(catalog, rid, profile, gpu, ctx=None):
 
 
 def match_class(best, profile, gpu):
-  matches = []
-  for entry in best.get("class", []):
-    if entry.get("ram_class") != profile["ram_class"]:
-      continue
-    if entry.get("gpu") and entry["gpu"] != gpu["family"]:
-      continue
-    if entry.get("platform") and entry["platform"] != profile["platform"]:
-      continue
-    rank = (1 if entry.get("gpu") else 0, sum(1 for key in ("gpu", "platform") if entry.get(key)))
-    matches.append((rank, entry))
-  if not matches:
-    return None
-  matches.sort(key=lambda item: item[0], reverse=True)
-  if len(matches) > 1 and matches[0][0] == matches[1][0]:
-    raise LocalError("best.toml has two equally specific classes for this machine")
-  return matches[0][1]
+  return next((entry for entry in best["class"]
+               if entry["gpu"] == gpu["family"] and entry["ram_class"] == profile["ram_class"]), None)
 
 
 def resolve_best(catalog, profile, gpu, ctx=None):
@@ -751,7 +686,6 @@ def recipe_listing(catalog, profile, running=()):
       "reason": "" if variant else reason,
       "best": rid == best_id,
       "active": rid in running,
-      "override": f"recipes/{rid}" in catalog.overrides,
       # What the card shows: the measured footprint, context and speed at a
       # long prompt on this machine class.
       "memory_gib": variant["peak_ram_gib"] if variant else None,
@@ -762,22 +696,9 @@ def recipe_listing(catalog, profile, running=()):
   return rows
 
 
-RUN_NAME_RE = re.compile(r"^\d{8}T\d{6}-(.+)\.json$")
-
-
-def run_recipe_id(name):
-  """The recipe a run manifest's file name belongs to, matched whole: removing
-  `bar` must not touch `foo-bar`'s runs."""
-  match = RUN_NAME_RE.match(name)
-  return match.group(1) if match else None
-
-
 def recipe_installed(rid):
-  """Whether a recipe has run here and its weights are still on disk, so switching to it is quick."""
-  if not os.path.isdir(os.path.join(data_dir(), "models", rid)):
-    return False
-  runs = runs_dir()
-  return os.path.isdir(runs) and any(run_recipe_id(name) == rid for name in os.listdir(runs))
+  """Installed means the recipe has a current manifest."""
+  return os.path.isfile(model_manifest_path(rid))
 
 
 def load_measurement(catalog, recipe, profile, gpu):
@@ -1024,28 +945,19 @@ def fileset_id(files):
   return digest.hexdigest()[:16]
 
 
-def fileset_dir(rid, fileset=None):
-  """Where a run's files live: one immutable directory per exact file set, so
-  setting up a new one never touches the files a running or previous unit
-  mounts. Manifests from before file sets mount the recipe directory itself."""
-  base = os.path.join(data_dir(), "models", rid)
-  return os.path.join(base, fileset) if fileset else base
+def fileset_dir(rid, fileset):
+  """An immutable directory per exact file set."""
+  return os.path.join(data_dir(), "models", rid, fileset)
 
 
 def prune_filesets(rid, keep):
-  """After a run commits, drop this recipe's other file sets and any files
-  from the layout before file sets."""
+  """After a setup commits, drop this recipe's other file sets."""
   base = os.path.join(data_dir(), "models", rid)
   if not os.path.isdir(base) or not FILESET_RE.match(keep or ""):
     return
   for name in os.listdir(base):
-    if name == keep:
-      continue
-    path = os.path.join(base, name)
-    if os.path.isdir(path) and not os.path.islink(path):
-      shutil.rmtree(path, ignore_errors=True)
-    else:
-      os.unlink(path)
+    if name != keep:
+      shutil.rmtree(os.path.join(base, name), ignore_errors=True)
 
 
 def materialize(rid, files, roles, seed_dir=None):
@@ -1164,12 +1076,12 @@ def render_network():
   return "\n".join(QUADLET_SECTION + ["", "[Network]", f"NetworkName={NETWORK_NAME}", "Internal=true"]) + "\n"
 
 
-def render_container(rid, recipe, runtime, variant, roles, gpu, autostart=False, fileset=None):
+def render_container(rid, recipe, runtime, variant, roles, gpu, fileset):
   for value in (rid, recipe.get("name", "")):
     if CONTROL_RE.search(value):
       raise LocalError("Refusing a recipe name with control characters")
-  if not ID_RE.match(rid) or not IMAGE_RE.match(runtime["image"]) or (fileset and not FILESET_RE.match(fileset)):
-    raise LocalError("Refusing an invalid recipe id or image reference")
+  if not ID_RE.match(rid) or not IMAGE_RE.match(runtime["image"]) or not isinstance(fileset, str) or not FILESET_RE.fullmatch(fileset):
+    raise LocalError("Refusing an invalid recipe id, image reference or file set")
   entrypoint, argv, env, _ = server_invocation(runtime, recipe, variant, roles, rid)
   run = runtime.get("run", {})
   key_mapping = runtime["inputs"]["key"]
@@ -1190,7 +1102,7 @@ def render_container(rid, recipe, runtime, variant, roles, gpu, autostart=False,
     f"Label=org.omarchy.agent-local.recipe={rid}",
     f"Network={NETWORK_UNIT}",
     f"PublishPort=127.0.0.1:{port_for(rid)}:{runtime['port']}",
-    f"Volume=%h/.local/share/omarchy/agent-local/models/{rid}{'/' + fileset if fileset else ''}:/models:ro",
+    f"Volume=%h/.local/share/omarchy/agent-local/models/{rid}/{fileset}:/models:ro",
     f"Secret={SECRET},type=env,target={KEY_ENV}",
   ]
   if "env" in key_mapping:
@@ -1240,8 +1152,6 @@ def render_container(rid, recipe, runtime, variant, roles, gpu, autostart=False,
     f"ExecStartPost=-/usr/bin/env omarchy-agent-local status --write --started {rid}",
     f"ExecStopPost=-/usr/bin/env omarchy-agent-local status --write --stopped {rid}",
   ]
-  if autostart:
-    lines += ["", "[Install]", "WantedBy=graphical-session.target"]
   return "\n".join(lines) + "\n"
 
 
@@ -1508,11 +1418,7 @@ def check_headroom(variant, gpu):
   )
 
 
-# ---------------------------------------------------------------- runs and manifests
-
-
-def runs_dir():
-  return os.path.join(state_dir(), "runs")
+# ---------------------------------------------------------------- current manifests
 
 
 def models_dir():
@@ -1545,7 +1451,7 @@ def last_model_id():
 
 
 def default_model(running_only=False):
-  """The model a launch or bench means when none is named: the last one
+  """The model a launch means when none is named: the last one
   started, if it qualifies, else any running one."""
   last = last_model_id()
   if last and (not running_only or unit_active(last)):
@@ -1572,13 +1478,11 @@ def resolve_model(rid=None, running_only=False):
   return manifest
 
 
-def save_run(manifest, started=True):
-  stamp = time.strftime("%Y%m%dT%H%M%S")
+def save_model(manifest, started=True):
   rid = manifest["recipe_id"]
-  path = os.path.join(runs_dir(), f"{stamp}-{rid}.json")
+  path = model_manifest_path(rid)
   text = json.dumps(manifest, indent=2) + "\n"
   write_atomic(path, text)
-  write_atomic(model_manifest_path(rid), text)
   if started:
     write_atomic(os.path.join(state_dir(), "last"), rid + "\n")
   return path
@@ -1623,14 +1527,6 @@ def clear_error(rid):
     os.unlink(error_path(rid))
 
 
-def autostart_flag(rid):
-  return os.path.join(state_dir(), "autostart", rid)
-
-
-def autostart_enabled(rid):
-  return os.path.exists(autostart_flag(rid))
-
-
 class Lock:
   def __enter__(self):
     ensure_dir(state_dir())
@@ -1672,16 +1568,16 @@ def start_unit(rid):
   return time.time() - started
 
 
-def activate(manifest, recipe, runtime, gpu, key):
+def activate(manifest, recipe, runtime, gpu, key, catalog, profile):
   """Start a recipe from a resolved manifest. Other models keep running; a
   failure restores this recipe's previous unit, and restarts it if it ran."""
   rid = manifest["recipe_id"]
   previous_text = open(quadlet_path(rid)).read() if os.path.isfile(quadlet_path(rid)) else None
   was_running = unit_active(rid)
-  container_text = render_container(rid, recipe, runtime, manifest["variant"], manifest["roles"], gpu, autostart_enabled(rid), manifest.get("fileset"))
+  container_text = render_container(rid, recipe, runtime, manifest["variant"], manifest["roles"], gpu, manifest["fileset"])
   if was_running:
     say(f"Restarting {rid} with the new setup (its in-flight requests are interrupted)")
-    write_status({rid: "deactivating"})
+    write_status(catalog, profile, {rid: "deactivating"})
     systemctl("stop", unit_name(rid))
   clear_error(rid)
   try:
@@ -1689,7 +1585,7 @@ def activate(manifest, recipe, runtime, gpu, key):
     before_ram, before_gpu = check_headroom(manifest["variant"], gpu)
     write_unit_files(rid, container_text)
     systemctl("reset-failed", unit_name(rid))
-    write_status({rid: "activating"}, pending={rid: (recipe, manifest)})
+    write_status(catalog, profile, {rid: "activating"}, pending={rid: manifest})
     load_seconds = start_unit(rid)
     post_start_checks(rid, key)
   except (LocalError, subprocess.CalledProcessError) as error:
@@ -1700,7 +1596,7 @@ def activate(manifest, recipe, runtime, gpu, key):
       systemctl("start", unit_name(rid))
     short = getattr(error, "short", None) or str(error).splitlines()[0]
     record_error(rid, short)
-    write_status()
+    write_status(catalog, profile)
     raise LocalError(str(error), short=short)
   after_ram, after_gpu = free_memory(gpu)
   manifest["observed"] = {
@@ -1722,57 +1618,42 @@ def _lookup_recipe(catalog, target):
 
 def cmd_use(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local use")
-  parser.add_argument("target", nargs="?", help="best, or a recipe id")
-  parser.add_argument("--manifest", help="rerun a resolved manifest exactly")
+  parser.add_argument("target", help="best, or a recipe id")
   parser.add_argument("--ctx", type=int)
   parser.add_argument("--gpu")
   parser.add_argument("--seed", help="reuse matching files from this directory before downloading")
   parser.add_argument("--unqualified", action="store_true", help="run a recipe not measured on this machine class")
   args = parser.parse_args(argv)
-  if not args.target and not args.manifest:
-    parser.error("give 'best', a recipe id, or --manifest <file>")
   with Lock():
+    catalog = load_catalog()
     profile = machine_profile()
-    write_profile_cache(profile)
     gpu = choose_gpu(profile, args.gpu)
-    if args.manifest:
-      with open(args.manifest) as handle:
-        old = json.load(handle)
-      rid, recipe, runtime, variant = old["recipe_id"], old["recipe"], old["runtime"], old["variant"]
-      errors = validate_runtime(old["runtime_id"], runtime) + validate_recipe(rid, recipe, {old["runtime_id"]: runtime})
-      errors = [error for error in errors if "is missing" not in error]
-      if errors:
-        raise LocalError("Manifest is invalid:\n  " + "\n  ".join(errors))
-      catalog_info = old.get("catalog", {})
-      say(f"Rerunning {rid} from {args.manifest}")
+    if args.target == "best":
+      rid, variant, skipped = resolve_best(catalog, profile, gpu, args.ctx)
+      for skipped_id, reason in skipped:
+        say(f"Skipping {skipped_id}: {reason}")
+      say(f"Best for this machine ({gpu['family']}, {profile['ram_class']} GB): {rid}")
     else:
-      catalog = load_catalog()
-      if args.target == "best":
-        rid, variant, skipped = resolve_best(catalog, profile, gpu, args.ctx)
-        for skipped_id, reason in skipped:
-          say(f"Skipping {skipped_id}: {reason}")
-        say(f"Best for this machine ({gpu['family']}, {profile['ram_class']} GB): {rid}")
-      else:
-        rid = args.target
-        _lookup_recipe(catalog, rid)
-        variant, reason = compatibility(catalog, rid, profile, gpu, args.ctx)
+      rid = args.target
+      _lookup_recipe(catalog, rid)
+      variant, reason = compatibility(catalog, rid, profile, gpu, args.ctx)
+      if variant is None:
+        if not args.unqualified:
+          raise LocalError(f"{rid} isn't qualified for this machine: {reason}\nRun with --unqualified to try anyway.")
+        variant, fit_reason = pick_variant(catalog.recipes[rid], profile, gpu, args.ctx)
         if variant is None:
-          if not args.unqualified:
-            raise LocalError(f"{rid} isn't qualified for this machine: {reason}\nRun with --unqualified to try anyway.")
-          variant, fit_reason = pick_variant(catalog.recipes[rid], profile, gpu, args.ctx)
-          if variant is None:
-            raise LocalError(f"{rid} doesn't fit: {fit_reason}")
-          say(f"Warning: {reason}")
-      recipe = catalog.recipes[rid]
-      runtime = catalog.runtimes[recipe["runtime"]]
-      catalog_info = {"version": catalog.version, "overrides": sorted(catalog.overrides)}
-      if runtime.get("tier") == "third-party":
-        review = load_review(catalog, runtime)
-        say(f"Runtime {recipe['runtime']} is third-party: {review.get('publisher', 'unknown publisher')}, license {review.get('license_url', 'unknown')}")
+          raise LocalError(f"{rid} doesn't fit: {fit_reason}")
+        say(f"Warning: {reason}")
+    recipe = catalog.recipes[rid]
+    runtime = catalog.runtimes[recipe["runtime"]]
+    catalog_info = {"version": catalog.version}
+    if runtime.get("tier") == "third-party":
+      review = load_review(catalog, runtime)
+      say(f"Runtime {recipe['runtime']} is third-party: {review.get('publisher', 'unknown publisher')}, license {review.get('license_url', 'unknown')}")
     if runtime.get("key_on_cmdline"):
       say(f"Warning: runtime {recipe['runtime']} takes its key as a command-line argument, visible in the process list to other local users")
     preflight(runtime, gpu)
-    files, roles = (old["files"], old["roles"]) if args.manifest else build_artifacts(recipe)
+    files, roles = build_artifacts(recipe)
     say(f"Recipe {rid}: {len(files)} file(s), {gib(sum(f['size'] for f in files)):.1f} GiB, context {variant['ctx']}")
     for license_name in sorted({f"{f['repo']} ({f['license']})" for f in files}):
       say(f"  weights: {license_name}")
@@ -1795,8 +1676,7 @@ def cmd_use(argv):
       "fileset": fileset,
       "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
-    _, argv_out, env_out, skipped = server_invocation(runtime, recipe, variant, roles, rid)
-    manifest["launch"] = {"argv": argv_out, "env": env_out}
+    _, _, _, skipped = server_invocation(runtime, recipe, variant, roles, rid)
     if skipped:
       say(f"Note: runtime {recipe['runtime']} takes no {', '.join(skipped)} default; clients choose their own")
     # Downloaded is installed: when other models hold the memory it needs,
@@ -1805,24 +1685,24 @@ def cmd_use(argv):
       try:
         check_headroom(variant, gpu)
       except LocalError as error:
-        write_unit_files(rid, render_container(rid, recipe, runtime, variant, roles, gpu, autostart_enabled(rid), fileset))
+        write_unit_files(rid, render_container(rid, recipe, runtime, variant, roles, gpu, fileset))
         clear_error(rid)
         # Its first start runs the checks activate() would have.
         manifest["unchecked"] = True
-        path = save_run(manifest, started=False)
+        path = save_model(manifest, started=False)
         prune_filesets(rid, fileset)
-        refresh_list_cache(profile)
-        write_status()
+        refresh_list_cache(catalog, profile)
+        write_status(catalog, profile)
         say("")
         say(f"Installed {rid}, but it can't start now: {error}")
         say(f"Stop another model, then press play in the agents panel or run: omarchy agent local start {rid}")
         say(f"Manifest: {path}")
         return 0
-    activate(manifest, recipe, runtime, gpu, key)
-    path = save_run(manifest)
+    activate(manifest, recipe, runtime, gpu, key, catalog, profile)
+    path = save_model(manifest)
     prune_filesets(rid, fileset)
-    refresh_list_cache(profile)
-    write_status()
+    refresh_list_cache(catalog, profile)
+    write_status(catalog, profile)
     say("")
     say(f"Running {rid} at {endpoint(rid)} (model id {rid}, key in {key_path()})")
     say(f"Loaded in {manifest['observed']['load_seconds']:.0f}s, using about {manifest['observed']['ram_used_gib']:.0f} GiB")
@@ -1835,11 +1715,7 @@ def running_models():
   return {rid for rid in known_models() if unit_active(rid)}
 
 
-def refresh_list_cache(profile=None):
-  catalog = load_catalog()
-  if catalog is None:
-    return []
-  profile = profile or machine_profile()
+def refresh_list_cache(catalog, profile):
   rows = recipe_listing(catalog, profile, running_models())
   write_list_cache(rows)
   return rows
@@ -1848,10 +1724,8 @@ def refresh_list_cache(profile=None):
 def cmd_list(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local list")
   parser.add_argument("--json", action="store_true")
-  parser.add_argument("--offline", action="store_true", help="read the installed catalog (also the default)")
   args = parser.parse_args(argv)
   profile = machine_profile()
-  write_profile_cache(profile)
   catalog = load_catalog()
   rows = recipe_listing(catalog, profile, running_models())
   write_list_cache(rows)
@@ -1861,7 +1735,7 @@ def cmd_list(argv):
   gpu = profile["gpus"][0]["family"] if profile["gpus"] else "no GPU"
   say(f"Catalog {catalog.version} · this machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}")
   for row in rows:
-    marks = [mark for mark, on in (("best", row["best"]), ("running", row["active"]), ("installed", row["installed"]), ("local override", row["override"])) if on]
+    marks = [mark for mark, on in (("best", row["best"]), ("running", row["active"]), ("installed", row["installed"])) if on]
     tier = f" · third-party ({row['publisher']})" if row["tier"] == "third-party" else ""
     say(f"{'●' if row['available'] else '○'} {row['id']}{' [' + ', '.join(marks) + ']' if marks else ''}")
     say(f"    {row['name']} on {row['runtime']}{tier} — {row['summary']}")
@@ -1873,20 +1747,6 @@ def cmd_list(argv):
 def _unix_ms(value):
   value = (value or "").lstrip("@")
   return int(value) * 1000 if value.isdigit() else None
-
-
-def latest_run(rid):
-  runs = runs_dir()
-  if not os.path.isdir(runs):
-    return None
-  names = sorted(name for name in os.listdir(runs) if run_recipe_id(name) == rid)
-  if not names:
-    return None
-  try:
-    with open(os.path.join(runs, names[-1])) as handle:
-      return json.load(handle)
-  except (OSError, ValueError):
-    return None
 
 
 def start_fit(manifest, profile):
@@ -1903,7 +1763,7 @@ def start_fit(manifest, profile):
   return False, "Not enough memory"
 
 
-def model_record(rid, manifest, catalog=None, profile=None):
+def model_record(rid, manifest, profile):
   props = unit_props(rid, "ActiveState", "SubState", "Result", "InactiveExitTimestamp", "ActiveExitTimestamp")
   unit = props.get("ActiveState", "inactive") or "inactive"
   # A removal in progress outranks the unit's own state, which passes
@@ -1913,10 +1773,8 @@ def model_record(rid, manifest, catalog=None, profile=None):
     unit = "removing"
   recipe = manifest["recipe"]
   vendor = recipe.get("vendor", "")
-  if not vendor and catalog:
-    vendor = catalog.recipes.get(rid, {}).get("vendor", "")
   observed = manifest.get("observed") or {}
-  fits, fit_reason = (True, "") if unit in ("active", "activating", "deactivating", "removing") or profile is None else start_fit(manifest, profile)
+  fits, fit_reason = (True, "") if unit in ("active", "activating", "deactivating", "removing") else start_fit(manifest, profile)
   error = _read(error_path(rid))
   # A memory refusal isn't a failure to show: play is greyed out with its
   # reason before a start is even tried.
@@ -1941,7 +1799,6 @@ def model_record(rid, manifest, catalog=None, profile=None):
     "result": props.get("Result", ""),
     "port": port_for(rid),
     "endpoint": endpoint(rid),
-    "autostart": autostart_enabled(rid),
     "catalog_version": manifest.get("catalog", {}).get("version"),
     "observed": observed or None,
     # When the current start or stop began, and how long the last load took:
@@ -1953,10 +1810,8 @@ def model_record(rid, manifest, catalog=None, profile=None):
   }
 
 
-def status_record():
-  catalog = load_catalog()
-  profile = machine_profile()
-  models = {rid: model_record(rid, load_model(rid), catalog, profile) for rid in known_models()}
+def status_record(catalog, profile):
+  models = {rid: model_record(rid, load_model(rid), profile) for rid in known_models()}
   record = {
     "models": models,
     "last": last_model_id(),
@@ -1964,16 +1819,14 @@ def status_record():
     "catalog_version": catalog.version,
     "best": None,
   }
-  if catalog:
-    try:
-      profile = machine_profile()
-      record["best"] = resolve_best(catalog, profile, choose_gpu(profile))[0]
-    except LocalError:
-      pass
+  try:
+    record["best"] = resolve_best(catalog, profile, choose_gpu(profile))[0]
+  except LocalError:
+    pass
   return record
 
 
-def write_status(transitions=None, pending=None):
+def write_status(catalog, profile, transitions=None, pending=None):
   """Rewrite status.json, which the agents panel watches. `transitions` reports
   a start or stop before systemd reaches it, so a click shows at once;
   `pending` describes a model being set up before its manifest is saved.
@@ -1983,11 +1836,11 @@ def write_status(transitions=None, pending=None):
   ensure_dir(state_dir())
   with open(os.path.join(state_dir(), "status.lock"), "w") as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
-    record = status_record()
+    record = status_record(catalog, profile)
     now = int(time.time() * 1000)
-    for rid, (recipe, manifest) in (pending or {}).items():
-      run = latest_run(rid) or {}
-      record["models"][rid] = model_record(rid, {**manifest, "observed": run.get("observed")})
+    for rid, manifest in (pending or {}).items():
+      previous = load_model(rid) or {}
+      record["models"][rid] = model_record(rid, {**manifest, "observed": previous.get("observed")}, profile)
     for rid, unit in (transitions or {}).items():
       if rid in record["models"] and record["models"][rid]["unit"] != "removing":
         record["models"][rid]["unit"] = unit
@@ -2005,6 +1858,8 @@ def cmd_status(argv):
   parser.add_argument("--started", metavar="RECIPE", help=argparse.SUPPRESS)
   parser.add_argument("--stopped", metavar="RECIPE", help=argparse.SUPPRESS)
   args = parser.parse_args(argv)
+  catalog = load_catalog()
+  profile = machine_profile()
   if args.write:
     # From the units' hooks, which run before systemd finishes the transition
     # they report, so the outcome is passed in rather than read back.
@@ -2019,9 +1874,9 @@ def cmd_status(argv):
       else:
         record_error(args.stopped, f"Stopped unexpectedly ({result})")
         transitions[args.stopped] = "failed"
-    write_status(transitions)
+    write_status(catalog, profile, transitions)
     return 0
-  record = status_record()
+  record = status_record(catalog, profile)
   if args.json:
     print(json.dumps(record, indent=2))
     return 0
@@ -2031,7 +1886,7 @@ def cmd_status(argv):
   for rid, model in record["models"].items():
     state = {"active": "running", "activating": "loading", "deactivating": "stopping"}.get(model["unit"], model["unit"])
     say(f"{rid} ({model['name']}) on {model['runtime']}: {state}")
-    say(f"  endpoint {model['endpoint']} · model id {rid} · context {model['ctx']} · autostart {'on' if model['autostart'] else 'off'}")
+    say(f"  endpoint {model['endpoint']} · model id {rid} · context {model['ctx']}")
     if model["unit"] == "failed":
       say(f"  last failure: {model['result']}")
       tail = journal_tail(rid, 5)
@@ -2047,12 +1902,14 @@ def cmd_stop(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local stop")
   parser.add_argument("recipe", nargs="?", help="the model to stop (default: every running one)")
   args = parser.parse_args(argv)
+  catalog = load_catalog()
+  profile = machine_profile()
   targets = [resolve_model(args.recipe)["recipe_id"]] if args.recipe else sorted(running_models())
   if not targets:
     say("No local model is running")
     return 0
   # A model takes seconds to let go of its memory; the panel says so meanwhile.
-  write_status({rid: "deactivating" for rid in targets})
+  write_status(catalog, profile, {rid: "deactivating" for rid in targets})
   for rid in targets:
     started = time.time()
     systemctl("stop", unit_name(rid))
@@ -2062,7 +1919,7 @@ def cmd_stop(argv):
   # Give the memory back whole, not as cached weights the next model has to
   # fight the kernel for.
   evict_idle_weights()
-  write_status()
+  write_status(catalog, profile)
   say(f"Stopped {', '.join(targets)}")
   return 0
 
@@ -2070,33 +1927,32 @@ def cmd_stop(argv):
 def cmd_start(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local start")
   parser.add_argument("recipe", nargs="?", help="the model to start (default: the last one started)")
-  parser.add_argument("--setup", action="store_true", help="set the recipe up first when it isn't yet")
   args = parser.parse_args(argv)
-  if args.setup and args.recipe and ID_RE.match(args.recipe) and not load_model(args.recipe):
-    return cmd_use([args.recipe])
+  catalog = load_catalog()
+  profile = machine_profile()
   # Admission is serialized with use and remove: two starts checking the same
   # free memory at once would both pass and together overcommit it.
   with Lock():
-    return _start(args)
+    return _start(args, catalog, profile)
 
 
-def _start(args):
+def _start(args, catalog, profile):
   manifest = resolve_model(args.recipe)
   rid = manifest["recipe_id"]
   if unit_active(rid):
     say(f"{rid} is already running at {endpoint(rid)}")
     return 0
-  gpu = choose_gpu(machine_profile(), manifest["gpu"])
+  gpu = choose_gpu(profile, manifest["gpu"])
   # Shown as loading from the click on; the memory checks below take seconds.
   clear_error(rid)
   started = time.time()
-  write_status({rid: "activating"})
+  write_status(catalog, profile, {rid: "activating"})
   evict_idle_weights(keep=[rid])
   try:
     check_headroom(manifest["variant"], gpu)
   except LocalError as error:
     record_error(rid, error.short)
-    write_status()
+    write_status(catalog, profile)
     raise
   systemctl("reset-failed", unit_name(rid))
   result = systemctl("start", unit_name(rid))
@@ -2106,7 +1962,7 @@ def _start(args):
   else:
     # Timed from the same moment the panel's bar starts from, the click.
     write_atomic(load_seconds_path(rid), f"{time.time() - started:.1f}\n")
-  write_status()
+  write_status(catalog, profile)
   if result.returncode != 0:
     raise LocalError(f"{rid} didn't start: {result.stderr.strip()}\n{journal_tail(rid)}")
   if manifest.get("unchecked"):
@@ -2115,7 +1971,7 @@ def _start(args):
     except LocalError as error:
       systemctl("stop", unit_name(rid))
       record_error(rid, error.short)
-      write_status()
+      write_status(catalog, profile)
       raise
     del manifest["unchecked"]
     write_atomic(model_manifest_path(rid), json.dumps(manifest, indent=2) + "\n")
@@ -2123,35 +1979,12 @@ def _start(args):
   return 0
 
 
-def cmd_autostart(argv):
-  parser = argparse.ArgumentParser(prog="omarchy agent local autostart")
-  parser.add_argument("mode", choices=("on", "off"))
-  parser.add_argument("recipe", nargs="?", help="the model (default: the last one started)")
-  args = parser.parse_args(argv)
-  with Lock():
-    manifest = resolve_model(args.recipe)
-    rid = manifest["recipe_id"]
-    flag = autostart_flag(rid)
-    # Session autostart runs the unit directly, past the checks a setup that
-    # was never started still owes; its first start has to come from start.
-    if args.mode == "on" and manifest.get("unchecked"):
-      raise LocalError(f"{rid} hasn't been started yet. Start it once first: omarchy agent local start {rid}")
-    if args.mode == "on":
-      write_atomic(flag, "on\n")
-    elif os.path.exists(flag):
-      os.unlink(flag)
-    gpu = choose_gpu(machine_profile(), manifest["gpu"])
-    text = render_container(rid, manifest["recipe"], manifest["runtime"], manifest["variant"], manifest["roles"], gpu, args.mode == "on", manifest.get("fileset"))
-    write_unit_files(rid, text)
-    write_status()
-  say(f"Autostart {args.mode}: {rid} {'starts' if args.mode == 'on' else 'no longer starts'} with your session")
-  return 0
-
-
 def cmd_remove(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local remove")
   parser.add_argument("recipe")
   args = parser.parse_args(argv)
+  catalog = load_catalog()
+  profile = machine_profile()
   rid = args.recipe
   if not ID_RE.match(rid):
     raise LocalError("Not a recipe id")
@@ -2164,7 +1997,7 @@ def cmd_remove(argv):
     expected = (expected_stop_seconds(rid) or 10 if running else 0) + size_gib * removal_rate()
     if manifest:
       write_atomic(removing_path(rid), f"{expected:.1f}\n")
-      write_status()
+      write_status(catalog, profile)
     started = time.time()
     try:
       if running:
@@ -2182,11 +2015,11 @@ def cmd_remove(argv):
       if os.path.exists(removing_path(rid)):
         os.unlink(removing_path(rid))
         # Also when interrupted: the panel would otherwise stay on Removing.
-        write_status()
-  refresh_list_cache()
-  write_status()
-  removed_runs, freed, images = result
-  say(f"Removed {rid} in {time.time() - started:.0f}s: {removed_runs} run manifest(s), {gib(freed):.1f} GiB of weights no other recipe uses" + (f", {len(images)} image(s)" if images else ""))
+        write_status(catalog, profile)
+  refresh_list_cache(catalog, profile)
+  write_status(catalog, profile)
+  freed, images = result
+  say(f"Removed {rid} in {time.time() - started:.0f}s: {gib(freed):.1f} GiB of weights no other recipe uses" + (f", {len(images)} image(s)" if images else ""))
   return 0
 
 
@@ -2204,7 +2037,7 @@ def removal_rate():
 
 def _remove_files(rid):
   write_unit_files(rid, None)
-  for path in (autostart_flag(rid), error_path(rid), stop_seconds_path(rid), load_seconds_path(rid)):
+  for path in (error_path(rid), stop_seconds_path(rid), load_seconds_path(rid)):
     if os.path.exists(path):
       os.unlink(path)
   if _read(os.path.join(state_dir(), "last")) == rid:
@@ -2212,18 +2045,8 @@ def _remove_files(rid):
   ports = load_ports()
   if ports.pop(rid, None) is not None:
     write_atomic(ports_path(), json.dumps(ports, indent=2, sort_keys=True) + "\n")
-  removed_runs = 0
-  removed_images = set()
-  for name in os.listdir(runs_dir()) if os.path.isdir(runs_dir()) else []:
-    if run_recipe_id(name) == rid:
-      path = os.path.join(runs_dir(), name)
-      try:
-        with open(path) as handle:
-          removed_images.add(json.load(handle)["image"])
-      except (OSError, ValueError, KeyError):
-        pass
-      os.unlink(path)
-      removed_runs += 1
+  manifest = load_model(rid)
+  removed_images = {manifest["image"]} if manifest else set()
   shutil.rmtree(os.path.join(data_dir(), "models", rid), ignore_errors=True)
   freed = 0
   # A blob stays only while another recipe's files link it. A link from
@@ -2243,24 +2066,17 @@ def _remove_files(rid):
       if info.st_nlink == 1:
         freed += info.st_size
       os.unlink(path)
-  kept_images = set()
-  for name in os.listdir(runs_dir()) if os.path.isdir(runs_dir()) else []:
-    try:
-      with open(os.path.join(runs_dir(), name)) as handle:
-        kept_images.add(json.load(handle)["image"])
-    except (OSError, ValueError, KeyError):
-      pass
+  kept_images = {load_model(other)["image"] for other in known_models() if other != rid}
   images = []
   for image in sorted(removed_images - kept_images):
     if subprocess.run(["podman", "rmi", image], capture_output=True).returncode == 0:
       images.append(image)
-  return removed_runs, freed, images
+  return freed, images
 
 
 def cmd_profile(argv):
   argparse.ArgumentParser(prog="omarchy agent local profile").parse_args(argv)
   profile = machine_profile()
-  write_profile_cache(profile)
   print(json.dumps(profile, indent=2))
   return 0
 
@@ -2270,8 +2086,9 @@ def cmd_refresh(argv):
   parser.add_argument("--quiet", action="store_true")
   args = parser.parse_args(argv)
   catalog = load_catalog()
-  refresh_list_cache()
-  write_status()
+  profile = machine_profile()
+  refresh_list_cache(catalog, profile)
+  write_status(catalog, profile)
   if not args.quiet:
     say(f"Catalog {catalog.version}")
   return 0
@@ -2369,133 +2186,13 @@ def cmd_overlay(argv):
   return 0
 
 
-BENCH_SHORT = "Write a bash function that prints the 20 largest files under a directory, human-readable sizes, handling spaces in names. Just the code."
-BENCH_LONG_QUESTION = "Above are shell scripts from a Linux desktop project. Pick the one with the most fragile error handling, name it, and rewrite its worst function to be robust. Show the code."
-
-
-def bench_request(prompt, model, key, max_tokens=512):
-  body = {
-    "model": model,
-    "messages": [{"role": "user", "content": prompt}],
-    "max_tokens": max_tokens,
-    "temperature": 0,
-    "stream": True,
-    "stream_options": {"include_usage": True},
-    "chat_template_kwargs": {"enable_thinking": False},
-  }
-  request = urllib.request.Request(
-    f"{endpoint(model)}/chat/completions",
-    data=json.dumps(body).encode(),
-    headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-  )
-  start = time.monotonic()
-  first = None
-  usage = None
-  chunks = 0
-  with urllib.request.urlopen(request, timeout=1800) as response:
-    for raw in response:
-      line = raw.decode(errors="replace").strip()
-      if not line.startswith("data:") or line[5:].strip() == "[DONE]":
-        continue
-      event = json.loads(line[5:])
-      usage = event.get("usage") or usage
-      for choice in event.get("choices", []):
-        delta = choice.get("delta", {})
-        if delta.get("content") or delta.get("reasoning_content"):
-          first = first or time.monotonic()
-          chunks += 1
-  end = time.monotonic()
-  prompt_tokens = (usage or {}).get("prompt_tokens")
-  completion = (usage or {}).get("completion_tokens", chunks)
-  ttft = (first or end) - start
-  decode = end - (first or end)
-  return {
-    "prompt_tokens": prompt_tokens,
-    "completion_tokens": completion,
-    "ttft_s": round(ttft, 2),
-    "prefill_tok_s": round(prompt_tokens / ttft, 1) if prompt_tokens and ttft else None,
-    "decode_tok_s": round((completion - 1) / decode, 1) if decode > 0 and completion > 1 else None,
-    "total_s": round(end - start, 2),
-  }
-
-
-def cmd_bench(argv):
-  parser = argparse.ArgumentParser(prog="omarchy agent local bench")
-  parser.add_argument("recipe", nargs="?", help="the running model (default: the last one started)")
-  parser.add_argument("--output", help="write the measurement record here (default: print it)")
-  args = parser.parse_args(argv)
-  active = resolve_model(args.recipe, running_only=True)
-  catalog = load_catalog()
-  corpus = os.path.join(catalog.root, "bench", "context.txt") if catalog else ""
-  if not os.path.isfile(corpus):
-    raise LocalError("The catalog has no bench/context.txt prompt corpus")
-  with open(corpus, encoding="utf-8") as handle:
-    context = handle.read()
-  with open(key_path()) as handle:
-    key = handle.read().strip()
-  rid = active["recipe_id"]
-  gpu = choose_gpu(machine_profile(), active["gpu"])
-  low_ram = [free_memory(gpu)[0]]
-  stop = threading.Event()
-
-  def sample():
-    while not stop.is_set():
-      low_ram.append(free_memory(gpu)[0])
-      stop.wait(0.5)
-
-  sampler = threading.Thread(target=sample, daemon=True)
-  sampler.start()
-  say(f"Benchmarking {rid}: short prompt, then a ~32K-token prompt (greedy, thinking off, 512 tokens out)")
-  bench_request("Say ok.", rid, key, max_tokens=8)
-  short = bench_request(BENCH_SHORT, rid, key)
-  say(f"  short: decode {short['decode_tok_s']} tok/s, first token {short['ttft_s']}s")
-  long = bench_request(context + "\n\n" + BENCH_LONG_QUESTION, rid, key)
-  say(f"  long ({long['prompt_tokens']} tokens): first token {long['ttft_s']}s, prefill {long['prefill_tok_s']} tok/s, decode {long['decode_tok_s']} tok/s")
-  stop.set()
-  sampler.join()
-  mem = meminfo()
-  record = {
-    "recipe": rid,
-    "measured_at": time.strftime("%Y-%m-%d"),
-    "catalog_version": active.get("catalog", {}).get("version"),
-    "image": active["image"],
-    "ctx": active["variant"]["ctx"],
-    "machine": {
-      "platform": active["profile"]["platform"],
-      "gpu": active["gpu"],
-      "ram_class": active["profile"]["ram_class"],
-      "kernel": os.uname().release,
-      "cpu": next((line.split(":", 1)[1].strip() for line in _read("/proc/cpuinfo").splitlines() if line.startswith("model name")), ""),
-    },
-    "memory": {
-      "observed_at_load_gib": (active.get("observed") or {}).get("ram_used_gib"),
-      "min_available_during_bench_gib": round(min(low_ram), 1),
-      "total_gib": round(gib(mem.get("MemTotal", 0)), 1),
-    },
-    "load_seconds": (active.get("observed") or {}).get("load_seconds"),
-    "artifacts": [{"repo": f["repo"], "revision": f["revision"], "path": f["path"], key_name: f[key_name]} for f in active["files"] for key_name in (("sha256",) if "sha256" in f else ("git_oid",))],
-    "short": short,
-    "long": long,
-    "method": "omarchy agent local bench: 1 warmup, then short and ~32K-token prompts from the catalog's bench/context.txt, temperature 0, enable_thinking false, 512 tokens out, streamed",
-  }
-  text = toml_dumps(record)
-  if args.output:
-    write_atomic(args.output, text)
-    say(f"Wrote {args.output}")
-  else:
-    print(text)
-  return 0
-
-
 COMMANDS = {
   "use": cmd_use,
   "list": cmd_list,
   "status": cmd_status,
   "start": cmd_start,
   "stop": cmd_stop,
-  "autostart": cmd_autostart,
   "remove": cmd_remove,
-  "bench": cmd_bench,
   # Plumbing for the panel, omarchy agent, omarchy update and catalog
   # maintainers; they run but aren't listed.
   "profile": cmd_profile,
@@ -2510,9 +2207,7 @@ SUMMARIES = {
   "status": "Show the models that are set up, and whether a better one is recommended",
   "start": "Start a model that's set up, the last one started by default",
   "stop": "Stop a model, or every running one",
-  "autostart": "Start a model with your session, or stop doing so",
   "remove": "Remove a model's weights, manifests and unused image",
-  "bench": "Measure a running model and write a measurement record",
 }
 
 

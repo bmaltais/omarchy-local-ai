@@ -9,7 +9,7 @@ port = 8080
 command = ["gufo", "serve", "llm", "--host", "0.0.0.0", "--port", "8080"]
 shell = "/bin/bash"
 key_on_cmdline = true
-health = { path = "/ready", probe = ["/bin/sh", "-c", "curl -fsS -o /dev/null -H \"Authorization: Bearer $OMARCHY_LOCAL_KEY\" http://127.0.0.1:8080/ready"] }
+health = { probe = ["/bin/sh", "-c", "curl -fsS -o /dev/null -H \"Authorization: Bearer $OMARCHY_LOCAL_KEY\" http://127.0.0.1:8080/ready"] }
 run = { devices = ["render", "kfd"], group_add = "keep-groups", memlock = "unlimited" }
 reserved = ["--api-key", "--host", "-i", "--port", "-p", "--trace", "--cache-disk"]
 

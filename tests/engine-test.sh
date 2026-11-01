@@ -24,6 +24,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.environ["ENGINE_ROOT"])
 import agent_local as a
+import runpy
+bench = SimpleNamespace(**runpy.run_path(str(Path(os.environ["ENGINE_ROOT"]) / "tools/bench")))
 
 
 def check(name, condition, detail=""):
@@ -51,7 +53,7 @@ def raises(name, fn, message=""):
 runtime = {
   "image": "registry.example/test/server@sha256:" + "a" * 64,
   "tier": "third-party", "review": "reviews/server.toml", "port": 8080,
-  "health": {"path": "/health", "probe": ["curl", "http://localhost:8080/health"]},
+  "health": {"probe": ["curl", "http://localhost:8080/health"]},
   "command": ["server"], "reserved": ["--host", "API_KEY"],
   "inputs": {"model": {"arg": "--model"}, "draft": {"arg": "--draft"},
              "ctx": {"arg": "--ctx"}, "alias": {"arg": "--alias"}, "key": {"env": "API_KEY"}},
@@ -103,9 +105,9 @@ check("identical best selectors are rejected", any("same selectors" in e for e i
 check("best cannot recommend an unmeasured class", any("no measured" in e for e in a.validate_best({"class": [dict(entry, ram_class=128)]}, {"model": recipe})))
 
 catalog = SimpleNamespace(recipes={"model": copy.deepcopy(recipe)}, runtimes={"server": runtime}, best={"class": [entry]})
-platform_entry = {"platform": "x86", "ram_class": 64, "recipes": ["other"]}
-check("GPU class takes precedence over platform-only class", a.match_class({"class": [platform_entry, entry]}, profile, gpu) == entry)
-raises("equally specific best classes raise", lambda: a.match_class({"class": [entry, dict(entry, recipes=["other"])]}, profile, gpu), "equally specific")
+check("best requires an exact GPU and RAM pair", a.match_class({"class": [entry]}, profile, dict(gpu, family="other")) is None and a.match_class({"class": [entry]}, dict(profile, ram_class=128), gpu) is None)
+check("best requires a GPU selector", any(".gpu" in e for e in a.validate_best({"class": [{"ram_class": 64, "recipes": ["model"]}]}, {"model": recipe})))
+check("best rejects platform selectors", any(".platform" in e for e in a.validate_best({"class": [dict(entry, platform="x86")]}, {"model": recipe})))
 catalog.recipes["model"]["variant"] = [variant, dict(variant, ctx=8192), dict(variant, ctx=16384, peak_ram_gib=60)]
 check("largest fitting context wins", a.resolve_best(catalog, profile, gpu)[1]["ctx"] == 8192)
 for reason, bad in (("non-fitting variants", dict(recipe, variant=[dict(variant, peak_gpu_gib=100)])),
@@ -155,7 +157,7 @@ record = {"recipe": "model", "method": 'say "hello"\nnext\\line', "ctx": 4096,
           "machine": {"platform": "x86", "flags": ["a", "b"]}, "memory": {"peak": 16.5},
           "artifacts": [{"path": "one", "sha256": "a" * 64}, {"path": "two", "git_oid": oid}],
           "short": {"ttft": 1.5, "ok": True}}
-check("bench-shaped TOML round-trips tables, arrays and escaped strings", tomllib.loads(a.toml_dumps(record)) == record)
+check("bench-shaped TOML round-trips tables, arrays and escaped strings", tomllib.loads(bench.toml_dumps(record)) == record)
 
 # Models run side by side, each on its own port; an agent pointed at one must
 # never land on another, so ports are distinct, stable, and freed on removal.
@@ -167,13 +169,7 @@ ports.pop("model-a")
 a.write_atomic(a.ports_path(), json.dumps(ports))
 check("a removed model's port is reused before a new one", a.port_for("model-c") == first and a.port_for("model-b") == second)
 
-# Run manifests are matched to their recipe whole: removing "bar" must not
-# take "foo-bar"'s history with it.
-check("a run file name yields its whole recipe id", a.run_recipe_id("20261101T120000-foo-bar.json") == "foo-bar")
-check("a run of foo-bar is not a run of bar", a.run_recipe_id("20261101T120000-foo-bar.json") != "bar")
-
-# A replayed manifest is user-editable, so its file list is validated before
-# anything is written: no escaping destinations, only real hashes.
+# Materialized file lists cannot escape the store and must carry real hashes.
 good = {"dest": "w/model.gguf", "size": 3, "sha256": "a" * 64}
 for name, record, roles in (
   ("an escaping destination", {**good, "dest": "../../.bashrc"}, {}),
@@ -209,13 +205,13 @@ rt = copy.deepcopy(runtime)
 rt["inputs"]["alias"] = {"env": "MODEL_ALIAS"}
 rt["health"]["probe"] = ["probe", hostile]
 roles = {"model": hostile}
-text = a.render_container("model", changed, rt, variant, roles, gpu)
+text = a.render_container("model", changed, rt, variant, roles, gpu, "a" * 16)
 check("server args escape systemd substitutions, quotes and backslashes", '"50%% $$HOME \\"quoted space\\" \\\\tail"' in text)
 check("probe escapes substitutions while retaining JSON argv", "HealthCmd=" + json.dumps(["probe", hostile]).replace("%", "%%").replace("$", "$$") in text)
 # Map model through env to pass the same hostile value through Environment=.
 env_rt = copy.deepcopy(rt)
 env_rt["inputs"]["model"] = {"env": "MODEL_PATH"}
-env_text = a.render_container("model", changed, env_rt, variant, roles, gpu)
+env_text = a.render_container("model", changed, env_rt, variant, roles, gpu, "a" * 16)
 check("environment values are quoted and escaped", 'Environment="MODEL_PATH=/models/50%% $$HOME \\"quoted space\\" \\\\tail"' in env_text)
 for location in ("name", "args", "env", "command"):
   r, t = copy.deepcopy(changed), copy.deepcopy(env_rt)
@@ -228,11 +224,11 @@ for location in ("name", "args", "env", "command"):
     role_values["model"] = "bad\npath"
   else:
     t["command"] = ["bad\ncommand"]
-  raises(f"renderer rejects newline in {location}", lambda: a.render_container("model", r, t, variant, role_values, gpu), "control characters")
+  raises(f"renderer rejects newline in {location}", lambda: a.render_container("model", r, t, variant, role_values, gpu, "a" * 16), "control characters")
 bad_probe = copy.deepcopy(rt)
 bad_probe["health"]["probe"] = ["bad\nprobe"]
 try:
-  a.render_container("model", changed, bad_probe, variant, roles, gpu)
+  a.render_container("model", changed, bad_probe, variant, roles, gpu, "a" * 16)
 except a.LocalError:
   check("renderer rejects probe newline", True)
 else:
@@ -265,7 +261,7 @@ repo = root / "catalog-fixture"
 repo.mkdir()
 def write_toml(path, value):
   path.parent.mkdir(parents=True, exist_ok=True)
-  path.write_text(a.toml_dumps(value))
+  path.write_text(bench.toml_dumps(value))
 write_toml(repo / "catalog.toml", {"schema": 1, "version": "0.1.0"})
 write_toml(repo / "best.toml", {"class": [entry]})
 write_toml(repo / "runtimes/server.toml", runtime)
@@ -277,16 +273,6 @@ check("catalog root can be overridden", a.load_catalog().root == str(repo))
 write_toml(repo / "catalog.toml", {"schema": 999})
 raises("invalid installed catalog is rejected", a.load_catalog, "failed validation")
 write_toml(repo / "catalog.toml", {"schema": 1, "version": "0.1.0"})
-write_toml(Path(a.config_dir()) / "runtimes/bad.toml", {"image": "untrusted"})
-raises("local overrides are validated", a.load_catalog, "overrides are invalid")
-(Path(a.config_dir()) / "runtimes/bad.toml").unlink()
-
-# Existing setups predate catalog versions; panel status must still be readable.
-legacy = {"recipe": recipe, "runtime_id": "server", "image": runtime["image"],
-          "variant": variant, "catalog": {"commit": "a" * 40}}
-with patch.object(a, "unit_props", return_value={}):
-  check("legacy commit-only manifest has an unknown catalog version", a.model_record("legacy", legacy)["catalog_version"] is None)
-
 # The package command follows /usr/bin-style symlinks to find its engine.
 link = root / "bin/omarchy-local-ai"
 link.parent.mkdir()
@@ -323,4 +309,61 @@ with patch.object(a, "unit_active", return_value=False), patch.object(a, "write_
   except KeyboardInterrupt:
     pass
 check("an interrupted removal keeps the model's manifest", Path(a.model_manifest_path("halfway")).exists() and not Path(a.removing_path("halfway")).exists())
+
+# Validation accepts exactly the run-option shapes the generator implements.
+for option, value in (("devices", "render"), ("devices", {"render": True}),
+                      ("group_add", ["keep-groups"]), ("memlock", ["unlimited"])):
+  changed = dict(runtime, run={option: value})
+  check(f"run option {option} rejects {value!r}", bool(a.validate_runtime("server", changed)))
+check("supported run-option shapes validate", not a.validate_runtime("server", dict(runtime, run={"devices": ["render", "kfd"], "group_add": "keep-groups", "memlock": "unlimited"})))
+for fileset in (None, "", "../outside", "a" * 16 + "\n"):
+  raises("renderer requires a safe file set", lambda: a.render_container("model", recipe, runtime, variant, {"model": "model.gguf"}, gpu, fileset), "file set")
+check("unit mounts the exact immutable file set", "models/model/" + "a" * 16 + ":/models:ro" in text)
+check("unit injects key through Podman secrets", f"Secret={a.SECRET},type=env,target={a.KEY_ENV}" in text and f"Secret={a.SECRET},type=env,target=API_KEY" in text)
+
+# A saved setup is installed even if it has never started. Replacing it only
+# changes the current manifest, and removal considers surviving manifests.
+manifest = {"schema": 1, "recipe_id": "current", "recipe": recipe, "runtime": runtime,
+            "runtime_id": "server", "image": runtime["image"], "variant": variant,
+            "files": [], "roles": {"model": "model.gguf"}, "fileset": "a" * 16,
+            "gpu": gpu["family"], "profile": profile, "catalog": {"version": "0.1.0"},
+            "observed": {"load_seconds": 12, "ram_used_gib": 16, "gpu_used_gib": 16}}
+path = a.save_model(manifest, started=False)
+check("a current manifest alone means installed", a.recipe_installed("current"))
+updated = dict(manifest, variant=dict(variant, ctx=8192))
+check("saving replaces the same current manifest", a.save_model(updated, started=False) == path and a.load_model("current")["variant"]["ctx"] == 8192)
+with patch.object(a, "known_models", return_value=["current"]), patch.object(a, "unit_props", return_value={}), patch.object(a, "free_memory", return_value=(64, 48)):
+  pending = a.write_status(a.load_catalog(), profile, {"current": "activating"}, pending={"current": dict(updated, observed=None)})
+check("pending activation uses the current manifest's observations", pending["models"]["current"]["observed"] == manifest["observed"] and pending["models"]["current"]["unit"] == "activating")
+a.save_model(dict(manifest, recipe_id="survivor"), started=False)
+with patch.object(a, "known_models", return_value=["current", "survivor"]), patch.object(a, "write_unit_files"), patch.object(a.subprocess, "run") as rmi:
+  a._remove_files("current")
+  check("removal retains an image used by a surviving current manifest", not rmi.called)
+with patch.object(a, "known_models", return_value=["current"]), patch.object(a, "write_unit_files"), patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as rmi:
+  a._remove_files("current")
+  check("removal drops an image no surviving manifest uses", rmi.call_args.args[0] == ["podman", "rmi", runtime["image"]])
+
+# Setups saved while memory is busy still owe authentication/model-ID checks.
+cat = a.load_catalog()
+rid = next(iter(cat.recipes))
+rec = cat.recipes[rid]
+rt = cat.runtimes[rec["runtime"]]
+with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "compatibility", return_value=(variant, "")), patch.object(a, "preflight"), patch.object(a, "build_artifacts", return_value=([], {"model": "model.gguf"})), patch.object(a, "materialize", return_value="a" * 16), patch.object(a, "ensure_image"), patch.object(a, "ensure_key", return_value="test-key"), patch.object(a, "unit_active", return_value=False), patch.object(a, "check_headroom", side_effect=a.LocalError(a.NOT_ENOUGH_MEMORY)), patch.object(a, "write_unit_files"), patch.object(a, "refresh_list_cache"), patch.object(a, "write_status"), patch.object(a, "prune_filesets"):
+  check("memory-busy first setup succeeds without activation", a.cmd_use([rid]) == 0 and a.load_model(rid)["unchecked"])
+for response, succeeds in (([(200, b"")], False),
+                           ([(401, b""), (200, b'{"data":[{"id":"other"}]}')], False),
+                           ([(401, b""), (200, json.dumps({"data": [{"id": rid}]}).encode())], True)):
+  with patch.object(a, "unit_active", return_value=False), patch.object(a, "write_status"), patch.object(a, "evict_idle_weights"), patch.object(a, "check_headroom"), patch.object(a, "ensure_key", return_value="test-key"), patch.object(a, "http_status", side_effect=response) as http, patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0)) as systemctl:
+    if succeeds:
+      a._start(SimpleNamespace(recipe=rid), cat, profile)
+      check("first checked start clears the unchecked flag", not a.load_model(rid).get("unchecked") and http.call_count == 2)
+    else:
+      raises("first start refuses failed authentication or wrong model ID", lambda: a._start(SimpleNamespace(recipe=rid), cat, profile))
+      check("failed first check stops the model and retains its check obligation", ("stop", a.unit_name(rid)) in [call.args for call in systemctl.call_args_list] and a.load_model(rid)["unchecked"])
+
+# Refresh shares one catalog/profile across both caches.
+with patch.object(a, "load_catalog", return_value=cat) as load, patch.object(a, "machine_profile", return_value=profile) as machine, patch.object(a, "known_models", return_value=[]), patch.object(a, "running_models", return_value=set()):
+  a.cmd_refresh(["--quiet"])
+  check("refresh loads catalog and machine profile once", load.call_count == machine.call_count == 1)
+
 PY
