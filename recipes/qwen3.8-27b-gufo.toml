@@ -23,6 +23,12 @@ license = "apache-2.0"
 files = ["Qwen3.8-27B-DFlash2-Q4_K_M.gguf"]
 draft = "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
 
+# Measured with a 222K-token prompt: about 55 GiB at peak, 54 GiB at load.
+[[variant]]
+ctx = 262144
+peak_ram_gib = 58
+peak_gpu_gib = 34
+
 [[variant]]
 ctx = 131072
 peak_ram_gib = 48
