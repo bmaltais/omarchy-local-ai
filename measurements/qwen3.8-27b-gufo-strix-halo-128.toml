@@ -1,12 +1,47 @@
 recipe = "qwen3.8-27b-gufo"
-status = "provisional: Gufo's published figures for Q4_K_XL; replace with `omarchy agent local bench` output for this recipe (Q8_K_XL)"
-source = "https://github.com/gufo-org/gufo (README, 0.23.0)"
+measured_at = "2026-11-01"
+catalog_commit = "106b9463be3f1608922eb486de16fd72566f19e8"
+image = "ghcr.io/gufo-org/toolboxes/gufo-runtime@sha256:ec8c3f0bf06100304f5105590cfe98d62bf21ff133e8c2dea95955eb4028ddb2"
+ctx = 131072
+load_seconds = 5.0
+method = "omarchy agent local bench: 1 warmup, then short and ~32K-token prompts from the catalog's bench/context.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
 
 [machine]
+platform = "x86"
 gpu = "amd-strix-halo"
 ram_class = 128
+kernel = "7.2.14-1-omarchy"
+cpu = "AMD RYZEN AI MAX+ PRO 395 w/ Radeon 8060S"
 
-[published]
-quant = "UD-Q4_K_XL"
-prefill_tok_s = 648.89
-decode_tok_s = 71.55
+[memory]
+observed_at_load_gib = 46.1
+min_available_during_bench_gib = 67.1
+total_gib = 125.1
+
+[short]
+prompt_tokens = 41
+completion_tokens = 53
+ttft_s = 0.41
+prefill_tok_s = 99.0
+decode_tok_s = 26.0
+total_s = 2.41
+
+[long]
+prompt_tokens = 31705
+completion_tokens = 512
+ttft_s = 96.41
+prefill_tok_s = 328.9
+decode_tok_s = 14.0
+total_s = 132.95
+
+[[artifacts]]
+repo = "unsloth/Qwen3.8-27B-GGUF"
+revision = "4ca720788d1e01f1bff70c033e0d0028fd02e502"
+path = "Qwen3.8-27B-UD-Q8_K_XL.gguf"
+sha256 = "af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377"
+
+[[artifacts]]
+repo = "z-lab/Qwen3.8-27B-DFlash2-GGUF"
+revision = "2d9571f8ce46e151f61c6499c99dee6079e1d610"
+path = "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+sha256 = "1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd"

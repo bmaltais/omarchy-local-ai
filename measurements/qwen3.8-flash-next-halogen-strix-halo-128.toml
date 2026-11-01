@@ -1,30 +1,95 @@
 recipe = "qwen3.8-flash-next-halogen"
-status = "hand-measured; replace with `omarchy agent local bench` output from the generated unit"
 measured_at = "2026-11-01"
+catalog_commit = "106b9463be3f1608922eb486de16fd72566f19e8"
 image = "ghcr.io/peonist-ai/halogen-flash-server@sha256:273714ccb64dabb7fac0418ee1b6dd83eb57d2fd44cf286eb68a7c694a27c203"
 ctx = 131072
-method = "streamed chat completions, temperature 0, enable_thinking false, 512 tokens out; a 41-token prompt and a 31,705-token prompt of shell scripts (bench/context.txt)"
+load_seconds = 27.0
+method = "omarchy agent local bench: 1 warmup, then short and ~32K-token prompts from the catalog's bench/context.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
 
 [machine]
 platform = "x86"
 gpu = "amd-strix-halo"
 ram_class = 128
-cpu = "AMD RYZEN AI MAX+ PRO 395 w/ Radeon 8060S"
 kernel = "7.2.14-1-omarchy"
+cpu = "AMD RYZEN AI MAX+ PRO 395 w/ Radeon 8060S"
 
 [memory]
-ram_used_gib = 91
-gtt_used_gib = 20.5
-note = "halogen pins its weights; MemAvailable reported ~23 GiB while serving"
+observed_at_load_gib = 92.1
+min_available_during_bench_gib = 21.7
+total_gib = 125.1
 
 [short]
 prompt_tokens = 41
 completion_tokens = 54
-decode_tok_s = 60.4
+ttft_s = 0.55
+prefill_tok_s = 74.9
+decode_tok_s = 52.9
+total_s = 1.55
 
 [long]
 prompt_tokens = 31705
-ttft_s = 27.47
-prefill_tok_s = 1154.0
-decode_tok_s = 39.9
-total_s = 40.3
+completion_tokens = 512
+ttft_s = 19.74
+prefill_tok_s = 1606.5
+decode_tok_s = 41.3
+total_s = 32.11
+
+[[artifacts]]
+repo = "unsloth/Qwen3.8-Flash-Next-GGUF"
+revision = "766911a6b7369840a91dbcd95f9f997acaab6cd6"
+path = "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf"
+sha256 = "5ce89370720f8bf90890f439361282104c1aa1482d4013bb9a50923e758e71a4"
+
+[[artifacts]]
+repo = "unsloth/Qwen3.8-Flash-Next-GGUF"
+revision = "766911a6b7369840a91dbcd95f9f997acaab6cd6"
+path = "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00002-of-00003.gguf"
+sha256 = "577a38a2392b40ca2193cea502e1d92f60b8cd370675d308e0ec21885d9daaa7"
+
+[[artifacts]]
+repo = "unsloth/Qwen3.8-Flash-Next-GGUF"
+revision = "766911a6b7369840a91dbcd95f9f997acaab6cd6"
+path = "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00003-of-00003.gguf"
+sha256 = "d4634e6d84f0ebb0940be15c90d3790bf6464e3dea3a1cddc567dc0e83ad8833"
+
+[[artifacts]]
+repo = "peonist-ai/halogen-qwen3.8-flash-next"
+revision = "195697374b375f2133b2a61dc113e37b4b905ac6"
+path = "qwen38-flash-next-mtp.hgn"
+sha256 = "0f50e9626df98168e7c6e0cc264e2a92b5184dd885a175a06628d979b5edceeb"
+
+[[artifacts]]
+repo = "peonist-ai/halogen-qwen3.8-flash-next"
+revision = "195697374b375f2133b2a61dc113e37b4b905ac6"
+path = "tokenizer/chat_template.jinja"
+git_oid = "c0c686f9c38d70d179fb7b5f5aa7530bc913dda3"
+
+[[artifacts]]
+repo = "peonist-ai/halogen-qwen3.8-flash-next"
+revision = "195697374b375f2133b2a61dc113e37b4b905ac6"
+path = "tokenizer/generation_config.json"
+git_oid = "023756cfadf88e5bf69eefeee3e172f38c448d64"
+
+[[artifacts]]
+repo = "peonist-ai/halogen-qwen3.8-flash-next"
+revision = "195697374b375f2133b2a61dc113e37b4b905ac6"
+path = "tokenizer/merges.txt"
+git_oid = "a494e019ca1502219fd0128658b979e5f05ae8e8"
+
+[[artifacts]]
+repo = "peonist-ai/halogen-qwen3.8-flash-next"
+revision = "195697374b375f2133b2a61dc113e37b4b905ac6"
+path = "tokenizer/tokenizer.json"
+sha256 = "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+
+[[artifacts]]
+repo = "peonist-ai/halogen-qwen3.8-flash-next"
+revision = "195697374b375f2133b2a61dc113e37b4b905ac6"
+path = "tokenizer/tokenizer_config.json"
+git_oid = "5de744b3fca2129d7186979ae47c06be33903243"
+
+[[artifacts]]
+repo = "peonist-ai/halogen-qwen3.8-flash-next"
+revision = "195697374b375f2133b2a61dc113e37b4b905ac6"
+path = "tokenizer/vocab.json"
+git_oid = "0aa0ce0658d60ac4a5d609f4eadb0e8e43514176"

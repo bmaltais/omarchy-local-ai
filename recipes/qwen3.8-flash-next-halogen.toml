@@ -24,7 +24,7 @@ draft = "qwen38-flash-next-mtp.hgn"
 
 [[variant]]
 ctx = 131072
-peak_ram_gib = 92
+peak_ram_gib = 96
 peak_gpu_gib = 22
 pins_memory = true
 

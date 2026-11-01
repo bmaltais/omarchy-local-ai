@@ -24,7 +24,7 @@ draft = "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
 [[variant]]
 ctx = 131072
 peak_ram_gib = 48
-peak_gpu_gib = 44
+peak_gpu_gib = 26
 
 [sampling]
 temperature = 1.0
