@@ -2,6 +2,7 @@ name = "Qwen3.8 Flash Next"
 summary = "125B mixture of experts, 6B active per token. The fastest agent turns on long prompts."
 runtime = "halogen"
 vendor = "qwen"
+architecture = "moe"
 
 [[hardware]]
 gpu = "amd-strix-halo"

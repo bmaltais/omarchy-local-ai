@@ -2,6 +2,7 @@ name = "Qwen3.8 27B"
 summary = "Dense 27B at 8-bit for higher precision, in half the memory, at a third of the speed."
 runtime = "gufo"
 vendor = "qwen"
+architecture = "dense"
 
 [[hardware]]
 gpu = "amd-strix-halo"
