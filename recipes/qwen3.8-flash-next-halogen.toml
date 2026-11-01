@@ -1,5 +1,5 @@
 name = "Qwen3.8 Flash Next"
-summary = "125B MoE, ~6B active, 4-bit, MTP drafting on halogen. Fastest long-context agent turns on Strix Halo."
+summary = "125B mixture of experts, 6B active per token. The fastest agent turns on long prompts."
 runtime = "halogen"
 vendor = "qwen"
 

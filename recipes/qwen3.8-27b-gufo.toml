@@ -1,5 +1,5 @@
 name = "Qwen3.8 27B"
-summary = "27B dense, 8-bit, DFlash2 drafting on Gufo (open source). Higher precision, smaller footprint."
+summary = "Dense 27B at 8-bit for higher precision, in half the memory, at a third of the speed."
 runtime = "gufo"
 vendor = "qwen"
 
