@@ -353,10 +353,11 @@ with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine
 for response, succeeds in (([(200, b"")], False),
                            ([(401, b""), (200, b'{"data":[{"id":"other"}]}')], False),
                            ([(401, b""), (200, json.dumps({"data": [{"id": rid}]}).encode())], True)):
-  with patch.object(a, "unit_active", return_value=False), patch.object(a, "write_status"), patch.object(a, "evict_idle_weights"), patch.object(a, "check_headroom"), patch.object(a, "ensure_key", return_value="test-key"), patch.object(a, "http_status", side_effect=response) as http, patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0)) as systemctl:
+  with patch.object(a, "unit_active", return_value=False), patch.object(a, "write_status"), patch.object(a, "evict_idle_weights"), patch.object(a, "check_headroom", return_value=(100.0, 90.0)), patch.object(a, "free_memory", return_value=(52.0, 64.0)), patch.object(a, "ensure_key", return_value="test-key"), patch.object(a, "http_status", side_effect=response) as http, patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0)) as systemctl:
     if succeeds:
       a._start(SimpleNamespace(recipe=rid), cat, profile)
       check("first checked start clears the unchecked flag", not a.load_model(rid).get("unchecked") and http.call_count == 2)
+      check("a start records the memory the model took", a.load_model(rid)["observed"]["ram_used_gib"] == 48.0)
     else:
       raises("first start refuses failed authentication or wrong model ID", lambda: a._start(SimpleNamespace(recipe=rid), cat, profile))
       check("failed first check stops the model and retains its check obligation", ("stop", a.unit_name(rid)) in [call.args for call in systemctl.call_args_list] and a.load_model(rid)["unchecked"])

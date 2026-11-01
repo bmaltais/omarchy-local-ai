@@ -1949,7 +1949,7 @@ def _start(args, catalog, profile):
   write_status(catalog, profile, {rid: "activating"})
   evict_idle_weights(keep=[rid])
   try:
-    check_headroom(manifest["variant"], gpu)
+    before_ram, before_gpu = check_headroom(manifest["variant"], gpu)
   except LocalError as error:
     record_error(rid, error.short)
     write_status(catalog, profile)
@@ -1973,8 +1973,18 @@ def _start(args, catalog, profile):
       record_error(rid, error.short)
       write_status(catalog, profile)
       raise
-    del manifest["unchecked"]
-    write_atomic(model_manifest_path(rid), json.dumps(manifest, indent=2) + "\n")
+    manifest.pop("unchecked")
+  # The unit only reports started once the model is loaded and healthy, so
+  # what memory went since the check is what it holds. A setup saved while
+  # memory was busy gets its first measurement here; later starts refresh it.
+  after_ram, after_gpu = free_memory(gpu)
+  manifest["observed"] = {
+    "load_seconds": round(time.time() - started, 1),
+    "ram_used_gib": round(before_ram - after_ram, 1),
+    "gpu_used_gib": round(before_gpu - after_gpu, 1),
+  }
+  write_atomic(model_manifest_path(rid), json.dumps(manifest, indent=2) + "\n")
+  write_status(catalog, profile)
   say(f"Started {rid} at {endpoint(rid)}")
   return 0
 
