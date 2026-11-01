@@ -1,0 +1,48 @@
+name = "Nemotron 3.5 Bolt"
+summary = "74B mixture of experts, 9B active per token, packed into 24 GB. The fastest agent turns on NVIDIA's unified memory."
+runtime = "tensorfold-bolt"
+vendor = "nvidia"
+architecture = "moe"
+
+[[hardware]]
+gpu = "nvidia-n1x"
+ram_class = 128
+measured = "measurements/nemotron-3.5-bolt-tensorfold-n1x-128.toml"
+
+# IQ2_XXS experts, NVFP4 Mamba projections, Q8_0 attention. The server loads the directory.
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+license = "other (NVIDIA OpenMDW License Agreement 1.1, see the model card)"
+files = ["*.safetensors", "*.json", "chat_template.jinja"]
+dest = "target"
+model = "."
+
+# NVIDIA's LiLiCorr drafter: up to seven draft tokens a round, checked by the target.
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr"
+revision = "4c6a5613b6d887194a3a5493e3a18a5b3930bb86"
+license = "other (NVIDIA OpenMDW License Agreement 1.1, see the model card)"
+files = ["model.safetensors", "config.json", "hf_quant_config.json"]
+dest = "drafter"
+draft = "."
+
+# TODO: replace with the measured peaks from tools/bench on the N1x. Estimates from Mia's
+# memory model at four streams, vision on and an 8 GiB prompt cache: 23 GiB weights, 3 GiB
+# vision, 1.2 GiB stream state, 2 GiB of bf16 attention cache per full window, 10 GiB reserve.
+[[variant]]
+ctx = 262144
+peak_ram_gib = 56
+peak_gpu_gib = 56
+
+[[variant]]
+ctx = 131072
+peak_ram_gib = 52
+peak_gpu_gib = 52
+
+[sampling]
+temperature = 1.0
+top_p = 0.95
+
+[server]
+args = ["--parallel", "4", "--prompt-cache-gib", "8", "--max-tokens", "32768", "--thinking", "--vision"]
