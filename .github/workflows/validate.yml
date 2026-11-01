@@ -14,7 +14,7 @@ jobs:
           path: catalog
       - uses: actions/checkout@v4
         with:
-          repository: basecamp/omarchy
+          repository: omacom/omarchy
           ref: quattro
           path: omarchy
       - uses: actions/setup-python@v5
