@@ -1,6 +1,7 @@
 name = "Qwen3.8 27B"
 summary = "27B dense, 8-bit, DFlash2 drafting on Gufo (open source). Higher precision, smaller footprint."
 runtime = "gufo"
+vendor = "qwen"
 
 [[hardware]]
 gpu = "amd-strix-halo"
