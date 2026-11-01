@@ -1,0 +1,24 @@
+# Gufo: the open-source (MIT) Strix Halo engine. Configured by arguments to `gufo serve llm`.
+# It takes its key only as --api-key, so Omarchy substitutes it inside the container from the
+# Podman secret; the key never reaches the unit file but is visible in the process list.
+# Upstream request: an --api-key-file option or environment variable.
+image = "ghcr.io/gufo-org/toolboxes/gufo-runtime@sha256:ec8c3f0bf06100304f5105590cfe98d62bf21ff133e8c2dea95955eb4028ddb2"
+tier = "third-party"
+review = "reviews/gufo-ec8c3f0bf061.toml"
+port = 8080
+command = ["gufo", "serve", "llm", "--host", "0.0.0.0", "--port", "8080"]
+shell = "/bin/bash"
+key_on_cmdline = true
+health = { path = "/ready", probe = ["/bin/sh", "-c", "curl -fsS -o /dev/null -H \"Authorization: Bearer $OMARCHY_LOCAL_KEY\" http://127.0.0.1:8080/ready"] }
+run = { devices = ["render", "kfd"], group_add = "keep-groups", memlock = "unlimited" }
+reserved = ["--api-key", "--host", "-i", "--port", "-p", "--trace", "--cache-disk"]
+
+[inputs]
+model = { arg = "--model" }
+draft = { arg = "--dflash-model" }
+ctx = { arg = "--context" }
+alias = { arg = "--served-model-name" }
+key = { arg = "--api-key" }
+temperature = { arg = "--temperature" }
+top_p = { arg = "--top-p" }
+top_k = { arg = "--top-k" }

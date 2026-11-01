@@ -1,0 +1,30 @@
+recipe = "qwen3.8-flash-next-halogen"
+status = "hand-measured; replace with `omarchy agent local bench` output from the generated unit"
+measured_at = "2026-11-01"
+image = "ghcr.io/peonist-ai/halogen-flash-server@sha256:273714ccb64dabb7fac0418ee1b6dd83eb57d2fd44cf286eb68a7c694a27c203"
+ctx = 131072
+method = "streamed chat completions, temperature 0, enable_thinking false, 512 tokens out; a 41-token prompt and a 31,705-token prompt of shell scripts (bench/context.txt)"
+
+[machine]
+platform = "x86"
+gpu = "amd-strix-halo"
+ram_class = 128
+cpu = "AMD RYZEN AI MAX+ PRO 395 w/ Radeon 8060S"
+kernel = "7.2.14-1-omarchy"
+
+[memory]
+ram_used_gib = 91
+gtt_used_gib = 20.5
+note = "halogen pins its weights; MemAvailable reported ~23 GiB while serving"
+
+[short]
+prompt_tokens = 41
+completion_tokens = 54
+decode_tok_s = 60.4
+
+[long]
+prompt_tokens = 31705
+ttft_s = 27.47
+prefill_tok_s = 1154.0
+decode_tok_s = 39.9
+total_s = 40.3

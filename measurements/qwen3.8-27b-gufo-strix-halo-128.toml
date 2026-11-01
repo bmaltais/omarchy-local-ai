@@ -1,0 +1,12 @@
+recipe = "qwen3.8-27b-gufo"
+status = "provisional: Gufo's published figures for Q4_K_XL; replace with `omarchy agent local bench` output for this recipe (Q8_K_XL)"
+source = "https://github.com/gufo-org/gufo (README, 0.23.0)"
+
+[machine]
+gpu = "amd-strix-halo"
+ram_class = 128
+
+[published]
+quant = "UD-Q4_K_XL"
+prefill_tok_s = 648.89
+decode_tok_s = 71.55

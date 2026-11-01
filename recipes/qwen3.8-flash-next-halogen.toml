@@ -1,0 +1,34 @@
+name = "Qwen3.8 Flash Next"
+summary = "125B MoE, ~6B active, 4-bit, MTP drafting on halogen. Fastest long-context agent turns on Strix Halo."
+runtime = "halogen"
+
+[[hardware]]
+gpu = "amd-strix-halo"
+ram_class = 128
+measured = "measurements/qwen3.8-flash-next-halogen-strix-halo-128.toml"
+
+[[artifacts]]
+repo = "unsloth/Qwen3.8-Flash-Next-GGUF"
+revision = "766911a6b7369840a91dbcd95f9f997acaab6cd6"
+license = "other (Qwen3.8-Flash-Next model license, see the model card)"
+files = ["UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-0000?-of-00003.gguf"]
+model = "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf"
+
+[[artifacts]]
+repo = "peonist-ai/halogen-qwen3.8-flash-next"
+revision = "195697374b375f2133b2a61dc113e37b4b905ac6"
+license = "apache-2.0 (derived from Qwen3.8-Flash-Next; upstream terms govern)"
+files = ["qwen38-flash-next-mtp.hgn", "tokenizer/*"]
+dest = "UD-IQ4_XS"
+draft = "qwen38-flash-next-mtp.hgn"
+
+[[variant]]
+ctx = 131072
+peak_ram_gib = 92
+peak_gpu_gib = 22
+pins_memory = true
+
+[sampling]
+temperature = 1.0
+top_p = 0.95
+top_k = 20

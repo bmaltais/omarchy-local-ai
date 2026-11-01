@@ -1,0 +1,4 @@
+# The local model catalog for Omarchy: `omarchy agent local use best`.
+# Omarchy fetches the branch for the schema it reads (schema-1) and accepts a commit only when
+# it is signed by a key Omarchy ships, descends from the commit it accepted before, and validates.
+schema = 1

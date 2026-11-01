@@ -1,0 +1,3024 @@
+#!/bin/bash
+
+# omarchy:summary=Launch the default coding agent in a terminal
+# omarchy:args=[--inline] [--pick]
+# omarchy:examples=omarchy agent | omarchy agent --inline
+
+inline=false
+pick=false
+
+# Flags only. A bare prompt would shadow the subcommands under this group, so
+# prompts go through omarchy-agent-prompt, which passes one here as --prompt.
+while (($#)); do
+  case "$1" in
+    --inline)
+      inline=true
+      shift
+      ;;
+    --pick)
+      pick=true
+      shift
+      ;;
+    --prompt)
+      prompt=${2:?--prompt needs a value}
+      shift 2
+      ;;
+    *)
+      echo "Unexpected argument: $1" >&2
+      echo "To pass a prompt: omarchy agent prompt \"$*\"" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Agents refuse to remember trust for $HOME, so launches from the keybinding or
+# menu start in the work directory instead of re-asking on every session.
+[[ $PWD == "$HOME" && -d $HOME/Work ]] && cd "$HOME/Work"
+
+agent=$(omarchy-default-agent)
+
+# Omarchy ships without a default, so there is nothing to launch until one is
+# picked. --pick offers the choice instead of the error, which is what the
+# keybinding wants: a keypress that opens nothing explains nothing.
+if [[ -z $agent ]]; then
+  [[ $pick == "true" ]] && exec omarchy-menu summon setup.default.agent
+  echo "Choose default agent with: omarchy default agent <name>" >&2
+  exit 1
+fi
+
+# OpenClaw's launcher sets OpenClaw up when the package became the seed before
+# this user's OpenClaw moved, so with the package a missing command is its to fix.
+if omarchy-cmd-missing "$agent" && ! { [[ $agent == "openclaw" ]] && omarchy-pkg-present openclaw; }; then
+  echo "$agent is not installed. Choose an installed agent with: omarchy default agent <name>" >&2
+  exit 1
+fi
+
+# Agents launched from the keybinding or menu run unattended, so each one starts
+# with its own spelling of "don't stop to ask". Pi and Ori have none to skip.
+case "$agent" in
+opencode)
+  command=(opencode --auto)
+  [[ -n ${prompt:-} ]] && command+=(--prompt "$prompt")
+  ;;
+agy)
+  command=(agy --dangerously-skip-permissions)
+  [[ -n ${prompt:-} ]] && command+=(--prompt-interactive "$prompt")
+  ;;
+copilot)
+  command=(copilot --allow-all)
+  [[ -n ${prompt:-} ]] && command+=(--interactive "$prompt")
+  ;;
+crush)
+  # --yolo belongs to the interactive command only; `crush run` never prompts.
+  if [[ -n ${prompt:-} ]]; then
+    command=(crush run "$prompt")
+  else
+    command=(crush --yolo)
+  fi
+  ;;
+claude)
+  command=(claude --permission-mode auto)
+  [[ -n ${prompt:-} ]] && command+=(-- "$prompt")
+  ;;
+grok)
+  command=(grok --permission-mode bypassPermissions)
+  [[ -n ${prompt:-} ]] && command+=(-- "$prompt")
+  ;;
+openclaw)
+  # The launcher owns onboarding and the gateway dance: OpenClaw's terminal UI
+  # must attach to the running gateway (the embedded `openclaw chat` refuses to
+  # start while the gateway owns the state directory). It has no permission
+  # prompts to skip, and --message seeds the session while keeping it
+  # interactive.
+  command=(omarchy-launch-openclaw --tui)
+  [[ -n ${prompt:-} ]] && command+=(--message "$prompt")
+  ;;
+codex)
+  command=(codex --approve-for-me)
+  [[ -n ${prompt:-} ]] && command+=(-- "$prompt")
+  ;;
+cursor-agent)
+  # --yolo covers commands only; the workspace trust dialog has its own flag.
+  # A one-word prompt naming a subcommand (update, login, help) still runs that
+  # subcommand after a bare --, so the agent subcommand is named outright, and
+  # -- after it keeps a prompt starting with a dash from being read as an option.
+  command=(cursor-agent --yolo --trust)
+  [[ -n ${prompt:-} ]] && command+=(agent -- "$prompt")
+  ;;
+hermes)
+  if [[ -n ${prompt:-} ]]; then
+    command=(env -u HERMES_SESSION_SOURCE hermes chat --yolo --tui "--query=$prompt")
+  else
+    command=(hermes --yolo)
+  fi
+  ;;
+muse)
+  # --approval-mode never skips the tool prompts but keeps Muse's own sandbox.
+  command=(muse --approval-mode never)
+  [[ -n ${prompt:-} ]] && command+=(-- "$prompt")
+  ;;
+omp)
+  command=(omp --auto-approve)
+  [[ -n ${prompt:-} ]] && command+=(-- "$prompt")
+  ;;
+ori)
+  # Ori is a harness launcher, and `ori code` is the agent it runs itself.
+  # A prompt alone means one headless turn there, printed after the turn ends,
+  # so --interactive is what seeds the session with it and keeps the window.
+  command=(ori code)
+  [[ -n ${prompt:-} ]] && command+=(--interactive --prompt "$prompt")
+  ;;
+pi)
+  command=(pi)
+  [[ -n ${prompt:-} ]] && command+=("$prompt")
+  ;;
+kimi)
+  # --prompt is non-interactive print mode only; it cannot combine with --yolo.
+  if [[ -n ${prompt:-} ]]; then
+    command=(kimi --prompt "$prompt")
+  else
+    command=(kimi --yolo)
+  fi
+  ;;
+qwen)
+  # Bind the value so a prompt starting with a dash stays literal.
+  command=(qwen --yolo)
+  [[ -n ${prompt:-} ]] && command+=("--prompt-interactive=$prompt")
+  ;;
+dsh)
+  # The browser UI has no prompt option, and the headless profile would run the
+  # prompt with full access in a window that closes with its answer, so a
+  # prompt goes to the clipboard below instead.
+  command=(env DSH_PERMISSION_MODE=danger-full-access dsh web)
+  prompt_via_clipboard="DeepSeek Harness"
+  ;;
+mcode)
+  # The TUI has no no-approval flag; permission options belong to exec mode.
+  command=(mcode)
+  [[ -n ${prompt:-} ]] && command+=(-- "$prompt")
+  ;;
+kiro-cli)
+  # A positional input seeds the interactive chat; -- keeps a prompt starting
+  # with a dash literal.
+  command=(kiro-cli chat --trust-all-tools)
+  [[ -n ${prompt:-} ]] && command+=(-- "$prompt")
+  ;;
+freebuff)
+  # Freebuff takes no starting prompt and asks no tool permissions, so a
+  # prompt goes to the clipboard below instead.
+  command=(freebuff)
+  prompt_via_clipboard="Freebuff"
+  ;;
+kilo)
+  # Kilo is built on OpenCode and shares its flags. Bind the prompt so one
+  # starting with a dash stays literal.
+  command=(kilo --auto)
+  [[ -n ${prompt:-} ]] && command+=("--prompt=$prompt")
+  ;;
+devin)
+  # A bare positional is a path that opens Devin Desktop, so the prompt
+  # always follows --, which starts an interactive session with it.
+  command=(devin --permission-mode dangerous --respect-workspace-trust false)
+  [[ -n ${prompt:-} ]] && command+=(-- "$prompt")
+  ;;
+amp)
+  # Amp takes its first interactive message from piped input; a positional
+  # message is for --execute, which exits after one turn. The binary rides in
+  # as $0 so a user install below can replace it.
+  if [[ -n ${prompt:-} ]]; then
+    command=(bash -c 'printf "%s\n" "$1" | exec "$0" --dangerously-allow-all' amp "$prompt")
+  else
+    command=(amp --dangerously-allow-all)
+  fi
+  ;;
+commandcode)
+  # --yolo skips permission prompts and implies --trust. A positional prompt
+  # seeds the interactive session; -- keeps one starting with a dash literal.
+  command=(commandcode --yolo)
+  [[ -n ${prompt:-} ]] && command+=(-- "$prompt")
+  ;;
+*)
+  echo "Unsupported default agent: $agent" >&2
+  exit 1
+  ;;
+esac
+
+# An agent with no way to take a starting prompt still opens, with the prompt
+# on the clipboard to paste as its first message, so a prompted launch from the
+# agents panel or a crash report is not lost.
+if [[ -n ${prompt:-} && -n ${prompt_via_clipboard:-} ]]; then
+  printf '%s' "$prompt" | wl-copy
+  omarchy-notification-send -g 󰅇 "$(omarchy-i18n agents.promptOnClipboard "$prompt_via_clipboard")" \
+    "$(omarchy-i18n agents.promptOnClipboardBody)"
+fi
+
+# omarchy-mise-install's wrappers run `mise use` and `mise x`, current ones on
+# lines of their own and older ones after an inline variable; either way
+# running one installs the tool it wraps. A symlink is the user's own install.
+mise_wrapper() {
+  [[ ! -L $1 ]] && head -c 4096 "$1" | grep -qaE 'mise (use|x) '
+}
+
+# The user's own install in ~/.local/bin, which omarchy-default-agent counts as
+# installed, still wins over mise's lazy shim earlier on PATH, which would
+# install and run mise's copy instead. Once mise has installed its own, a
+# terminal runs that one, so the launcher does too. OpenClaw's command runs its
+# launcher, so its prompt is the only argument that could match the name.
+user_install="$HOME/.local/bin/$agent"
+if [[ $agent != "openclaw" && -f $user_install && -x $user_install ]] &&
+  ! mise_wrapper "$user_install" && ! MISE_OFFLINE=1 mise which "$agent" &>/dev/null; then
+  for i in "${!command[@]}"; do
+    if [[ ${command[i]} == "$agent" ]]; then
+      command[i]=$user_install
+      break
+    fi
+  done
+fi
+
+# A new session uses the current selection rather than its parent's account
+# pin. Explicit provider homes still override the selection. Carry the new pin
+# in the command, since terminals launched through uwsm don't inherit our env.
+case "$agent" in
+claude) home_env="CLAUDE_CONFIG_DIR" ;;
+codex) home_env="CODEX_HOME" ;;
+grok) home_env="GROK_HOME" ;;
+*) home_env="" ;;
+esac
+if [[ -n $home_env ]]; then
+  account_pin="OMARCHY_AGENT_${agent^^}_HOME"
+  if [[ -v $account_pin && ${!home_env:-} == "${!account_pin}" ]]; then
+    unset "$home_env"
+  fi
+  unset "$account_pin"
+  if [[ -z ${!home_env:-} ]]; then
+    home=$(omarchy-agent-account-home "$agent")
+    account_env=(env -u "$home_env" "$account_pin=$home")
+    [[ -n $home ]] && account_env+=("$home_env=$home")
+    command=("${account_env[@]}" "${command[@]}")
+  fi
+fi
+
+if [[ $inline == "true" ]]; then
+  exec "${command[@]}"
+else
+  # A fixed app-id rather than the default org.omarchy.<binary>, so every agent
+  # window shares one class for window rules and themes to single out.
+  exec omarchy-launch-tui --app-id=org.omarchy.agent "${command[@]}"
+fi
+#!/bin/bash
+
+# omarchy:summary=Set and launch the default coding agent
+# omarchy:args=[pi|omp|opencode|ori|claude|codex|grok|openclaw|agy|hermes|copilot|crush|cursor-agent|muse|kimi|qwen|dsh|mcode|kiro-cli|freebuff|kilo|devin|amp|commandcode]
+# omarchy:examples=omarchy default agent | omarchy default agent codex | omarchy default agent claude
+
+installing=false
+if [[ ${1:-} == "--install" ]]; then
+  installing=true
+  shift
+fi
+
+agent_file="$HOME/.config/omarchy/defaults/agent"
+
+if (($# == 0)); then
+  if [[ -f $agent_file ]]; then
+    read -r agent <"$agent_file"
+  fi
+
+  # Silent when unset rather than defaulting: Omarchy picks no agent for you, so
+  # the menu leaves every entry unchecked until one is chosen.
+  [[ -n ${agent:-} ]] && echo "$agent"
+  exit 0
+fi
+
+case "$1" in
+pi) agent="pi"; name="Pi" ;;
+omp | oh-my-pi) agent="omp"; name="Oh My Pi"; agent_package="oh-my-pi" ;;
+opencode | open-code) agent="opencode"; name="OpenCode" ;;
+ori | openrouter) agent="ori"; name="Ori"; agent_package="ori" ;;
+claude | claude-code) agent="claude"; name="Claude Code" ;;
+codex) agent="codex"; name="Codex" ;;
+crush) agent="crush"; name="Crush" ;;
+grok) agent="grok"; name="Grok" ;;
+openclaw) agent="openclaw"; name="OpenClaw"; agent_installer="omarchy-install-openclaw-cli" ;;
+agy | antigravity | antigravity-cli | gemini | gemini-cli) agent="agy"; name="Antigravity"; agent_package="antigravity-cli" ;;
+hermes) agent="hermes"; name="Hermes"; agent_installer="omarchy-install-hermes-cli" ;;
+copilot | github-copilot) agent="copilot"; name="GitHub Copilot" ;;
+muse | muse-code | musecode) agent="muse"; name="Muse Code" ;;
+cursor | cursor-agent) agent="cursor-agent"; name="Cursor CLI" ;;
+kimi | kimi-code) agent="kimi"; name="Kimi"; agent_package="npm:@moonshot-ai/kimi-code" ;;
+qwen | qwen-code) agent="qwen"; name="Qwen Code" ;;
+dsh | deepseek | deepseek-harness)
+  agent="dsh"; name="DeepSeek Harness"; agent_package="npm:@deepseek-ai/dsh"
+  # Every DSH release so far is a prerelease. A declared "latest" follows the
+  # npm latest tag, but `mise use` lists only stable versions unless told to
+  # include prereleases.
+  agent_prereleases=true
+  ;;
+mcode | minimax-code | minimax) agent="mcode"; name="MiniMax Code"; agent_tool="npm:@minimax-ai/code"; agent_package="$agent_tool[allow_builds=better-sqlite3]" ;;
+kiro-cli | kiro)
+  agent="kiro-cli"; name="Kiro CLI"
+  # Kiro publishes per-platform archives behind a manifest of the stable release.
+  agent_tool="http:kiro-cli"
+  agent_package="$agent_tool[platforms_linux_x64_url=https://prod.download.cli.kiro.dev/stable/{{version}}/kirocli-x86_64-linux.tar.gz,platforms_linux_arm64_url=https://prod.download.cli.kiro.dev/stable/{{version}}/kirocli-aarch64-linux.tar.gz,version_list_url=https://prod.download.cli.kiro.dev/stable/latest/manifest.json,version_json_path=.version]"
+  ;;
+freebuff) agent="freebuff"; name="Freebuff"; agent_package="npm:freebuff" ;;
+kilo | kilocode | kilo-code) agent="kilo"; name="Kilo"; agent_package="npm:@kilocode/cli" ;;
+devin | devin-cli)
+  agent="devin"; name="Devin CLI"
+  # Cognition publishes per-platform archives behind a manifest of the current release.
+  agent_tool="http:devin"
+  agent_package="$agent_tool[platforms_linux_x64_url=https://static.devin.ai/cli/{{ version }}/devin-{{ version }}-x86_64-unknown-linux.tar.gz,platforms_linux_arm64_url=https://static.devin.ai/cli/{{ version }}/devin-{{ version }}-aarch64-unknown-linux.tar.gz,bin_path=bin,version_list_url=https://static.devin.ai/cli/current/manifest.json,version_json_path=.version]"
+  ;;
+amp | ampcode) agent="amp"; name="Amp" ;;
+commandcode | command-code | cmdc) agent="commandcode"; name="Command Code"; agent_package="npm:command-code" ;;
+*)
+  echo "Usage: omarchy-default-agent <pi|omp|opencode|ori|claude|codex|grok|openclaw|agy|hermes|copilot|crush|cursor-agent|muse|kimi|qwen|dsh|mcode|kiro-cli|freebuff|kilo|devin|amp|commandcode>"
+  exit 1
+  ;;
+esac
+
+agent_package=${agent_package:-$agent}
+# Omarchy declares a tool that takes backend options under its bare name, with
+# the options inside the declaration's table, because mise drops bracket options
+# from a table-valued key. The bracketed package is only for the user's config.
+agent_tool=${agent_tool:-$agent_package}
+
+# Hermes and OpenClaw are not mise tools: each is a self-updating runtime in
+# the user's home, Hermes the desktop app's and OpenClaw the one its Control
+# UI updates. Each has its own installer with the same --check/--now contract
+# mise-backed agents get from mise; see omarchy-install-hermes-cli and
+# omarchy-install-openclaw-cli.
+if [[ -n ${agent_installer:-} ]]; then
+  # Not omarchy-cmd-present: a command on PATH says nothing about whether the
+  # install behind it finished or runs the sessions omarchy-agent starts.
+  # Treating it as installed would skip the floating terminal and run a
+  # minutes-long install inside the menu action instead.
+  agent_present() { "$agent_installer" --check; }
+  agent_install() { "$agent_installer" --now; }
+else
+  # omarchy-mise-install's wrappers run `mise use` and `mise x`, current ones on
+  # lines of their own and older ones after an inline variable; either way
+  # running one installs the tool it wraps. A symlink is the user's own install.
+  mise_wrapper() {
+    [[ ! -L $1 ]] && head -c 4096 "$1" | grep -qaE 'mise (use|x) '
+  }
+
+  # Anything at the wrapper's path other than the wrapper is the user's own
+  # install, such as the symlink Cursor's installer leaves. A mise copy would
+  # only shadow it, since the mise shims precede ~/.local/bin on PATH.
+  user_install() {
+    [[ -x $HOME/.local/bin/$agent ]] && ! mise_wrapper "$HOME/.local/bin/$agent"
+  }
+  agent_present() { user_install || mise where "$agent_tool" &>/dev/null; }
+  # Omarchy declares the default agents as mise tools, so installing one is
+  # enough and leaves the user's config alone. A user who removed the
+  # preinstalls, like one without Omarchy's declarations, selects it instead.
+  # An npm-backed agent needs node, itself a lazy tool where Omarchy declares
+  # it, and mise won't install it as the agent's dependency while it's missing.
+  npm_backed() {
+    [[ $1 == npm:* || $(mise tool "${1%%\[*}" --backend 2>/dev/null) == npm:* ]]
+  }
+  agent_install() {
+    user_install && return
+    if omarchy-mise-default-tools declares "$agent_tool"; then
+      if npm_backed "$agent_tool"; then
+        mise install node "$agent_tool"
+      else
+        mise install "$agent_tool"
+      fi
+    else
+      if npm_backed "$agent_package" && ! mise where node &>/dev/null; then
+        mise install node || return 1
+      fi
+      if [[ ${agent_prereleases:-} == "true" ]]; then
+        MISE_PRERELEASES=true mise use -g "$agent_package"
+      else
+        mise use -g "$agent_package"
+      fi
+    fi
+  }
+fi
+
+if [[ $installing == "false" ]] && ! agent_present; then
+  exec omarchy-launch-floating-terminal-with-presentation omarchy-default-agent --install "$agent"
+fi
+
+if ! agent_install; then
+  if [[ $installing == "true" && -n ${agent_installer:-} ]]; then
+    echo "Could not install $name" >&2
+  elif [[ $installing == "true" ]]; then
+    echo "Could not install $name with mise" >&2
+  else
+    echo "Could not set $name as the default coding agent" >&2
+  fi
+  exit 1
+fi
+
+if [[ $agent == "claude" ]]; then
+  omarchy-install-chromium-claude 2>/dev/null || true
+fi
+
+mkdir -p "$(dirname "$agent_file")"
+printf '%s\n' "$agent" >"$agent_file"
+
+if [[ $installing == "true" ]]; then
+  printf '\033[2J\033[3J\033[H'
+  exec omarchy-agent --inline
+else
+  exec omarchy-agent
+fi
+#!/bin/bash
+
+# omarchy:summary=Update Omarchy and system packages
+# omarchy:alias=omarchy up
+# omarchy:args=[-y]
+# omarchy:examples=omarchy update | omarchy update -y
+# omarchy:requires-sudo=true
+
+set -e
+
+update_stay_awake_stopped=0
+sudo_keepalive_pid=""
+
+# Ask for the password once, then keep sudo's timestamp fresh so long package
+# downloads, migrations, hooks, and mise never outlast it and prompt again.
+# Authorize by running a command rather than sudo -v: under the default
+# verifypw=all, -v prompts even when passwordless sudo is enabled.
+authorize_update() {
+  sudo true || return 1
+
+  local update_pid=$$
+  (
+    [[ -z ${OMARCHY_UPDATE_LOCK_FD:-} ]] || exec {OMARCHY_UPDATE_LOCK_FD}>&-
+    sleep_pid=""
+    trap - EXIT HUP INT
+    trap '[[ -z $sleep_pid ]] || kill "$sleep_pid" 2>/dev/null; exit 0' TERM
+    while :; do
+      sleep 60 &
+      sleep_pid=$!
+      wait "$sleep_pid"
+      kill -0 "$update_pid" 2>/dev/null || exit 0
+      sudo -n true 2>/dev/null || exit 0
+    done
+  ) &
+  sudo_keepalive_pid=$!
+}
+
+end_update_authorization() {
+  if [[ -n $sudo_keepalive_pid ]]; then
+    kill "$sudo_keepalive_pid" 2>/dev/null || true
+    wait "$sudo_keepalive_pid" 2>/dev/null || true
+    sudo_keepalive_pid=""
+  fi
+}
+
+cleanup_update() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+  end_update_authorization
+  if (( update_stay_awake_stopped == 0 )); then
+    omarchy-update-stay-awake stop || status=1
+  fi
+  exit "$status"
+}
+
+if [[ -z ${OMARCHY_UPDATE_LOGGED:-} ]]; then
+  script_command=$(printf '%q ' "$0" "$@")
+  exec env OMARCHY_UPDATE_LOGGED=1 script -qefc "$script_command" "/tmp/omarchy-update.log"
+fi
+
+if ! omarchy-update-lock held; then
+  exec omarchy-update-lock run "$0" "$@"
+fi
+
+trap 'echo ""; echo -e "\033[0;31mSomething went wrong during the update!\n\nPlease review the output above carefully, correct the error, and retry the update.\n\nIf you need assistance, get help from the community at https://omarchy.org/discord\033[0m"' ERR
+trap cleanup_update EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+omarchy-update-requires-free-space
+
+# -y suppresses Omarchy confirmation prompts; sudo authorization is still
+# required. Interactive review steps report and move on instead of waiting.
+[[ ${1:-} != "-y" ]] || export OMARCHY_UPDATE_UNATTENDED=1
+
+if [[ ${1:-} == "-y" ]] || omarchy-update-confirm; then
+  authorize_update
+
+  # Before the snapshot: the cache is on the snapshotted subvolume, so pruning
+  # after it frees nothing until that snapshot ages out.
+  omarchy-update-pkg-prune
+
+  # 127 means Snapper is deliberately absent. Any other failure already said
+  # what went wrong, and a missing snapshot is not worth blocking an update
+  # over, but it must not pass for one either.
+  omarchy-snapshot create || (($? == 127)) ||
+    echo -e "\e[33mContinuing the update without a snapshot.\e[0m" >&2
+
+  omarchy-update-stay-awake start
+
+  # Preserve the established development-checkout update ordering.
+  omarchy-update-dev
+  omarchy-update-keyring
+
+  # Migrations ship with the packages installed here and are written against
+  # them, so everything below waits on this finishing. An upgrade that stopped
+  # takes the update with it rather than migrating against what is still on disk.
+  omarchy-update-system-pkgs
+
+  omarchy-migrate
+  omarchy-update-orphan-pkgs -y
+
+  omarchy-update-analyze-logs
+
+  # The dev checkout was fast-forwarded and the full upgrade went through, so
+  # there is no Omarchy update left to show. Rechecking would download every
+  # sync database again and refetch the checkout only to hear the same.
+  omarchy-shell -q omarchy.system-update clear
+
+  # Service restart helpers can need sudo. The reboot-only phase below
+  # performs no privileged work.
+  omarchy-update-restart --services-only
+
+  omarchy-hook post-update
+  # Optional tool downloads must not skip boot verification or the reboot
+  # prompt after system packages have already been upgraded.
+  mise_updated=1
+  omarchy-update-mise || mise_updated=0
+
+  # AUR packages build against the upgraded system, so they go after it, and
+  # share the update's one authorization like every step before them.
+  omarchy-update-aur-pkgs
+
+  # The last sudo-capable step: the boot files every package step left, AUR
+  # packages' initramfs rebuilds included, must be shown to boot the updated
+  # system. Until it passes, the update neither finishes nor offers a reboot.
+  boot_verified=1
+  omarchy-update-boot || boot_verified=0
+  end_update_authorization
+
+  # The sleep inhibitor covers AUR builds, hooks and mise as well. Release it
+  # before offering a reboot: a confirmed reboot can terminate this
+  # process before its EXIT trap gets a chance to remove the persistent Stay
+  # Awake marker.
+  omarchy-update-stay-awake stop
+  update_stay_awake_stopped=1
+
+  if (( mise_updated == 0 )); then
+    echo -e "\e[33m\nSome mise tools could not be updated. Review the errors above and run 'omarchy update mise' to retry.\e[0m" >&2
+  fi
+
+  if (( boot_verified )); then
+    "$OMARCHY_PATH/bin/omarchy-update-restart" --reboot-only
+  else
+    echo -e "\e[31m\nThe update is not finished: its boot files did not pass verification (see above). Do not reboot until omarchy update completes.\e[0m" >&2
+    exit 1
+  fi
+fi
+#!/bin/bash
+
+# omarchy:summary=Check the update log for known failure conditions
+
+update_log="/tmp/omarchy-update.log"
+
+# Check for initramfs generation failure
+if grep -q "Updating linux initcpios" "$update_log"; then
+  if ! grep -q "Initcpio image generation successful" "$update_log"; then
+    echo -e '\e[31mError: Initramfs generation may have failed. Review logs before restart.\e[0m'
+    echo
+  fi
+fi
+#!/bin/bash
+
+# omarchy:summary=Update AUR packages if any are installed
+
+# mise exports GOROOT and GOBIN for its own Go. omarchy-upgrade-to-quattro runs
+# this with the system PATH but the caller's environment, so /usr/bin/go would
+# compile with mise's toolchain and every Go PKGBUILD fails with
+# "compile: version ... does not match go tool version". With both unset,
+# whichever go is on PATH uses its own root.
+unset GOROOT GOBIN
+
+if pacman -Qem >/dev/null; then
+  if omarchy-pkg-aur-accessible; then
+    echo -e "\e[32m\nUpdate AUR packages\e[0m"
+    yay -Sua --noconfirm --cleanafter --ignore gcc14,gcc14-libs || exit 1
+    echo
+  else
+    echo -e "\e[31m\nAUR is unavailable (so skipping updates)\e[0m"
+    echo
+  fi
+fi
+#!/bin/bash
+
+# omarchy:summary=Check whether Omarchy updates are available.
+
+set -euo pipefail
+
+updates=()
+
+if [[ $OMARCHY_PATH != "/usr/share/omarchy" ]]; then
+  upstream=$(git -C "$OMARCHY_PATH" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
+  if [[ -n $upstream ]]; then
+    GIT_TERMINAL_PROMPT=0 timeout 10 git -C "$OMARCHY_PATH" fetch --quiet 2>/dev/null || true
+
+    behind=$(git -C "$OMARCHY_PATH" rev-list --count "HEAD..$upstream" 2>/dev/null || echo 0)
+    if (( behind > 0 )); then
+      commit_label=commits
+      (( behind == 1 )) && commit_label=commit
+      updates+=("omarchy-dev-checkout $behind new $commit_label on $upstream")
+    fi
+  fi
+fi
+
+package=""
+if pacman -Qq omarchy-dev >/dev/null 2>&1; then
+  package=omarchy-dev
+elif pacman -Qq omarchy >/dev/null 2>&1; then
+  package=omarchy
+fi
+
+if [[ -n $package ]]; then
+  update=$(checkupdates --nocolor 2>/dev/null | awk -v package="$package" '$1 == package { print; exit }' || true)
+fi
+
+if [[ -n ${update:-} ]]; then
+  updates+=("$update")
+fi
+
+if (( ${#updates[@]} > 0 )); then
+  printf '%s\n' "${updates[@]}"
+  exit 0
+else
+  echo "Omarchy is up to date"
+  exit 1
+fi
+#!/bin/bash
+
+# omarchy:summary=Verify the platform's boot chain after the update's package changes
+# omarchy:hidden=true
+# omarchy:requires-sudo=true
+
+# Proves that the boot files the package steps left boot the updated system;
+# omarchy update neither finishes nor offers a reboot until this passes. It is
+# the update-verify lifecycle dispatch operation: a no-op where the platform
+# registers no boot package, x86 included, and the platform's own entrypoint
+# says what failed.
+
+set -e
+
+if (( $# )); then
+  echo "Usage: omarchy-update-boot" >&2
+  exit 2
+fi
+operation=update-verify
+
+# Resolving as the user keeps sudo, and its password prompt, out of updates
+# with nothing to run. Root resolves again from its own fixed paths before
+# anything runs.
+errors=$(mktemp)
+trap 'rm -f "$errors"' EXIT
+status=0
+resolved=$(omarchy-lifecycle-dispatch --resolve "$operation" 2>"$errors") || status=$?
+
+# 3: the platform's boot package is not installed at all. Such a machine
+# predates it and boots a chain the package does not manage, so verification
+# warns instead of failing every update until the package is installed.
+if (( status == 3 )); then
+  echo -e "\e[33m\n$(sed 's/^Error: //' "$errors")\nThe boot files were not verified. This machine predates its platform's boot package; updates verify them once it is installed.\e[0m" >&2
+elif (( status != 0 )); then
+  cat "$errors" >&2
+  exit "$status"
+elif [[ -n $resolved ]]; then
+  sudo omarchy-lifecycle-dispatch "$operation"
+fi
+#!/bin/bash
+
+# omarchy:summary=Prompt for confirmation before starting an update
+
+gum style --border normal --padding "1 2" \
+  "$(omarchy-i18n update.ready)" \
+  "" \
+  "• $(omarchy-i18n update.cannotStop)" \
+  "• $(omarchy-i18n update.connectPower)" \
+  "" \
+  "$(omarchy-i18n update.whatsNew "https://github.com/omacom/omarchy/releases/latest")"
+
+echo
+
+if ! gum confirm --affirmative "$(omarchy-i18n common.yes)" --negative "$(omarchy-i18n common.no)" "$(omarchy-i18n update.continue)"; then
+  echo "Update cancelled"
+  exit 1
+fi
+#!/bin/bash
+
+# omarchy:summary=Update the active Omarchy dev checkout
+
+set -euo pipefail
+
+[[ $OMARCHY_PATH != "/usr/share/omarchy" ]] || exit 0
+
+if ! git -C "$OMARCHY_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "Error: OMARCHY_PATH is not a git checkout: $OMARCHY_PATH" >&2
+  exit 1
+fi
+
+upstream=$(git -C "$OMARCHY_PATH" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
+if [[ -z $upstream ]]; then
+  echo -e "\e[33m\nSkip Omarchy dev checkout update (current branch has no upstream)\e[0m"
+  exit 0
+fi
+
+echo -e "\e[32m\nUpdate Omarchy dev checkout\e[0m"
+# A filtered fetch makes a full clone blobless once; git saves the filter, so
+# pulls then only fetch the file contents the new checkout needs.
+remote=$(git -C "$OMARCHY_PATH" for-each-ref --format='%(upstream:remotename)' "$(git -C "$OMARCHY_PATH" symbolic-ref -q HEAD)")
+if git -C "$OMARCHY_PATH" config "remote.$remote.url" >/dev/null && ! git -C "$OMARCHY_PATH" config "remote.$remote.promisor" >/dev/null; then
+  git -C "$OMARCHY_PATH" fetch --filter=blob:none "$remote"
+fi
+git -C "$OMARCHY_PATH" pull --ff-only
+#!/bin/bash
+
+# omarchy:summary=Update system firmware using fwupd. Ensures the fwupd EFI binary is installed
+# omarchy:requires-sudo=true
+
+set -e
+echo -e "\e[32mUpdate Firmware\e[0m"
+
+if omarchy-cmd-missing fwupdmgr; then
+  omarchy-pkg-add fwupd
+fi
+
+if [[ -d /sys/firmware/efi ]] && [[ -f /usr/lib/fwupd/efi/fwupdx64.efi ]]; then
+  sudo install -D /usr/lib/fwupd/efi/fwupdx64.efi /boot/EFI/arch/fwupdx64.efi
+fi
+
+fwupdmgr refresh --force
+sudo fwupdmgr update
+#!/bin/bash
+
+# omarchy:summary=Ensure the Omarchy, Arch and (on aarch64) Arch Linux ARM keyring packages are installed and populated
+# omarchy:requires-sudo=true
+
+# omarchy-update runs this under set -e as a trusted pre-step, so a failed recv
+# or a broken keyring has to stop this script here, not surface later as
+# signature errors in the middle of the main transaction.
+set -euo pipefail
+
+if omarchy-pkg-missing omarchy-keyring || ! sudo pacman-key --list-keys 40DFB630FF42BCFFB047046CF0134EE680CAC571 &>/dev/null; then
+  sudo pacman-key --recv-keys 40DFB630FF42BCFFB047046CF0134EE680CAC571 --keyserver keys.openpgp.org
+  sudo pacman-key --lsign-key 40DFB630FF42BCFFB047046CF0134EE680CAC571
+
+  # This is generally not a good idea, but this is a special case because we're going to be updating
+  # the full set of packages in omarchy-update-system-pkgs right after this (and it needs latest keyring)!
+  sudo pacman -Sy
+  omarchy-pkg-add omarchy-keyring
+
+  sudo pacman-key --list-keys 40DFB630FF42BCFFB047046CF0134EE680CAC571
+fi
+
+# Arch Linux ARM signs every package in its repositories, archlinux-keyring
+# included, with its build key, and only archlinuxarm-keyring carries it.
+# pacman's "Import PGP key?" prompt adds that key without trusting it, after
+# which every update stops at "unknown trust", so check that it is valid, not
+# just present: populate it from the installed keyring, or fetch it by
+# fingerprint and sign it locally when the package is missing, the way the
+# Omarchy key is bootstrapped, and install the package with the refresh below.
+# keys.openpgp.org does not carry it.
+alarm_key=68B3537F39A313B3E574D06777193F152BDBE6A6
+alarm_keyring_missing=0
+
+alarm_key_trusted() {
+  [[ $(sudo gpg --homedir /etc/pacman.d/gnupg --no-permission-warning --batch --with-colons --list-keys "$alarm_key" 2>/dev/null) =~ (^|$'\n')pub:[fu]: ]]
+}
+
+if omarchy-hw-aarch64 && ! alarm_key_trusted; then
+  if omarchy-pkg-present archlinuxarm-keyring; then
+    sudo pacman-key --populate archlinuxarm
+  else
+    sudo pacman-key --recv-keys "$alarm_key" --keyserver keyserver.ubuntu.com
+    sudo pacman-key --lsign-key "$alarm_key"
+    alarm_keyring_missing=1
+  fi
+fi
+
+# Ensure we have the latest archlinux-keyring, maintainer keys might have changed.
+# --needed installs only a newer keyring: new or revoked keys reach the repos
+# as a new package version, and an installed version was populated when it
+# went in, so reinstalling the same one only repeats that populate.
+# An aarch64 machine's Arch Linux ARM repositories are signed with keys of
+# their own, so its keyring is kept current the same way.
+keyrings=(archlinux-keyring)
+if omarchy-hw-aarch64 && { omarchy-pkg-present archlinuxarm-keyring || (( alarm_keyring_missing )); }; then
+  keyrings+=(archlinuxarm-keyring)
+fi
+# A platform package names the signing keyrings of the repositories it adds,
+# one package per line. Only installed ones are refreshed, so this adds no
+# repository the machine didn't already trust; a refreshed keyring may carry
+# that repository's new keys. A line that isn't one keyring package name is
+# skipped with a warning, so a mistake in the list can't stop every update.
+platform_keyrings=/usr/share/omarchy-platform/keyrings
+if [[ -f $platform_keyrings ]]; then
+  while read -r keyring extra || [[ -n $keyring ]]; do
+    [[ -n $keyring && $keyring != \#* ]] || continue
+    if [[ -n $extra || ! $keyring =~ ^[a-z0-9][a-z0-9@._+-]*-keyring$ ]]; then
+      echo "Warning: skipping ${keyring}${extra:+ $extra} in $platform_keyrings: not a keyring package name" >&2
+      continue
+    fi
+    if omarchy-pkg-present "$keyring" && [[ " ${keyrings[*]} " != *" $keyring "* ]]; then
+      keyrings+=("$keyring")
+    fi
+  done <"$platform_keyrings"
+fi
+echo -e "\e[32m\nUpdate Arch signing keys\e[0m"
+sudo pacman -Sy --needed --noconfirm "${keyrings[@]}" >/dev/null 2> >(grep -vE '^warning: [a-z0-9@._+-]+-keyring-[^ ]+ is up to date -- skipping$' >&2)
+
+if omarchy-hw-aarch64 && ! alarm_key_trusted; then
+  echo "Arch Linux ARM's signing key $alarm_key is still not trusted" >&2
+  exit 1
+fi
+
+# Say "correct" only once the key verifiably is: before the failure checks
+# above, a failed recv or reinstall still ended here with exit 0.
+sudo pacman-key --list-keys 40DFB630FF42BCFFB047046CF0134EE680CAC571 >/dev/null
+echo "Keys are correct"
+#!/bin/bash
+
+# omarchy:summary=Run a command while holding the Omarchy update lock
+# omarchy:args=<held|run> [command] [args...]
+# omarchy:hidden=true
+
+set -e
+
+lock_dir="${XDG_RUNTIME_DIR:-/tmp}"
+lock_path="$lock_dir/omarchy-update.lock"
+
+lock_is_held() {
+  local lock_fd_path=""
+
+  [[ -n ${OMARCHY_UPDATE_LOCK_FD:-} && -e /proc/$$/fd/$OMARCHY_UPDATE_LOCK_FD ]] || return 1
+
+  lock_fd_path=$(readlink -f "/proc/$$/fd/$OMARCHY_UPDATE_LOCK_FD" 2>/dev/null || true)
+  [[ $lock_fd_path == "$(readlink -m "$lock_path")" ]] &&
+    flock -n "$OMARCHY_UPDATE_LOCK_FD"
+}
+
+case "${1:-}" in
+  held)
+    lock_is_held
+    ;;
+  run)
+    shift
+    if (( $# == 0 )); then
+      echo "Usage: omarchy-update-lock run <command> [args...]" >&2
+      exit 2
+    fi
+
+    mkdir -p "$lock_dir" 2>/dev/null || true
+    exec {OMARCHY_UPDATE_LOCK_FD}>"$lock_path"
+    if ! flock -n "$OMARCHY_UPDATE_LOCK_FD"; then
+      echo "An Omarchy update is already running."
+      exit 1
+    fi
+
+    export OMARCHY_UPDATE_LOCK_FD
+    exec "$@"
+    ;;
+  *)
+    echo "Usage: omarchy-update-lock <held|run> [command] [args...]" >&2
+    exit 2
+    ;;
+esac
+#!/bin/bash
+
+# omarchy:summary=Update mise-managed tools
+
+if omarchy-cmd-present mise; then
+  echo -e "\e[32m\nUpdate mise tools\e[0m"
+
+  # mise withholds releases younger than its cooldown, so tools stay behind for
+  # days after they ship. Running omarchy update is the user asking for current
+  # versions now, which is the same call the mup alias makes by hand.
+  MISE_MINIMUM_RELEASE_AGE=0 mise up
+fi
+#!/bin/bash
+
+# omarchy:summary=Review and optionally remove orphaned system packages after updates
+# omarchy:args=[-y]
+# omarchy:examples=omarchy update orphan-pkgs | omarchy update orphan-pkgs -y
+# omarchy:requires-sudo=true
+
+set -e
+
+mapfile -t orphans < <(pacman -Qtdq 2>/dev/null || true)
+(( ${#orphans[@]} )) || exit 0
+
+echo -e "\e[32m\nOrphan system packages\e[0m"
+printf '  %s\n' "${orphans[@]}"
+echo
+
+if [[ ${1:-} != "-y" && ( ! -t 0 || ! -t 1 ) ]]; then
+  echo "${#orphans[@]} orphaned package(s) found. Re-run omarchy-update-orphan-pkgs in a terminal to review/remove them."
+  echo
+  exit 0
+fi
+
+if [[ ${1:-} != "-y" ]] && ! gum confirm --default=false --affirmative "$(omarchy-i18n common.yes)" --negative "$(omarchy-i18n common.no)" "$(omarchy-i18n --count "${#orphans[@]}" update.removeOrphans "${#orphans[@]}")"; then
+  echo "Keeping orphaned packages."
+  echo
+  exit 0
+fi
+
+echo -e "\e[32m\nRemoving orphan system packages\e[0m"
+omarchy-pkg-drop "${orphans[@]}"
+echo
+#!/bin/bash
+
+# omarchy:summary=Run a pacman transaction for the Omarchy update flow, shielded from desktop session teardown.
+# omarchy:args=<pacman-args>
+# omarchy:hidden=true
+# omarchy:requires-sudo=true
+
+# Upgrading systemd runs its post_upgrade scriptlet mid-transaction, which
+# reexecs both the system manager and every user manager. A pacman running
+# inside a user-session scope can be SIGKILLed by that reexec, abandoning the
+# transaction halfway. Registering the transaction as a PID 1 scope keeps it
+# out of the user manager's cgroups entirely, and system scopes survive the
+# system manager's own reexec.
+scope=()
+if [[ -d /run/systemd/system && ! -L /run/systemd/system ]]; then
+  scope=(systemd-run --scope --quiet --collect)
+fi
+
+# LC_ALL passes through so callers that parse pacman's stderr can pin the locale.
+env_args=(OMARCHY_UPDATE_PACMAN=1)
+if [[ -n ${LC_ALL:-} ]]; then
+  env_args+=(LC_ALL="$LC_ALL")
+fi
+
+exec sudo env "${env_args[@]}" "${scope[@]}" pacman "$@"
+#!/bin/bash
+
+# omarchy:summary=Prevent direct pacman system upgrades from bypassing omarchy update.
+# omarchy:hidden=true
+
+set -euo pipefail
+
+if [[ ${OMARCHY_UPDATE_PACMAN:-} == "1" || ${OMARCHY_ALLOW_DIRECT_PACMAN:-} == "1" ]]; then
+  exit 0
+fi
+
+pacman_args=()
+if [[ -n ${OMARCHY_PACMAN_CMDLINE:-} ]]; then
+  read -r -a pacman_args <<<"$OMARCHY_PACMAN_CMDLINE"
+elif [[ -r /proc/$PPID/cmdline ]]; then
+  mapfile -d '' -t pacman_args <"/proc/$PPID/cmdline" || true
+fi
+
+is_system_upgrade=0
+has_sync=0
+has_sysupgrade=0
+
+for arg in "${pacman_args[@]}"; do
+  case "$arg" in
+    --sync)
+      has_sync=1
+      ;;
+    --sysupgrade)
+      has_sysupgrade=1
+      ;;
+    --*)
+      ;;
+    -*)
+      [[ $arg == *S* ]] && has_sync=1
+      [[ $arg == *u* ]] && has_sysupgrade=1
+      ;;
+  esac
+done
+
+if (( has_sync && has_sysupgrade )); then
+  is_system_upgrade=1
+fi
+
+(( is_system_upgrade )) || exit 0
+
+cat >&2 <<'MESSAGE'
+
+Woah partner...
+
+This looks like a direct pacman system upgrade. Omarchy updates should normally
+run through:
+
+  omarchy update
+
+That path handles the update transcript, snapshot, keyrings, package upgrade,
+migrations, post-update hooks, shell update state, and restart checks together.
+
+If you really meant to bypass Omarchy for this transaction, rerun pacman with:
+
+  sudo env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syu
+
+MESSAGE
+
+exit 1
+#!/bin/bash
+
+# omarchy:summary=Prune superseded versions from the pacman package cache
+# omarchy:requires-sudo=true
+
+set -e
+
+# The cache is the only offline downgrade path, so keep two. Run before the
+# packages update and the installed version survives with a spare. paccache
+# retains by version order, never by what is installed.
+echo -e "\e[32m\nPrune package cache\e[0m"
+sudo paccache -rk2 || echo -e "\e[33mCould not prune the package cache.\e[0m" >&2
+echo
+#!/bin/bash
+
+# omarchy:summary=Check free disk space required for an update
+# omarchy:hidden=true
+
+set -e
+
+if [[ ${OMARCHY_UPDATE_FORCE:-0} == "1" ]]; then
+  exit 0
+elif read -r available_bytes < <(df --output=avail --block-size=1 / 2>/dev/null | tail -n 1) &&
+  [[ $available_bytes =~ ^[0-9]+$ ]] &&
+  (( available_bytes < 10 * 1024 * 1024 * 1024 )); then
+  echo "You need at least 10 GiB free to safely update Omarchy."
+  exit 1
+else
+  exit 0
+fi
+#!/bin/bash
+
+# omarchy:summary=Prompt for required reboot or service restarts after updates
+# omarchy:args=[--services-only|--reboot-only]
+
+kernel_modules_path="${OMARCHY_KERNEL_MODULES_PATH:-/usr/lib/modules}"
+
+mode="${1:-all}"
+case "$mode" in
+  all|--services-only|--reboot-only) ;;
+  *) echo "Unknown restart phase: $mode" >&2; exit 2 ;;
+esac
+
+echo
+confirm_reboot() {
+  if [[ ${OMARCHY_UPDATE_UNATTENDED:-0} == "1" ]]; then
+    echo "$1 Run omarchy-system reboot when ready."
+  elif gum confirm --affirmative "$(omarchy-i18n common.yes)" --negative "$(omarchy-i18n common.no)" "$1"; then
+    omarchy-system reboot
+    exit 0
+  fi
+}
+
+if [[ $mode != "--services-only" ]]; then
+  running_kernel=$(uname -r)
+  kernel_updated=true
+
+  # Every kernel package owns modules.builtin; Arch Linux ARM's ships no vmlinuz here (#12440).
+  for kernel in "$kernel_modules_path"/*/modules.builtin; do
+    if [[ -f $kernel ]] && pacman -Qo "$kernel" &>/dev/null; then
+      installed_kernel=$(basename "$(dirname "$kernel")")
+
+      if [[ $installed_kernel == $running_kernel ]]; then
+        kernel_updated=false
+        break
+      fi
+    fi
+  done
+
+  if [[ $kernel_updated == "true" ]]; then
+    confirm_reboot "$(omarchy-i18n update.kernelReboot)"
+  elif [[ -f $HOME/.local/state/omarchy/reboot-required ]]; then
+    confirm_reboot "$(omarchy-i18n update.rebootRequired)"
+  fi
+
+  running_hyprland=$(readlink /proc/$(pgrep -x Hyprland)/exe 2>/dev/null)
+  if [[ $running_hyprland == *"(deleted)"* ]]; then
+    confirm_reboot "$(omarchy-i18n update.hyprlandReboot)"
+  fi
+fi
+
+if [[ $mode != "--reboot-only" ]]; then
+  for file in "$HOME"/.local/state/omarchy/restart-*-required; do
+    if [[ -f $file ]]; then
+      filename=$(basename "$file")
+      service=$(echo "$filename" | sed 's/restart-\(.*\)-required/\1/')
+      echo "Restarting $service"
+      omarchy-state clear "$filename"
+      omarchy-restart-"$service"
+    fi
+  done
+
+  # Updates routinely replace the shell's QML, and a stale process can lazy-load
+  # new files into old code. A restart failure (locked session, ssh, TTY) only
+  # prints its reason: the next update or login gets a fresh shell anyway.
+  echo -e "\e[32m\nRestarting shell\e[0m"
+  echo "All plugins have been reloaded"
+  omarchy-restart-shell || true
+fi
+#!/bin/bash
+
+# omarchy:summary=Clear the shell update indicator after an update
+# omarchy:hidden=true
+
+# omarchy-update now clears the indicator itself. This stays for an update
+# started by an older omarchy-update: its pipeline was parsed before the
+# upgrade replaced it, and still calls this right after a full upgrade that
+# went through, so there is nothing left for the indicator to show.
+omarchy-shell -q omarchy.system-update clear
+#!/bin/bash -p
+
+# omarchy:summary=Manage sleep and idle inhibition during an update
+# omarchy:args=<start|stop>
+# omarchy:hidden=true
+
+if [[ $- != *p* ]]; then
+  echo "Refusing an unsafe Bash startup." >&2
+  exit 126
+fi
+
+security_entrypoint=$(/usr/bin/readlink -e -- "${BASH_SOURCE[0]}") || exit 126
+source "${security_entrypoint%/*}/omarchy-security-functions" || exit 126
+omarchy_security_require_privileged_bash_startup || exit 126
+set -e
+omarchy_security_sanitize_bash_environment "$0" "$@"
+omarchy_security_require_source_root "$0"
+omarchy_security_install_signal_exit_traps
+export PATH="$OMARCHY_PATH/bin:/usr/bin:/usr/sbin:/bin:/sbin"
+
+stay_awake_state="$HOME/.local/state/omarchy/indicators/stay-awake"
+caller_uid=""
+state_base=""
+state_dir=""
+idle_owner_file=""
+inhibit_pid_file=""
+launch_control_file=""
+launch_pending=0
+launch_token=""
+
+fail_state_boundary() {
+  echo "Refusing to use an unsafe Omarchy update inhibitor state path." >&2
+  return 1
+}
+
+directory_is_private() {
+  local directory="$1"
+  local expected_owner="$2"
+  local legacy="${3:-0}"
+  local canonical=""
+  local owner=""
+  local mode=""
+
+  [[ -d $directory && ! -L $directory ]] || return 1
+  canonical=$(readlink -e -- "$directory") || return 1
+  [[ $canonical == "$directory" ]] || return 1
+  read -r owner mode < <(stat -Lc '%u %a' -- "$directory") || return 1
+  [[ $owner == "$expected_owner" ]] || return 1
+  [[ $mode == "700" ]] || (( legacy == 1 && (8#$mode & 022) == 0 ))
+}
+
+root_owned_parent_chain() {
+  local directory="$1"
+  local parent owner mode type canonical
+
+  parent=$(/usr/bin/dirname -- "$directory") || return 1
+  while :; do
+    [[ -d $parent && ! -L $parent ]] || return 1
+    canonical=$(/usr/bin/readlink -e -- "$parent") || return 1
+    [[ $canonical == "$parent" ]] || return 1
+    # %F is translated (fr_FR: répertoire). Force C so this matches "directory".
+    read -r owner mode type < <(LC_ALL=C /usr/bin/stat -Lc '%u %a %F' -- "$parent") || return 1
+    [[ $owner == 0 && $type == "directory" ]] || return 1
+    ! ((8#$mode & 022)) || return 1
+    [[ $parent == / ]] && break
+    parent=$(/usr/bin/dirname -- "$parent") || return 1
+  done
+}
+
+runtime_directory_is_private() {
+  local directory="$1" expected_owner="$2"
+  directory_is_private "$directory" "$expected_owner" &&
+    root_owned_parent_chain "$directory"
+}
+
+ensure_private_directory() {
+  local directory="$1"
+
+  if [[ ! -e $directory && ! -L $directory ]]; then
+    mkdir -m 700 -- "$directory" 2>/dev/null || true
+  fi
+  # Older helpers used mkdir -p with the caller's umask. Tighten only a
+  # canonical, caller-owned directory that other accounts cannot write.
+  directory_is_private "$directory" "$caller_uid" 1 || return 1
+  chmod 700 -- "$directory" || return 1
+  directory_is_private "$directory" "$caller_uid"
+}
+
+initialize_state_boundary() {
+  local canonical_tmp=""
+  local tmp_owner=""
+  local tmp_mode=""
+
+  caller_uid="$EUID"
+  [[ $caller_uid =~ ^[0-9]+$ ]] || return 1
+
+  if [[ -n ${XDG_RUNTIME_DIR:-} ]]; then
+    runtime_directory_is_private "$XDG_RUNTIME_DIR" "$caller_uid" || fail_state_boundary
+    state_base="$XDG_RUNTIME_DIR"
+  else
+    [[ -d /tmp && ! -L /tmp ]] || fail_state_boundary
+    canonical_tmp=$(readlink -e -- /tmp) || fail_state_boundary
+    read -r tmp_owner tmp_mode < <(stat -Lc '%u %a' -- /tmp) || fail_state_boundary
+    [[ $canonical_tmp == "/tmp" && $tmp_owner == "0" && $tmp_mode == "1777" ]] || fail_state_boundary
+
+    state_base="/tmp/omarchy-$caller_uid"
+    ensure_private_directory "$state_base" || fail_state_boundary
+  fi
+
+  state_dir="$state_base/omarchy-update-stay-awake"
+  idle_owner_file="$state_dir/idle-owner"
+  inhibit_pid_file="$state_dir/inhibit-pid"
+  launch_control_file="$state_dir/launch-control"
+}
+
+state_file_is_private() {
+  local state_file="$1"
+  local legacy="${2:-0}"
+  local owner=""
+  local mode=""
+  local links=""
+
+  [[ -f $state_file && ! -L $state_file ]] || return 1
+  read -r owner mode links < <(stat -Lc '%u %a %h' -- "$state_file") || return 1
+  [[ $owner == "$caller_uid" && $links == "1" ]] || return 1
+  [[ $mode == "600" ]] || (( legacy == 1 && (8#$mode & 022) == 0 ))
+}
+
+read_state_record() {
+  local state_file="$1"
+  local legacy="${2:-0}"
+  local records=()
+  local file_size=""
+  local LC_ALL=C
+
+  state_file_is_private "$state_file" "$legacy" || return 1
+  mapfile -t records <"$state_file" || return 1
+  (( ${#records[@]} == 1 )) || return 1
+  file_size=$(stat -Lc '%s' -- "$state_file") || return 1
+  (( file_size == ${#records[0]} + 1 )) || return 1
+  state_file_is_private "$state_file" "$legacy" || return 1
+  printf '%s\n' "${records[0]}"
+}
+
+atomic_write_state() {
+  local state_file="$1"
+  local record="$2"
+  local temporary=""
+
+  [[ $record != *$'\n'* ]] || return 1
+  temporary=$(mktemp "$state_dir/.${state_file##*/}.XXXXXXXX") || return 1
+  chmod 600 "$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  if ! printf '%s\n' "$record" >"$temporary" || ! state_file_is_private "$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  if [[ -e $state_file || -L $state_file ]]; then
+    state_file_is_private "$state_file" || {
+      rm -f -- "$temporary"
+      return 1
+    }
+  fi
+  mv -fT -- "$temporary" "$state_file" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  state_file_is_private "$state_file"
+}
+
+rollback_pending_launch() {
+  local control_fd=""
+  local inhibit_record=""
+  local inhibit_pid=""
+  local recorded_start_time=""
+  local recorded_owner=""
+  local token=""
+
+  (( launch_pending == 1 )) || return 0
+
+  if [[ -e $launch_control_file || -L $launch_control_file ]]; then
+    state_file_is_private "$launch_control_file" || return 1
+    exec {control_fd}<>"$launch_control_file" || return 1
+    /usr/bin/flock -x "$control_fd" || {
+      exec {control_fd}>&-
+      return 1
+    }
+    : >"/proc/self/fd/$control_fd"
+    printf 'cancelled %s\n' "$launch_token" >&"$control_fd"
+    rm -f -- "$launch_control_file"
+    /usr/bin/flock -u "$control_fd"
+    exec {control_fd}>&-
+  fi
+
+  inhibit_record=$(read_state_record "$inhibit_pid_file" 2>/dev/null || true)
+  if [[ $inhibit_record =~ ^1\ ([1-9][0-9]{0,18})\ ([1-9][0-9]{0,18})\ ([0-9]{1,10})\ ($launch_token)$ ]]; then
+    inhibit_pid="${BASH_REMATCH[1]}"
+    recorded_start_time="${BASH_REMATCH[2]}"
+    recorded_owner="${BASH_REMATCH[3]}"
+    token="${BASH_REMATCH[4]}"
+    if process_matches "$inhibit_pid" "$recorded_start_time" "$recorded_owner" "$token"; then
+      discard_launched_inhibitor "$inhibit_pid" "$recorded_start_time" "$recorded_owner" "$token"
+    fi
+    [[ $(read_state_record "$inhibit_pid_file" 2>/dev/null || true) != "$inhibit_record" ]] ||
+      rm -f -- "$inhibit_pid_file"
+  fi
+
+  # A signal may interrupt either parent-side atomic write before its rename.
+  rm -f -- "$state_dir"/.launch-control.* "$state_dir"/.idle-owner.*
+  stop_locked || return 1
+  launch_pending=0
+}
+
+cleanup_pending_launch() {
+  local status=$?
+
+  trap - EXIT HUP INT TERM
+  if ! rollback_pending_launch; then
+    echo "Failed to roll back the pending Omarchy update sleep inhibitor." >&2
+    (( status != 0 )) || status=1
+  fi
+  exit "$status"
+}
+
+process_start_time() {
+  local process_pid="$1"
+  local process_stat=""
+  local stat_fields=()
+
+  [[ -r /proc/$process_pid/stat ]] || return 1
+  process_stat=$(</proc/"$process_pid"/stat)
+  process_stat="${process_stat##*) }"
+  read -r -a stat_fields <<<"$process_stat"
+  (( ${#stat_fields[@]} > 19 )) || return 1
+  [[ ${stat_fields[19]} =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "${stat_fields[19]}"
+}
+
+process_owner() {
+  local process_pid="$1"
+  local token="$2"
+  local owner=""
+
+  if [[ -n $token ]]; then
+    owner=$(stat -Lc '%u' -- "/proc/$process_pid") || return 1
+  else
+    # Legacy state can name sudo: its real UID remains the invoking account,
+    # even when /proc ownership reflects its effective root credentials.
+    owner=$(awk '/^Uid:/ { print $2; exit }' "/proc/$process_pid/status") || return 1
+  fi
+  [[ $owner =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$owner"
+}
+
+process_has_token() {
+  local process_pid="$1"
+  local token="$2"
+  local argument=""
+  local expected="--why=Omarchy update in progress [$token]"
+
+  [[ -r /proc/$process_pid/cmdline ]] || return 1
+  while IFS= read -r -d '' argument; do
+    [[ $argument == "$expected" ]] && return 0
+  done <"/proc/$process_pid/cmdline"
+  return 1
+}
+
+process_identity() {
+  local process_pid="$1"
+  local token="$2"
+  local start_before=""
+  local start_after=""
+  local owner_before=""
+  local owner_after=""
+
+  start_before=$(process_start_time "$process_pid") || return 1
+  owner_before=$(process_owner "$process_pid" "$token") || return 1
+  [[ -z $token ]] || process_has_token "$process_pid" "$token" || return 1
+  start_after=$(process_start_time "$process_pid") || return 1
+  owner_after=$(process_owner "$process_pid" "$token") || return 1
+  [[ $start_before == "$start_after" && $owner_before == "$owner_after" ]] || return 1
+  printf '%s %s\n' "$start_before" "$owner_before"
+}
+
+process_matches() {
+  local process_pid="$1"
+  local expected_start="$2"
+  local expected_owner="$3"
+  local token="$4"
+  local identity=""
+
+  identity=$(process_identity "$process_pid" "$token" 2>/dev/null) || return 1
+  [[ $identity == "$expected_start $expected_owner" ]]
+}
+
+process_state() {
+  local process_pid="$1"
+  local process_stat=""
+
+  [[ -r /proc/$process_pid/stat ]] || return 1
+  process_stat=$(</proc/"$process_pid"/stat)
+  process_stat="${process_stat##*) }"
+  printf '%s\n' "${process_stat%% *}"
+}
+
+discard_launched_inhibitor() {
+  local inhibit_pid="$1"
+  local recorded_start_time="$2"
+  local recorded_owner="$3"
+  local token="$4"
+
+  signal_inhibitor "$inhibit_pid" "$recorded_start_time" "$recorded_owner" "$token" TERM || true
+  for (( attempt = 0; attempt < 25; attempt++ )); do
+    process_matches "$inhibit_pid" "$recorded_start_time" "$recorded_owner" "$token" || break
+    [[ $(process_state "$inhibit_pid" 2>/dev/null || true) == "Z" ]] && break
+    sleep 0.02
+  done
+  if process_matches "$inhibit_pid" "$recorded_start_time" "$recorded_owner" "$token" &&
+    [[ $(process_state "$inhibit_pid" 2>/dev/null || true) != "Z" ]]; then
+    signal_inhibitor "$inhibit_pid" "$recorded_start_time" "$recorded_owner" "$token" KILL || true
+  fi
+
+  if [[ ! -e /proc/$inhibit_pid ]] || [[ $(process_state "$inhibit_pid" 2>/dev/null || true) == "Z" ]]; then
+    wait "$inhibit_pid" 2>/dev/null || true
+  fi
+}
+
+signal_inhibitor() {
+  local inhibit_pid="$1"
+  local recorded_start_time="$2"
+  local recorded_owner="$3"
+  local token="$4"
+  local signal="$5"
+
+  [[ $recorded_owner == "$caller_uid" ]] || return 1
+  [[ $signal == "TERM" || $signal == "KILL" ]] || return 1
+  process_matches "$inhibit_pid" "$recorded_start_time" "$recorded_owner" "$token" || return 1
+  builtin kill -s "$signal" -- "$inhibit_pid" 2>/dev/null
+}
+
+terminate_inhibitor() {
+  local inhibit_pid="$1"
+  local recorded_start_time="$2"
+  local recorded_owner="$3"
+  local token="$4"
+
+  signal_inhibitor "$inhibit_pid" "$recorded_start_time" "$recorded_owner" "$token" TERM || true
+
+  for (( attempt = 0; attempt < 50; attempt++ )); do
+    process_matches "$inhibit_pid" "$recorded_start_time" "$recorded_owner" "$token" || return 0
+    [[ $(process_state "$inhibit_pid" 2>/dev/null || true) != "Z" ]] || return 0
+    sleep 0.02
+  done
+
+  process_matches "$inhibit_pid" "$recorded_start_time" "$recorded_owner" "$token" || return 0
+  [[ $(process_state "$inhibit_pid" 2>/dev/null || true) == "Z" ]] && return 0
+  return 1
+}
+
+stop_locked() {
+  local inhibit_record=""
+  local inhibit_pid=""
+  local recorded_start_time=""
+  local recorded_owner=""
+  local token=""
+  local idle_owner=""
+  local current_idle_owner=""
+  local current_start=""
+  local failed=0
+  local remove_inhibit_state=1
+
+  if [[ ! -e $state_dir && ! -L $state_dir ]]; then
+    return 0
+  fi
+  if ! ensure_private_directory "$state_dir"; then
+    fail_state_boundary
+    return 1
+  fi
+
+  if [[ -e $idle_owner_file || -L $idle_owner_file ]]; then
+    idle_owner=$(read_state_record "$idle_owner_file" 1 2>/dev/null || true)
+    if [[ $idle_owner =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; then
+      if [[ -f $stay_awake_state ]]; then
+        current_idle_owner=$(<"$stay_awake_state")
+      fi
+      if [[ $current_idle_owner == "$idle_owner" ]]; then
+        omarchy-toggle-idle allow-idle >/dev/null 2>&1 || true
+      fi
+    else
+      echo "Ignoring unsafe Omarchy update idle ownership state." >&2
+      failed=1
+    fi
+    rm -f -- "$idle_owner_file"
+  fi
+
+  if [[ -e $inhibit_pid_file || -L $inhibit_pid_file ]]; then
+    inhibit_record=$(read_state_record "$inhibit_pid_file" 1 2>/dev/null || true)
+    if state_file_is_private "$inhibit_pid_file" &&
+      [[ $inhibit_record =~ ^1\ ([1-9][0-9]{0,18})\ ([1-9][0-9]{0,18})\ ([0-9]{1,10})\ ([0-9a-f]{32})$ ]]; then
+      inhibit_pid="${BASH_REMATCH[1]}"
+      recorded_start_time="${BASH_REMATCH[2]}"
+      recorded_owner="${BASH_REMATCH[3]}"
+      token="${BASH_REMATCH[4]}"
+    elif [[ $inhibit_record =~ ^([1-9][0-9]{0,18})\ ([1-9][0-9]{0,18})$ ]]; then
+      # The first update starts the old helper and installs this one before
+      # cleanup. Its protected same-account record predates launch tokens.
+      inhibit_pid="${BASH_REMATCH[1]}"
+      recorded_start_time="${BASH_REMATCH[2]}"
+      recorded_owner="$caller_uid"
+      if [[ -e /proc/$inhibit_pid && $(process_state "$inhibit_pid" 2>/dev/null || true) != "Z" ]] &&
+        ! process_matches "$inhibit_pid" "$recorded_start_time" "$recorded_owner" ""; then
+        current_start=$(process_start_time "$inhibit_pid" 2>/dev/null || true)
+        if [[ -z $current_start || $current_start == "$recorded_start_time" ]]; then
+          echo "Cannot verify permission to stop the legacy update inhibitor; retained its state for recovery." >&2
+          failed=1
+          remove_inhibit_state=0
+        fi
+      fi
+    else
+      echo "Ignoring unsafe Omarchy update sleep inhibitor state." >&2
+      failed=1
+    fi
+    if [[ -n $inhibit_pid ]] && (( remove_inhibit_state == 1 )); then
+      if process_matches "$inhibit_pid" "$recorded_start_time" "$recorded_owner" "$token"; then
+        if ! terminate_inhibitor "$inhibit_pid" "$recorded_start_time" "$recorded_owner" "$token"; then
+          echo "Failed to stop the Omarchy update sleep inhibitor." >&2
+          failed=1
+          remove_inhibit_state=0
+        fi
+      fi
+    fi
+    (( remove_inhibit_state == 0 )) || rm -f -- "$inhibit_pid_file"
+  fi
+
+  rmdir "$state_dir" 2>/dev/null || true
+  (( failed == 0 ))
+}
+
+start_locked() {
+  local idle_owner="$$:$RANDOM:$RANDOM"
+  local token=""
+  local launcher_pid=""
+  local inhibit_record=""
+  local inhibit_pid=""
+  local inhibit_start_time=""
+  local inhibit_owner=""
+  local readiness_attempts=0
+
+  stop_locked || return 1
+  ensure_private_directory "$state_dir" || fail_state_boundary
+
+  token=$(LC_ALL=C /usr/bin/od -An -N16 -tx1 /dev/urandom | /usr/bin/tr -d ' \n')
+  [[ $token =~ ^[0-9a-f]{32}$ ]] || return 1
+  launch_token="$token"
+  launch_pending=1
+  trap cleanup_pending_launch EXIT
+  atomic_write_state "$launch_control_file" "active $token" || return 1
+
+  # The child is identifiable by the token in its arguments from the moment it
+  # starts. It stays a shell so stop's TERM ends it with a clean exit, since
+  # systemd-inhibit reports a child killed by a signal as an error.
+  local hold_command=(
+    /usr/bin/systemd-inhibit --what=sleep:idle --who=omarchy-update
+    --why="Omarchy update in progress [$token]" --mode=block
+    /usr/bin/setpriv --reuid "$caller_uid" --regid "$(/usr/bin/id -g)" --clear-groups
+    /usr/bin/bash -p -c '
+      set -e
+      umask 077
+      state_dir=$1
+      token=$2
+      owner=$3
+      control=$4
+      temporary=""
+      cleanup() { [[ -z $temporary ]] || /usr/bin/rm -f -- "$temporary"; }
+      trap cleanup EXIT
+      read -r process_stat <"/proc/$$/stat"
+      process_stat=${process_stat##*) }
+      read -r -a fields <<<"$process_stat"
+      temporary=$(/usr/bin/mktemp "$state_dir/.inhibit-pid.XXXXXXXX")
+      /usr/bin/chmod 600 "$temporary"
+      printf "1 %s %s %s %s\n" "$$" "${fields[19]}" "$owner" "$token" >"$temporary"
+      exec {control_fd}<"$control"
+      /usr/bin/flock -x "$control_fd"
+      IFS= read -r control_record <&"$control_fd"
+      [[ $control_record == "active $token" ]]
+      /usr/bin/mv -fT -- "$temporary" "$state_dir/inhibit-pid"
+      temporary=""
+      /usr/bin/flock -u "$control_fd"
+      exec {control_fd}>&-
+      trap - EXIT
+      trap "kill \$!; exit 0" TERM
+      /usr/bin/sleep infinity &
+      wait
+    ' "--why=Omarchy update in progress [$token]" "$state_dir" "$token" "$caller_uid" "$launch_control_file"
+  )
+
+  if (( EUID == 0 )); then
+    (
+      [[ -z ${OMARCHY_UPDATE_LOCK_FD:-} ]] || exec {OMARCHY_UPDATE_LOCK_FD}>&-
+      exec {state_lock_fd}>&-
+      exec "${hold_command[@]}"
+    ) &
+    launcher_pid=$!
+  elif [[ -t 0 ]] || /usr/bin/sudo -n /usr/bin/true 2>/dev/null; then
+    # Without a terminal, reuse a cached authorization non-interactively
+    # rather than asking again through polkit.
+    sudo_options=(-b)
+    [[ -t 0 ]] || sudo_options=(-n -b)
+    if ! (
+      [[ -z ${OMARCHY_UPDATE_LOCK_FD:-} ]] || exec {OMARCHY_UPDATE_LOCK_FD}>&-
+      exec {state_lock_fd}>&-
+      exec /usr/bin/sudo "${sudo_options[@]}" -- "${hold_command[@]}"
+    ); then
+      return 1
+    fi
+  else
+    (
+      [[ -z ${OMARCHY_UPDATE_LOCK_FD:-} ]] || exec {OMARCHY_UPDATE_LOCK_FD}>&-
+      exec {state_lock_fd}>&-
+      exec /usr/bin/pkexec "${hold_command[@]}"
+    ) &
+    launcher_pid=$!
+  fi
+
+  while :; do
+    inhibit_record=$(read_state_record "$inhibit_pid_file" 2>/dev/null || true)
+    if [[ $inhibit_record =~ ^1\ ([1-9][0-9]{0,18})\ ([1-9][0-9]{0,18})\ ([0-9]{1,10})\ ($token)$ ]]; then
+      inhibit_pid="${BASH_REMATCH[1]}"
+      inhibit_start_time="${BASH_REMATCH[2]}"
+      inhibit_owner="${BASH_REMATCH[3]}"
+      process_matches "$inhibit_pid" "$inhibit_start_time" "$inhibit_owner" "$token" && break
+    fi
+    if [[ -n $launcher_pid ]] && ! kill -0 "$launcher_pid" 2>/dev/null; then
+      wait "$launcher_pid" || return 1
+      echo "The update sleep inhibitor did not start." >&2
+      return 1
+    fi
+    (( readiness_attempts += 1 ))
+    if [[ -z $launcher_pid ]] && (( EUID != 0 && readiness_attempts >= 100 )); then
+      echo "The update sleep inhibitor did not become ready." >&2
+      return 1
+    fi
+    /usr/bin/sleep 0.05
+  done
+
+  if [[ -e $launch_control_file || -L $launch_control_file ]]; then
+    state_file_is_private "$launch_control_file" || return 1
+    rm -f -- "$launch_control_file"
+  fi
+  if [[ ! -f $stay_awake_state ]]; then
+    atomic_write_state "$idle_owner_file" "$idle_owner" || return 1
+    mkdir -p "$(dirname "$stay_awake_state")" || return 1
+    # The idle toggle uses this marker. Publish its owner in the same write so
+    # cancellation cannot leave an unowned Stay Awake setting behind.
+    if ! printf '%s\n' "$idle_owner" >"$stay_awake_state"; then
+      omarchy-toggle-idle allow-idle >/dev/null 2>&1 || true
+      return 1
+    fi
+  fi
+  launch_pending=0
+  trap - EXIT
+}
+
+case "${1:-}" in
+  start | stop) ;;
+  *)
+    echo "Usage: omarchy-update-stay-awake <start|stop>" >&2
+    exit 2
+    ;;
+esac
+
+initialize_state_boundary
+exec {state_lock_fd}<"$state_base" || fail_state_boundary
+flock -x "$state_lock_fd" || fail_state_boundary
+directory_is_private "$state_base" "$caller_uid" || fail_state_boundary
+
+case "$1" in
+  start)
+    start_locked
+    ;;
+  stop)
+    stop_locked
+    ;;
+esac
+#!/bin/bash
+
+# omarchy:summary=Update system packages with pacman
+# omarchy:requires-sudo=true
+
+set -e
+
+# The conflict handler's last resort: pacman puts its questions to the person
+# running the update instead of answering them itself. Nothing here may capture
+# a stream, because an upgrade without --noconfirm prompts on stderr. The
+# handler has already said why, so no heading here either.
+if [[ ${OMARCHY_UPDATE_CONFLICT:-} == 1 && ${OMARCHY_UPDATE_INTERACTIVE:-} == 1 ]]; then
+  exec omarchy-update-pacman -Syu --overwrite '/usr/share/omarchy/*'
+fi
+
+echo -e "\e[32m\nUpdate system packages\e[0m"
+
+errors=$(mktemp)
+trap 'rm -f "$errors"' EXIT
+
+# /usr/share/omarchy is wholly Omarchy's; files can land there unowned and would
+# otherwise abort the upgrade. Packaged content wins there.
+#
+# Progress bars stay on stdout. Errors are on stderr, kept for the conflict
+# handler below; LC_ALL=C is what keeps them parseable in any locale.
+if LC_ALL=C omarchy-update-pacman -Syu --noconfirm \
+  --overwrite '/usr/share/omarchy/*' 2>"$errors"; then
+  cat "$errors" >&2
+  exit 0
+fi
+cat "$errors" >&2
+
+# The handler takes it from here: it clears files pacman doesn't own yet and
+# runs this again, and puts a package conflict to whoever started the update.
+# Anything else, including a second failure, is for a human.
+[[ ${OMARCHY_UPDATE_RETRY:-} != 1 ]] || exit 1
+# exec, so the EXIT trap above does not fire and the handler can still read the
+# report. It takes over deleting it.
+exec env OMARCHY_UPDATE_CONFLICT=1 omarchy-update-system-pkgs-when-conflicted "$errors"
+#!/bin/bash
+
+# omarchy:summary=Retry a system package update that hit a conflict
+# omarchy:hidden=true
+
+# Internal to omarchy-update-system-pkgs. Not a command to run by hand: it acts
+# on a pacman error report, and an old or hand-written one would move live files
+# out of the way for an upgrade that is not happening.
+#
+# Paths written by a script rather than installed by a package -- an earlier
+# release's installer, an in-place edit -- belong to nobody, and pacman refuses
+# to install over a file it doesn't own. This clears them and runs the upgrade
+# again.
+#
+# Packages that conflict with each other are the other blocked upgrade, and that
+# one is a decision rather than a cleanup, so it goes back to the person
+# watching the update.
+
+set -e
+
+[[ ${OMARCHY_UPDATE_CONFLICT:-} == 1 ]] || {
+  echo "omarchy-update-system-pkgs-when-conflicted runs as part of omarchy update" >&2
+  exit 1
+}
+
+errors=${1:?usage: omarchy-update-system-pkgs-when-conflicted <pacman-error-report>}
+
+# Where a file pacman is taking over gets moved, mirroring its full path. Kept
+# out of the directory it came from: SDDM reads every file in sddm.conf.d
+# whatever its extension, and systemd-sleep runs every executable in
+# system-sleep, so a copy left beside the original would still be live.
+replaced=${OMARCHY_REPLACED_DIR:-/var/lib/omarchy/replaced}
+
+# Anything moved that the upgrade didn't end up installing goes back, whether
+# the retry failed or the move loop itself was interrupted partway. Nothing here
+# should leave configuration inactive that was live when it started.
+#
+# -e follows symlinks, so a dangling one reads as absent. -L catches those: a
+# link pacman installed, and a relative link that no longer resolves from inside
+# the quarantine.
+moved=()
+restore_moved() {
+  local path restorable=()
+
+  for path in "${moved[@]}"; do
+    if [[ ! -e $path && ! -L $path ]] && [[ -e $replaced$path || -L $replaced$path ]]; then
+      restorable+=("$path")
+    fi
+  done
+  ((${#restorable[@]})) || return 0
+
+  echo -e "\e[33m\nPutting back what the upgrade didn't take:\e[0m"
+  for path in "${restorable[@]}"; do
+    sudo mv -T "$replaced$path" "$path"
+    echo "  $path"
+  done
+}
+
+# exec'd into, so the caller's EXIT trap never ran and the report is still here.
+# Cleaning it up is this script's job from now on.
+trap 'restore_moved; rm -f "$errors"' EXIT
+trap 'exit 1' INT TERM
+
+# Pacman answers its own conflict question with No under --noconfirm, so one
+# retired package can stop every upgrade after it. Which package to drop is a
+# decision -- an upstream split retires one, but so does a package the user
+# picked on purpose -- so put the question to whoever started the update rather
+# than guess at it. Pacman printed what conflicts just above.
+if grep -q 'unresolvable package conflicts detected' "$errors"; then
+  # -y promised not to ask anything, and without a terminal there is nowhere to
+  # ask; either way pacman would sit on a prompt nobody answers. An upgrade that
+  # isn't running --noconfirm puts its questions on stderr and reads the answers
+  # from stdin, so those are the two that have to be a terminal.
+  if [[ ${OMARCHY_UPDATE_UNATTENDED:-} == 1 || ! -t 0 || ! -t 2 ]]; then
+    echo -e "\e[33m\nThis upgrade needs an answer. Run omarchy update interactively to give it.\e[0m" >&2
+    exit 1
+  fi
+
+  echo -e "\e[33m\nA package conflict stopped this upgrade. Running it again so you can answer:\e[0m"
+  OMARCHY_UPDATE_INTERACTIVE=1 omarchy-update-system-pkgs
+  exit 0
+fi
+
+# Paths one of these packages installs that pacman doesn't own. Moving them out
+# of the way is what lets the upgrade through, and works on a leftover directory
+# as well as a file.
+#
+# "pkg: /path exists in filesystem" is unowned; the same line plus "(owned by
+# x)" is not, so the end anchor takes only ours. -Qo re-checks the live database
+# before anything moves.
+mapfile -t leftovers < <(
+  grep -oP '^omarchy(-dev|-settings|-settings-dev)?: \K.+(?= exists in filesystem$)' "$errors" |
+    while IFS= read -r path; do pacman -Qo "$path" &>/dev/null || echo "$path"; done
+)
+((${#leftovers[@]})) || exit 1
+
+# All of them or none: moving a subset leaves the retry blocked by the rest, and
+# the moved files inactive for nothing.
+((${#leftovers[@]} == $(grep -c ' exists in filesystem' "$errors"))) || exit 1
+
+# A platform whose boot package owns the boot chain may also have files no
+# package owns that it can't do without (written by its image or installer).
+# Its boot package vouches for the takeover or refuses it, and the files stay.
+# Where the platform registers none, nothing resolves and nothing asks for root.
+takeover=$(omarchy-lifecycle-dispatch --resolve update-takeover) || exit 1
+if [[ -n $takeover ]] && ! sudo omarchy-lifecycle-dispatch update-takeover "${leftovers[@]}"; then
+  echo -e "\e[33m\nThis platform keeps these files, so the upgrade can't take them over:\e[0m" >&2
+  printf '  %s\n' "${leftovers[@]}" >&2
+  exit 1
+fi
+
+echo -e "\e[33m\nTaking over files pacman doesn't own yet:\e[0m"
+for path in "${leftovers[@]}"; do
+  sudo mkdir -p "$replaced${path%/*}"
+  # -T so an existing directory at the destination is replaced, not moved into.
+  sudo mv -T --backup=numbered "$path" "$replaced$path"
+  moved+=("$path")
+  echo "  $path -> $replaced$path"
+done
+echo
+
+if OMARCHY_UPDATE_RETRY=1 omarchy-update-system-pkgs; then
+  moved=()
+  exit 0
+fi
+exit 1
+#!/bin/bash
+
+# omarchy:summary=Restart system time synchronization
+# omarchy:requires-sudo=true
+
+echo "Updating time..."
+sudo systemctl restart systemd-timesyncd
+#!/bin/bash
+
+# omarchy:summary=Compatibility wrapper for omarchy-migrate-notify.
+# omarchy:hidden=true
+
+exec omarchy-migrate-notify "$@"
+#!/bin/bash
+
+# omarchy:summary=Play the current background's matching theme intro
+# omarchy:hidden=true
+
+set -euo pipefail
+
+state_home="$HOME/.local/state"
+current_dir="$state_home/omarchy/current"
+current_background_link="$current_dir/background"
+marker="$state_home/omarchy/background-intro.session-id"
+toggle="$state_home/omarchy/toggles/background-intros-off"
+video_extensions=(mp4 m4v mov webm mkv avi)
+
+resolve_intro() {
+  local background
+  local stem
+  local extension
+  local intro
+
+  background=$(readlink -f "${1:-$current_background_link}" 2>/dev/null) || return 1
+  [[ -f $background ]] || return 1
+  case ${background,,} in
+  *.jpg | *.jpeg | *.png | *.bmp | *.webp) ;;
+  *) return 1 ;;
+  esac
+
+  stem=${background##*/}
+  stem=${stem%.*}
+  for extension in "${video_extensions[@]}"; do
+    intro="${background%/*}/intros/$stem.$extension"
+    if [[ -f $intro ]]; then
+      printf '%s\n' "$intro"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Preparation is speculative: the selected staged clip is compared again by OWE.
+prepare_theme_intro() {
+  local theme="$1" background remembered name source intro
+  local -a names=()
+  [[ -n $theme && $theme != .* && $theme != */* ]] || return 0
+  [[ ! -f $toggle ]] && ! animations_off || return 0
+  owe warm >/dev/null 2>&1 || return 0
+  [[ $(cat "$current_dir/theme.name" 2>/dev/null) != "$theme" ]] || return 0
+  remembered=$(cat "$state_home/omarchy/theme-backgrounds/$theme" 2>/dev/null || true)
+  if [[ ${remembered%/*} == "$current_dir/theme/backgrounds" ]]; then
+    name=${remembered##*/}
+  elif [[ -f $remembered ]]; then
+    background="$remembered"
+  else
+    mapfile -d '' -t names < <(
+      find -L "$HOME/.config/omarchy/backgrounds/$theme" -maxdepth 1 -type f -print0 2>/dev/null | sort -z
+    )
+    if (( ${#names[@]} > 0 )); then
+      background=${names[0]}
+    else
+      mapfile -d '' -t names < <(
+        find -L "$OMARCHY_PATH/themes/$theme/backgrounds" "$HOME/.config/omarchy/themes/$theme/backgrounds" -maxdepth 1 -type f \
+          \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.bmp' -o -iname '*.webp' \) -printf '%f\0' 2>/dev/null | sort -zu
+      )
+      (( ${#names[@]} > 0 )) || return 0
+      name=${names[0]}
+    fi
+  fi
+  if [[ -n ${name:-} ]]; then
+    for source in "$HOME/.config/omarchy/themes/$theme" "$OMARCHY_PATH/themes/$theme"; do
+      if [[ -f $source/backgrounds/$name ]]; then
+        background="$source/backgrounds/$name"
+        break
+      fi
+    done
+  fi
+  [[ -n ${background:-} ]] || return 0
+  intro=$(resolve_intro "$background" || true)
+  [[ -z $intro ]] || owe intro-prepare "$intro" >/dev/null 2>&1 || true
+}
+
+animations_off() {
+  [[ $(hyprctl -j getoption animations:enabled 2>/dev/null | jq -r '.bool' 2>/dev/null) == "false" ]]
+}
+
+
+case ${1:-} in
+  "") ;;
+  --prepare-theme)
+    prepare_theme_intro "${2:-}"
+    exit 0
+    ;;
+  --resolve-only)
+    resolve_intro "${2:-}" || true
+    exit 0
+    ;;
+  # The clip that would play for a background, or the current one, now: none
+  # while intros or animations are off.
+  --resolve-startup | --resolve-enabled)
+    if [[ ! -f $toggle ]] && ! animations_off; then
+      resolve_intro "${2:-}" || true
+    fi
+    exit 0
+    ;;
+  *)
+    echo "Usage: omarchy-theme-bg-boot-intro [--resolve-only [background]|--resolve-enabled [background]|--resolve-startup|--prepare-theme theme]" >&2
+    exit 1
+    ;;
+esac
+
+mkdir -p "$(dirname "$marker")"
+exec 9>"$state_home/omarchy/background-intro.lock"
+flock 9
+
+session_id=${OMARCHY_SESSION_ID:-${HYPRLAND_INSTANCE_SIGNATURE:-}}
+[[ -n $session_id ]] || exit 0
+if [[ -f $marker && $(<"$marker") == "$session_id" ]]; then
+  exit 0
+fi
+
+# The shell reads the marker at startup, so it is replaced whole. The lock
+# keeps this the only writer, so a fixed staging name is safe.
+printf '%s\n' "$session_id" >"$marker.staged"
+mv -f "$marker.staged" "$marker"
+exec 9>&-
+
+if [[ -f $toggle ]] || animations_off; then
+  exit 0
+fi
+
+intro=$(resolve_intro || true)
+if [[ -z $intro ]]; then
+  exit 0
+fi
+
+deadline=$((SECONDS + 5))
+while ! timeout 1 owe status >/dev/null 2>&1; do
+  if (( SECONDS >= deadline )); then
+    exit 0
+  fi
+  sleep 0.2
+done
+(( SECONDS < deadline )) || exit 0
+
+# A selection or setting changed while OWE was starting no longer permits this intro.
+if [[ ! -f $toggle && $intro == "$(resolve_intro || true)" ]] && ! animations_off; then
+  owe intro --start first-frame "$intro"
+fi
+#!/bin/bash
+
+# omarchy:summary=Cache background switcher thumbnails for the current theme
+
+theme_name=$(cat "$HOME/.local/state/omarchy/current/theme.name" 2>/dev/null)
+
+omarchy-menu-images \
+  --cache-only \
+  "$HOME/.local/state/omarchy/current/theme/backgrounds" \
+  "$HOME/.config/omarchy/backgrounds/$theme_name"
+#!/bin/bash
+
+# omarchy:summary=Show current background
+# omarchy:examples=omarchy theme bg current
+
+BACKGROUND_PATH=$(readlink -f "$HOME/.local/state/omarchy/current/background" 2>/dev/null)
+
+if [[ -n $BACKGROUND_PATH ]]; then
+  basename -- "$BACKGROUND_PATH" | perl -pe 's/\.[^.]+$//; s/^\d+-//; s/-/ /g; s/\b(\w)/\U$1/g'
+else
+  echo "Unknown"
+fi
+#!/bin/bash
+
+# omarchy:summary=Open the current theme's user background folder
+
+CURRENT_THEME_NAME=$(cat "$HOME/.local/state/omarchy/current/theme.name")
+THEME_USER_BACKGROUNDS="$HOME/.config/omarchy/backgrounds/$CURRENT_THEME_NAME"
+
+mkdir -p "$THEME_USER_BACKGROUNDS"
+nautilus "$THEME_USER_BACKGROUNDS"
+#!/bin/bash
+
+# omarchy:summary=Enable or disable background intros
+# omarchy:args=<enable|disable|toggle|status>
+# omarchy:examples=omarchy theme bg intro toggle | omarchy theme bg intro disable
+
+set -euo pipefail
+
+toggle="$HOME/.local/state/omarchy/toggles/background-intros-off"
+case ${1:-} in
+  enable)
+    rm -f "$toggle"
+    omarchy-notification-send "$(omarchy-i18n theme.backgroundIntros)" "$(omarchy-i18n common.enabled)"
+    ;;
+  disable)
+    mkdir -p "$(dirname "$toggle")"
+    touch "$toggle"
+    omarchy-notification-send "$(omarchy-i18n theme.backgroundIntros)" "$(omarchy-i18n common.disabled)"
+    ;;
+  toggle)
+    if [[ -f $toggle ]]; then
+      omarchy-theme-bg-intro enable
+    else
+      omarchy-theme-bg-intro disable
+    fi
+    ;;
+  status)
+    [[ ! -f $toggle ]]
+    ;;
+  *)
+    echo "Usage: omarchy-theme-bg-intro <enable|disable|toggle|status>" >&2
+    exit 1
+    ;;
+esac
+#!/bin/bash
+
+# omarchy:summary=Cycle to the next background for the current theme
+# omarchy:examples=omarchy theme bg next
+
+THEME_NAME=$(cat "$HOME/.local/state/omarchy/current/theme.name" 2>/dev/null)
+THEME_BACKGROUNDS_PATH="$HOME/.local/state/omarchy/current/theme/backgrounds/"
+USER_BACKGROUNDS_PATH="$HOME/.config/omarchy/backgrounds/$THEME_NAME/"
+CURRENT_BACKGROUND_LINK="$HOME/.local/state/omarchy/current/background"
+
+mapfile -d '' -t BACKGROUNDS < <(
+  find -L "$USER_BACKGROUNDS_PATH" "$THEME_BACKGROUNDS_PATH" -maxdepth 1 -type f \
+    \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.bmp' -o -iname '*.webp' \
+       -o -iname '*.mp4' -o -iname '*.m4v' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.mkv' -o -iname '*.avi' \) \
+    -print0 2>/dev/null | sort -z
+)
+TOTAL=${#BACKGROUNDS[@]}
+
+if (( TOTAL == 0 )); then
+  omarchy-notification-send "$(omarchy-i18n theme.noBackground)" -t 2000
+else
+  # The shell knows a selection it has not linked yet, so quick presses each
+  # move on from the one before. Without it, the link names the current one.
+  # With neither, cycling starts from the first background.
+  CURRENT_BACKGROUND=$(omarchy-shell shell selectedBackground 2>/dev/null)
+  if [[ -z $CURRENT_BACKGROUND && -L $CURRENT_BACKGROUND_LINK ]]; then
+    CURRENT_BACKGROUND=$(readlink "$CURRENT_BACKGROUND_LINK")
+  fi
+
+  # Find current background index
+  INDEX=-1
+  for i in "${!BACKGROUNDS[@]}"; do
+    if [[ ${BACKGROUNDS[$i]} == "$CURRENT_BACKGROUND" ]]; then
+      INDEX=$i
+      break
+    fi
+  done
+
+  # Get next background (wrap around)
+  if (( INDEX == -1 )); then
+    # Use the first background when no match was found
+    NEW_BACKGROUND="${BACKGROUNDS[0]}"
+  else
+    NEXT_INDEX=$(((INDEX + 1) % TOTAL))
+    NEW_BACKGROUND="${BACKGROUNDS[$NEXT_INDEX]}"
+  fi
+
+  omarchy-theme-bg-set "$NEW_BACKGROUND"
+fi
+#!/bin/bash
+
+# omarchy:summary=Set the current background image or video
+# omarchy:args=<path-to-media>
+# omarchy:examples=omarchy theme bg set ~/Pictures/background.png
+
+if [[ -z $1 ]]; then
+  echo "Usage: omarchy-theme-bg-set <path-to-media>" >&2
+  exit 1
+fi
+
+BACKGROUND="$(realpath "$1")"
+CURRENT_BACKGROUND_LINK="$HOME/.local/state/omarchy/current/background"
+
+if [[ ! -f $BACKGROUND ]]; then
+  echo "File does not exist: $BACKGROUND" >&2
+  exit 1
+fi
+
+# A theme switch repoints the background too, so the two take turns.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/omarchy-theme-set.lock"
+flock 9
+
+INTRO=$(omarchy-theme-bg-boot-intro --resolve-enabled "$BACKGROUND")
+
+# The shell sequences the change, with the intro or the ordinary transition,
+# and repoints the link itself once nothing on screen can flash.
+if [[ $(omarchy-shell shell switchBackground "$BACKGROUND" "$INTRO" 2>/dev/null) != "ok" ]]; then
+  ln -nsf "$BACKGROUND" "$CURRENT_BACKGROUND_LINK"
+  omarchy-shell -q background set "$BACKGROUND"
+fi
+#!/bin/bash
+
+# omarchy:summary=Open the Omarchy background switcher
+# omarchy:group=theme
+# omarchy:name=bg-switcher
+# omarchy:aliases=omarchy background
+
+theme_name=$(cat "$HOME/.local/state/omarchy/current/theme.name" 2>/dev/null)
+current_background=$(readlink -f "$HOME/.local/state/omarchy/current/background" 2>/dev/null)
+
+omarchy-menu-images \
+  --selected "$current_background" \
+  "$HOME/.local/state/omarchy/current/theme/backgrounds" \
+  "$HOME/.config/omarchy/backgrounds/$theme_name"
+#!/bin/bash
+
+# omarchy:summary=Resolve semantic colors from an Omarchy theme colors.toml
+# omarchy:args=[--file <colors.toml>] (--all | --raw | <key> [fallback])
+# omarchy:hidden=true
+
+# Shared colors.toml parser/resolver. The alias/fallback cascade mirrors what
+# omarchy-theme-set-templates bakes into the generated configs at theme-set
+# time, so every consumer (templates, OSC sequences, tmux, GNOME, previews)
+# resolves the exact same palette.
+#
+#   --all            print every resolved key<TAB>value pair (sorted by key)
+#   --raw            print only the key<TAB>value pairs defined in the file
+#   <key> [fallback] print one resolved value; the fallback is tried as
+#                    another palette key first, then used verbatim
+#
+# Theme mode precedence: `mode` key, legacy `theme_type` key, a light.mode
+# file beside the colors.toml, background luminance auto-detect, dark.
+
+COLORS_FILE="$HOME/.local/state/omarchy/current/theme/colors.toml"
+OUTPUT=""
+QUERY_KEY=""
+QUERY_FALLBACK=""
+
+usage() {
+  echo "Usage: omarchy-theme-color [--file <colors.toml>] (--all | --raw | <key> [fallback])"
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    --file)
+      COLORS_FILE="${2:-}"
+      shift 2
+      ;;
+    --all)
+      OUTPUT="all"
+      shift
+      ;;
+    --raw)
+      OUTPUT="raw"
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      if [[ -z $QUERY_KEY ]]; then
+        QUERY_KEY="$1"
+      elif [[ -z $QUERY_FALLBACK ]]; then
+        QUERY_FALLBACK="$1"
+      else
+        usage >&2
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z $OUTPUT && -z $QUERY_KEY ]] || [[ -n $OUTPUT && -n $QUERY_KEY ]]; then
+  usage >&2
+  exit 1
+fi
+
+COLORS_DIR=$(dirname "$COLORS_FILE")
+
+declare -A THEME_COLORS
+
+# Mix two hex colors. Amount may be a fraction (0.30) or percentage (30%).
+mix_color() {
+  local start="${1#\#}"
+  local end="${2#\#}"
+  local amount="$3"
+
+  awk -v start="$start" -v end="$end" -v amount="$amount" '
+    function hex_value(char) {
+      return index("0123456789abcdef", tolower(char)) - 1
+    }
+
+    function hex_pair_to_int(hex, idx) {
+      return hex_value(substr(hex, idx, 1)) * 16 + hex_value(substr(hex, idx + 1, 1))
+    }
+
+    BEGIN {
+      if (amount ~ /%$/) {
+        sub(/%$/, "", amount)
+        amount = amount / 100
+      } else {
+        amount += 0
+        if (amount > 1) amount = amount / 100
+      }
+
+      if (amount < 0) amount = 0
+      if (amount > 1) amount = 1
+
+      start_r = hex_pair_to_int(start, 1)
+      start_g = hex_pair_to_int(start, 3)
+      start_b = hex_pair_to_int(start, 5)
+      end_r = hex_pair_to_int(end, 1)
+      end_g = hex_pair_to_int(end, 3)
+      end_b = hex_pair_to_int(end, 5)
+
+      red = int(start_r * (1 - amount) + end_r * amount + 0.5)
+      green = int(start_g * (1 - amount) + end_g * amount + 0.5)
+      blue = int(start_b * (1 - amount) + end_b * amount + 0.5)
+
+      printf "#%02x%02x%02x\n", red, green, blue
+    }
+  '
+}
+
+alias_theme_color() {
+  local key="$1"
+  local fallback="$2"
+
+  [[ ${THEME_COLORS[$key]} ]] || THEME_COLORS[$key]="${THEME_COLORS[$fallback]}"
+}
+
+resolve_theme_mode() {
+  local bg_hex lum
+
+  [[ ${THEME_COLORS[mode]} ]] || THEME_COLORS[mode]="${THEME_COLORS[theme_type]}"
+  [[ ${THEME_COLORS[mode]} ]] && return
+
+  if [[ -f $COLORS_DIR/light.mode ]]; then
+    THEME_COLORS[mode]="light"
+  elif [[ ${THEME_COLORS[background]} =~ ^#[0-9A-Fa-f]{6}$ ]]; then
+    bg_hex="${THEME_COLORS[background]#\#}"
+    lum=$(( $(printf "%d" "0x${bg_hex:0:2}") + $(printf "%d" "0x${bg_hex:2:2}") + $(printf "%d" "0x${bg_hex:4:2}") ))
+    (( lum > 382 )) && THEME_COLORS[mode]="light" || THEME_COLORS[mode]="dark"
+  else
+    THEME_COLORS[mode]="dark"
+  fi
+}
+
+parse_colors_file() {
+  local key value
+
+  [[ -f $COLORS_FILE ]] || return 0
+
+  while IFS='=' read -r key value; do
+    key="${key//[\"\' ]/}"                # strip quotes and spaces from key
+    [[ $key && $key != \#* ]] || continue # skip empty lines and comments
+
+    if [[ $value == *[\"\']* ]]; then
+      value="${value#*[\"\']}"
+      value="${value%%[\"\']*}" # extract value between quotes (ignores inline comments)
+    else
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}" # trim unquoted values
+    fi
+
+    # Values reach consumers as sed replacement text, so the charset excludes
+    # the delimiter, backslash, and & while still covering everything a real
+    # palette holds: hex, rgb()/rgba() lists, gradient angles like -45deg,
+    # decimals, and bare words. Rejections are announced so a third-party theme
+    # doesn't lose a key silently and leave a raw {{ placeholder }} behind.
+    if [[ ! $key =~ ^[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]+$ ]]; then
+      printf 'omarchy-theme-color: skipping key with unsupported characters\n' >&2
+      continue
+    fi
+
+    if [[ ! $value =~ ^[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#(),._+/%\ -]*$ ]]; then
+      printf 'omarchy-theme-color: skipping %s: unsupported characters in value\n' "$key" >&2
+      continue
+    fi
+
+    THEME_COLORS[$key]="$value"
+    [[ $OUTPUT == "raw" ]] && printf '%s\t%s\n' "$key" "$value"
+  done <"$COLORS_FILE"
+
+  return 0
+}
+
+resolve_theme_colors() {
+  local key
+
+  # Accept the complete legacy short-name palette before applying ANSI
+  # fallbacks or deriving shades. Canonical names take precedence when a theme
+  # defines both forms.
+  declare -A legacy_palette_alias=(
+    [background]=bg
+    [dark_background]=dark_bg
+    [darker_background]=darker_bg
+    [lighter_background]=lighter_bg
+    [foreground]=fg
+    [dark_foreground]=dark_fg
+    [light_foreground]=light_fg
+    [bright_foreground]=bright_fg
+  )
+  for key in "${!legacy_palette_alias[@]}"; do
+    alias_theme_color "$key" "${legacy_palette_alias[$key]}"
+  done
+
+  # Themes generated before the semantic palette may only define ANSI names.
+  [[ ${THEME_COLORS[background]} ]] || THEME_COLORS[background]="${THEME_COLORS[color0]}"
+  [[ ${THEME_COLORS[foreground]} ]] || THEME_COLORS[foreground]="${THEME_COLORS[color7]}"
+  [[ ${THEME_COLORS[background]} ]] && THEME_COLORS[color0]="${THEME_COLORS[background]}"
+  [[ ${THEME_COLORS[foreground]} ]] && THEME_COLORS[color7]="${THEME_COLORS[foreground]}"
+
+  # Legacy compatibility: map ANSI color0..color15 to semantic names.
+  declare -A legacy_alias=(
+    [red]=color1
+    [green]=color2
+    [yellow]=color3
+    [blue]=color4
+    [magenta]=color5
+    [cyan]=color6
+    [bright_red]=color9
+    [bright_green]=color10
+    [bright_yellow]=color11
+    [bright_blue]=color12
+    [bright_magenta]=color13
+    [bright_cyan]=color14
+  )
+  for key in "${!legacy_alias[@]}"; do
+    alias_theme_color "$key" "${legacy_alias[$key]}"
+  done
+  alias_theme_color magenta purple
+  alias_theme_color bright_magenta bright_purple
+
+  [[ ${THEME_COLORS[light_foreground]} ]]  || THEME_COLORS[light_foreground]="${THEME_COLORS[color7]:-${THEME_COLORS[foreground]}}"
+  [[ ${THEME_COLORS[bright_foreground]} ]] || THEME_COLORS[bright_foreground]="${THEME_COLORS[color15]:-${THEME_COLORS[foreground]}}"
+  THEME_COLORS[cursor]="${THEME_COLORS[bright_foreground]}"
+  [[ ${THEME_COLORS[lighter_background]} ]] || THEME_COLORS[lighter_background]="${THEME_COLORS[color0]:-${THEME_COLORS[background]}}"
+  [[ ${THEME_COLORS[dark_foreground]} ]]    || THEME_COLORS[dark_foreground]="${THEME_COLORS[color8]:-${THEME_COLORS[foreground]}}"
+  [[ ${THEME_COLORS[muted]} ]]      || THEME_COLORS[muted]="${THEME_COLORS[color8]:-${THEME_COLORS[dark_foreground]}}"
+  [[ ${THEME_COLORS[selection]} ]]            || THEME_COLORS[selection]="${THEME_COLORS[selection_background]:-${THEME_COLORS[color8]:-${THEME_COLORS[color0]:-${THEME_COLORS[background]}}}}"
+  [[ ${THEME_COLORS[selection_background]} ]] || THEME_COLORS[selection_background]="${THEME_COLORS[selection]}"
+  [[ ${THEME_COLORS[selection_foreground]} ]] || THEME_COLORS[selection_foreground]="${THEME_COLORS[bright_foreground]}"
+  [[ ${THEME_COLORS[orange]} ]]               || THEME_COLORS[orange]="${THEME_COLORS[yellow]}"
+  [[ ${THEME_COLORS[brown]} ]]      || THEME_COLORS[brown]=$(mix_color "${THEME_COLORS[orange]}" "#000000" 50%)
+
+  # Auto-derive shades from base accents when not defined and not aliased from colorN
+  [[ ${THEME_COLORS[dark_background]} ]]   || THEME_COLORS[dark_background]=$(mix_color "${THEME_COLORS[background]}" "#000000" 25%)
+  [[ ${THEME_COLORS[darker_background]} ]] || THEME_COLORS[darker_background]=$(mix_color "${THEME_COLORS[background]}" "#000000" 50%)
+  [[ ${THEME_COLORS[bright_red]} ]]    || THEME_COLORS[bright_red]=$(mix_color "${THEME_COLORS[red]}" "#ffffff" 20%)
+  [[ ${THEME_COLORS[bright_yellow]} ]] || THEME_COLORS[bright_yellow]=$(mix_color "${THEME_COLORS[yellow]}" "#ffffff" 20%)
+  [[ ${THEME_COLORS[bright_green]} ]]  || THEME_COLORS[bright_green]=$(mix_color "${THEME_COLORS[green]}" "#ffffff" 20%)
+  [[ ${THEME_COLORS[bright_cyan]} ]]   || THEME_COLORS[bright_cyan]=$(mix_color "${THEME_COLORS[cyan]}" "#ffffff" 20%)
+  [[ ${THEME_COLORS[bright_blue]} ]]   || THEME_COLORS[bright_blue]=$(mix_color "${THEME_COLORS[blue]}" "#ffffff" 20%)
+  [[ ${THEME_COLORS[bright_magenta]} ]] || THEME_COLORS[bright_magenta]=$(mix_color "${THEME_COLORS[magenta]}" "#ffffff" 20%)
+  alias_theme_color purple magenta
+  alias_theme_color bright_purple bright_magenta
+
+  # Keep semantic themes compatible with consumers that still reference the
+  # legacy ANSI names directly.
+  declare -A ansi_alias=(
+    [color0]=background
+    [color1]=red
+    [color2]=green
+    [color3]=yellow
+    [color4]=blue
+    [color5]=magenta
+    [color6]=cyan
+    [color7]=foreground
+    [color8]=muted
+    [color9]=bright_red
+    [color10]=bright_green
+    [color11]=bright_yellow
+    [color12]=bright_blue
+    [color13]=bright_magenta
+    [color14]=bright_cyan
+    [color15]=bright_foreground
+  )
+  for key in "${!ansi_alias[@]}"; do
+    alias_theme_color "$key" "${ansi_alias[$key]}"
+  done
+
+  # Keep canonical themes compatible with old user templates and consumers
+  # that still query the short palette names directly.
+  for key in "${!legacy_palette_alias[@]}"; do
+    if [[ ${THEME_COLORS[$key]} ]]; then
+      THEME_COLORS["${legacy_palette_alias[$key]}"]="${THEME_COLORS[$key]}"
+    fi
+  done
+
+  resolve_theme_mode
+  THEME_COLORS[theme_type]="${THEME_COLORS[mode]}"
+}
+
+parse_colors_file
+
+if [[ $OUTPUT == "raw" ]]; then
+  exit 0
+fi
+
+resolve_theme_colors
+
+if [[ $OUTPUT == "all" ]]; then
+  while IFS= read -r key; do
+    printf '%s\t%s\n' "$key" "${THEME_COLORS[$key]}"
+  done < <(printf '%s\n' "${!THEME_COLORS[@]}" | LC_ALL=C sort)
+  exit 0
+fi
+
+value="${THEME_COLORS[$QUERY_KEY]:-}"
+if [[ -z $value && -n $QUERY_FALLBACK ]]; then
+  value="${THEME_COLORS[$QUERY_FALLBACK]:-$QUERY_FALLBACK}"
+fi
+
+[[ -n $value ]] || exit 1
+printf '%s\n' "$value"
+#!/bin/bash
+
+# omarchy:summary=Generate a theme's colors.toml from its alacritty.toml palette
+# omarchy:args=<theme-dir>
+# omarchy:hidden=true
+
+set -e
+
+THEME_SOURCE="${1:-}"
+COLORS_OUTPUT="$THEME_SOURCE/colors.toml"
+ALACRITTY_FILE="$THEME_SOURCE/alacritty.toml"
+
+if [[ -z $THEME_SOURCE ]]; then
+  echo "Usage: omarchy-theme-colors-from-alacritty <theme-dir>" >&2
+  exit 1
+fi
+
+# Skip if colors.toml already exists in source theme
+if [[ -f $COLORS_OUTPUT ]]; then
+  exit 0
+fi
+
+# Skip if no alacritty.toml to extract from
+if [[ ! -f $ALACRITTY_FILE ]]; then
+  exit 0
+fi
+
+# Parse the alacritty TOML in a single awk pass, emitting one
+# "<dotted-path>\t#<hex>" pair per color-valued key. Dotted keys are
+# normalized (`normal.black = ...` under [colors] becomes
+# colors.normal.black, same as `black = ...` under [colors.normal]),
+# with the section form taking precedence and the first valid
+# occurrence of a key winning.
+declare -A COLORS
+
+while IFS=$'\t' read -r key value; do
+  COLORS[$key]=$value
+done < <(awk '
+  /^[ \t]*\[/ {
+    line = $0
+    sub(/^[ \t]+/, "", line)
+    if (line ~ /^\[[^]]*\][ \t]*$/) {
+      section = substr(line, 2, index(line, "]") - 2)
+    } else {
+      section = ""
+    }
+    next
+  }
+
+  section != "" {
+    split_pos = index($0, "=")
+    if (split_pos == 0) {
+      next
+    }
+
+    key = substr($0, 1, split_pos - 1)
+    gsub(/^[ \t]+|[ \t]+$/, "", key)
+    if (key == "" || key ~ /^#/) {
+      next
+    }
+
+    value = substr($0, split_pos + 1)
+    gsub(/^[ \t]+|[ \t]+$/, "", value)
+
+    # Accept a lone hex color, optionally 0x- or #-prefixed and quoted,
+    # ignoring any trailing comment. The color always yields the first
+    # run of six hex digits.
+    if (value !~ /^["'\''](0[xX]|#)?[0-9a-fA-F]{6}(["'\'']([ \t]*#.*)?)?$/ &&
+        value !~ /^(0[xX])?[0-9a-fA-F]{6}([ \t]*#.*)?$/) {
+      next
+    }
+    match(value, /[0-9a-fA-F]{6}/)
+    hex = tolower(substr(value, RSTART, RLENGTH))
+
+    path = section "." key
+    if (section == "colors" && index(key, ".") > 0) {
+      if (!(path in dotted)) dotted[path] = hex
+    } else {
+      if (!(path in direct)) direct[path] = hex
+    }
+  }
+
+  END {
+    for (path in direct) print path "\t#" direct[path]
+    for (path in dotted) if (!(path in direct)) print path "\t#" dotted[path]
+  }
+' "$ALACRITTY_FILE")
+
+names=(black red green yellow blue magenta cyan white)
+
+# Extract normal colors (color0-7)
+for i in {0..7}; do
+  name="${names[$i]}"
+  printf -v "color$i" "%s" "${COLORS[colors.normal.$name]}"
+done
+
+# Validate we have all normal colors (required)
+for c in color0 color1 color2 color3 color4 color5 color6 color7; do
+  if [[ -z ${!c} ]]; then
+    echo "Warning: Cannot extract all normal colors from $ALACRITTY_FILE, skipping generation" >&2
+    exit 0
+  fi
+done
+
+# Extract bright colors (color8-15), falling back to normal
+for i in {0..7}; do
+  normal="color$i"
+  name="${names[$i]}"
+  val="${COLORS[colors.bright.$name]}"
+  printf -v "color$((i + 8))" "%s" "${val:-${!normal}}"
+done
+
+# Extract primary and selection colors
+background="${COLORS[colors.primary.background]}"
+foreground="${COLORS[colors.primary.foreground]}"
+selection_background="${COLORS[colors.selection.background]}"
+
+# Apply defaults
+background=${background:-$color0}
+foreground=${foreground:-$color7}
+color0=$background
+color7=$foreground
+selection_background=${selection_background:-$foreground}
+accent=$color4
+
+mkdir -p "$THEME_SOURCE"
+
+cat > "$COLORS_OUTPUT" <<EOF
+accent = "$accent"
+selection = "$selection_background"
+
+background = "$background"
+foreground = "$foreground"
+
+color0 = "$color0"
+color1 = "$color1"
+color2 = "$color2"
+color3 = "$color3"
+color4 = "$color4"
+color5 = "$color5"
+color6 = "$color6"
+color7 = "$color7"
+color8 = "$color8"
+color9 = "$color9"
+color10 = "$color10"
+color11 = "$color11"
+color12 = "$color12"
+color13 = "$color13"
+color14 = "$color14"
+color15 = "$color15"
+EOF
+#!/bin/bash
+
+# omarchy:summary=Show current theme
+# omarchy:examples=omarchy theme current
+
+THEME_NAME_PATH="$HOME/.local/state/omarchy/current/theme.name"
+
+if [[ -f $THEME_NAME_PATH ]]; then
+  sed -E 's/(^|-)([a-z])/\1\u\2/g; s/-/ /g' "$THEME_NAME_PATH"
+else
+  echo "Unknown"
+fi
+#!/bin/bash
+
+# omarchy:summary=Print the directory holding a theme, preferring a user-installed copy
+# omarchy:args=<theme-name>
+# omarchy:examples=omarchy theme dir tokyo-night
+
+theme="${1:-}"
+
+if [[ -z $theme ]]; then
+  echo "Usage: omarchy-theme-dir <theme-name>" >&2
+  exit 1
+fi
+
+if [[ -d $HOME/.config/omarchy/themes/$theme ]]; then
+  echo "$HOME/.config/omarchy/themes/$theme"
+else
+  echo "$OMARCHY_PATH/themes/$theme"
+fi
+#!/bin/bash
+
+# omarchy:summary=List the user-installed themes that came from a git clone
+# omarchy:examples=omarchy theme extras
+
+# Exits nonzero when there are none, so a caller can ask whether any exist
+# without reading the list. A symlinked theme is someone's working copy and a
+# `.git` file is a worktree pointing elsewhere; neither is ours to pull.
+status=1
+
+for theme in ~/.config/omarchy/themes/*; do
+  [[ ! -L $theme && -d $theme/.git ]] || continue
+  echo "$theme"
+  status=0
+done
+
+exit $status
+#!/bin/bash
+
+# omarchy:summary=Install a theme from a git repository
+# omarchy:args=[git-repo-url]
+# omarchy:examples=omarchy theme install https://github.com/example/omarchy-example-theme.git
+# omarchy:examples=omarchy theme install git@github.com:example/omarchy-example-theme.git
+
+if [[ -z $1 ]]; then
+  echo -e "\e[32mSee https://omarchy.org/themes/\n\e[0m"
+  REPO_URL=$(gum input --placeholder="$(omarchy-i18n theme.repoPlaceholder)" --header="")
+else
+  REPO_URL="$1"
+fi
+
+if [[ -z $REPO_URL ]]; then
+  exit 1
+fi
+
+# Refuse a URL that names a git option or a transport helper before cloning. The
+# check is shared with omarchy-plugin-add and explains itself; a missing checker
+# leaves this non-zero, which refuses the URL rather than cloning it.
+omarchy-git-url-check "$REPO_URL" || exit 1
+
+THEMES_DIR="$HOME/.config/omarchy/themes"
+
+# Strip user@host: prefix from scp-style SSH URLs so basename sees just the path.
+# git reads a URL as scp-style when a colon appears before any slash, so the path
+# after it need not hold one: `git@host:omarchy-blue-theme.git` is a repo in that
+# user's home, and leaving its prefix on names the theme after the whole URL.
+REPO_PATH="$REPO_URL"
+[[ $REPO_PATH != *"://"* && $REPO_PATH == *:* && ${REPO_PATH%%:*} != */* ]] && REPO_PATH="${REPO_PATH#*:}"
+THEME_NAME=$(basename -- "$REPO_PATH" .git | sed -E 's/^omarchy-//; s/-theme$//' | tr '[:upper:]' '[:lower:]')
+THEME_PATH="$THEMES_DIR/$THEME_NAME"
+
+# The name comes from the URL, is joined into a path that is about to be
+# removed, and then names a directory the rest of Omarchy passes around by
+# name: Appearance > Unlock builds a command line out of the one the picker
+# returned. So it is held to the characters a theme name needs rather than
+# screened for the harm of the day -- a repo called `..` would take
+# ~/.config/omarchy with it, and one called `a';'id` would carry its own
+# command into that picker. The leading character is kept out of `.` and `-`,
+# which also covers `host:-s/foo.git` leaving basename with `.git`.
+# A bracket range follows the locale's collation, not ASCII: `[a-z]` takes in
+# `é` under en_US.UTF-8. Pin the locale so the set is the one written here.
+if ! (LC_ALL=C; [[ $THEME_NAME =~ ^[a-z0-9_][a-z0-9._+-]*$ ]]); then
+  echo "Error: '$REPO_URL' does not give a usable theme name."
+  exit 1
+fi
+
+# Remove existing theme if present
+if [[ -d $THEME_PATH ]]; then
+  rm -rf "$THEME_PATH"
+fi
+
+# Clone the repo directly to ~/.config/omarchy/themes
+if ! git clone -- "$REPO_URL" "$THEME_PATH"; then
+  echo "Error: Failed to clone theme repo."
+  exit 1
+fi
+
+# Apply the new theme with omarchy-theme-set, which stages only the files an
+# extra theme is allowed to contribute and names anything it dropped.
+omarchy-theme-set "$THEME_NAME"
+#!/bin/bash
+
+# omarchy:summary=List available themes
+# omarchy:examples=omarchy theme list | omarchy theme set "Tokyo Night"
+
+{
+  find ~/.config/omarchy/themes/ -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -printf '%f\n'
+  find "$OMARCHY_PATH/themes/" -mindepth 1 -maxdepth 1 -type d -printf '%f\n'
+} | sort -u | sed -E 's/(^|-)([a-z])/\1\u\2/g; s/-/ /g'
+#!/bin/bash
+
+# omarchy:summary=Print OSC sequences for an Omarchy color theme
+# omarchy:hidden=true
+
+theme="${1:-$HOME/.local/state/omarchy/current/theme/colors.toml}"
+
+[[ -f $theme ]] || exit 0
+
+declare -A COLORS
+
+while IFS=$'\t' read -r key value; do
+  COLORS[$key]="$value"
+done < <(omarchy-theme-color --file "$theme" --all)
+
+emit_osc() {
+  local code="$1"
+  local key="$2"
+
+  [[ -n ${COLORS[$key]:-} ]] || return 0
+  printf '\033]%s;%s\007' "$code" "${COLORS[$key]}"
+}
+
+emit_osc 10 foreground
+emit_osc 11 background
+emit_osc 12 cursor
+emit_osc 17 selection_background
+emit_osc 19 selection_foreground
+
+for i in {0..15}; do
+  [[ -n ${COLORS[color$i]:-} ]] || continue
+  printf '\033]4;%d;%s\007' "$i" "${COLORS[color$i]}"
+done
+#!/bin/bash
+
+# omarchy:summary=Refresh the current theme from its templates.
+
+THEME_NAME_PATH="$HOME/.local/state/omarchy/current/theme.name"
+
+# Installers and migrations refresh the theme and then read the app configs it
+# writes, so this waits for every retint rather than leaving some running.
+if [[ -f $THEME_NAME_PATH ]]; then
+  OMARCHY_THEME_WAIT=1 OMARCHY_THEME_SKIP_BACKGROUND=1 omarchy-theme-set "$(cat $THEME_NAME_PATH)"
+fi
+#!/bin/bash
+
+# omarchy:summary=Remove a user-installed theme
+# omarchy:args=[theme-name]
+# omarchy:examples=omarchy theme remove "Tokyo Night"
+
+if [[ -z $1 ]]; then
+  mapfile -t extra_themes < <(find ~/.config/omarchy/themes -mindepth 1 -maxdepth 1 -type d ! -xtype l -printf '%f\n')
+
+  if (( ${#extra_themes[@]} > 0 )); then
+    mapfile -t extra_themes < <(printf '%s\n' "${extra_themes[@]}" | sort)
+    THEME_NAME=$(omarchy-menu-select "$(omarchy-i18n theme.removeExtraTitle)" "${extra_themes[@]}" -- --width 520 --maxheight 520)
+  else
+    echo "No extra themes installed."
+    exit 1
+  fi
+else
+  THEME_NAME="$1"
+fi
+
+THEMES_DIR="$HOME/.config/omarchy/themes"
+THEME_PATH="$THEMES_DIR/$THEME_NAME"
+
+# Ensure a theme was set, and that the name cannot climb out of THEMES_DIR
+# on its way into the rm below.
+if [[ -z $THEME_NAME || $THEME_NAME == .* || $THEME_NAME == */* ]]; then
+  exit 1
+fi
+
+# Check if theme exists before attempting removal
+if [[ ! -d $THEME_PATH ]]; then
+  echo "Error: Theme '$THEME_NAME' not found."
+  exit 1
+fi
+
+# Now remove the theme directory for THEME_NAME
+rm -rf "$THEME_PATH"
+omarchy-notification-send "$(omarchy-i18n theme.removed)" "$THEME_NAME" || true
+echo "Removed $THEME_NAME"
+#!/bin/bash
+
+# omarchy:summary=Apply an Omarchy theme
+# omarchy:args=<theme-name>
+# omarchy:examples=omarchy theme list | omarchy theme set "Tokyo Night"
+
+if [[ -z $1 ]]; then
+  echo "Usage: omarchy-theme-set <theme-name>"
+  exit 1
+fi
+
+CURRENT_THEME_PATH="$HOME/.local/state/omarchy/current/theme"
+CURRENT_THEME_NAME_PATH="$HOME/.local/state/omarchy/current/theme.name"
+NEXT_THEME_PATH="$HOME/.local/state/omarchy/current/next-theme"
+CURRENT_BACKGROUND_LINK="$HOME/.local/state/omarchy/current/background"
+THEME_BACKGROUND_STATE_PATH="$HOME/.local/state/omarchy/theme-backgrounds"
+BACKGROUND_TRANSITION_CACHE="$HOME/.cache/omarchy/background-transitions"
+THEME_SET_LOCK="${XDG_RUNTIME_DIR:-/tmp}/omarchy-theme-set.lock"
+THEME_SET_LOG="$HOME/.local/state/omarchy/theme-set.log"
+THEME_RETINT_LOCK="${XDG_RUNTIME_DIR:-/tmp}/omarchy-theme-set-retint.lock"
+THEME_GENERATION_PATH="$HOME/.local/state/omarchy/current/theme.generation"
+USER_THEMES_PATH="$HOME/.config/omarchy/themes"
+OMARCHY_THEMES_PATH="$OMARCHY_PATH/themes"
+
+# What a theme installed from a git repo may not ship, because these run code.
+# Hyprland requires a theme's hyprland.lua and gum_env.lua at login and Neovim
+# loads its neovim.lua at startup, so no .lua from such a theme is staged at all.
+# Each terminal config names the program the terminal launches, and vscode.json
+# names an extension omarchy-theme-set-vscode installs, a VS Code extension being
+# arbitrary JavaScript. Everything else a theme ships is colour and is kept.
+#
+# Adding a template for another terminal, or for another editor that loads Lua,
+# means adding it here. test/shell.d/theme-staging-test.sh fails on a generated
+# theme file that is neither denied here nor recorded there as colour-only.
+INSTALLED_THEME_DENIED=(alacritty.toml foot.ini ghostty.conf kitty.conf vscode.json)
+IGNORED_THEME_FILES=()
+
+FAILED_THEME_COMMANDS=()
+
+# Each command is an Omarchy command on the PATH this one already has, so it
+# runs directly rather than through a login shell that rereads the profile.
+# A background command would otherwise get /dev/null as stdin, and the browser
+# policy asks for a sudo password on stdin when it is a terminal.
+run_parallel() {
+  local command index
+  local -a commands=("$@") pids=()
+
+  for command in "${commands[@]}"; do
+    "$command" <&0 8>&- &
+    pids+=("$!")
+  done
+
+  for index in "${!pids[@]}"; do
+    wait "${pids[$index]}" || FAILED_THEME_COMMANDS+=("${commands[$index]}")
+  done
+}
+
+# A retint that fails leaves one app on the old colours while the rest of the
+# desktop moved on. The switch itself still succeeded, so this never changes
+# the exit status. Name the command on stderr, and when that is the log a
+# detached run writes, in a notification too, since nobody is watching it.
+report_failed_theme_commands() {
+  local detached="$1"
+
+  (( ${#FAILED_THEME_COMMANDS[@]} > 0 )) || return 0
+
+  echo "Theme retint failed: ${FAILED_THEME_COMMANDS[*]}" >&2
+  if [[ $detached == "detached" ]]; then
+    omarchy-notification-send -u normal "$(omarchy-i18n theme.notAppliedEverywhere)" \
+      "$(omarchy-i18n theme.commandsFailed "${FAILED_THEME_COMMANDS[*]}" "$THEME_SET_LOG")" >/dev/null 2>&1 || true
+  fi
+}
+
+shell_ipc() {
+  timeout 2 omarchy-shell "$@" >/dev/null 2>&1
+}
+
+# Wait, at most three seconds, while a shell call answers <pending>.
+wait_for_theme_intro() {
+  local pending="$1" deadline=$((SECONDS + 3))
+  shift
+  while (( SECONDS < deadline )) && [[ $(omarchy-shell shell "$@" 2>/dev/null) == "$pending" ]]; do
+    sleep 0.02
+  done
+}
+
+is_video_path() {
+  [[ ${1,,} =~ \.(mp4|m4v|mov|webm|mkv|avi)$ ]]
+}
+
+snapshot_background_path() {
+  local background="$1"
+  local name="$2"
+  local snapshot extension
+
+  [[ -f $background ]] || return
+  is_video_path "$background" && return
+
+  mkdir -p "$BACKGROUND_TRANSITION_CACHE"
+  extension=${background##*.}
+  snapshot="$BACKGROUND_TRANSITION_CACHE/$name-$$.$extension"
+  ln "$background" "$snapshot" 2>/dev/null || cp "$background" "$snapshot"
+  echo "$snapshot"
+}
+
+snapshot_current_background() {
+  local current_background snapshot
+
+  # An interrupted intro is still moving; its final still would flash as a
+  # cover. Capture the frame already playing instead, when OWE supports it.
+  mkdir -p "$BACKGROUND_TRANSITION_CACHE"
+  snapshot="$BACKGROUND_TRANSITION_CACHE/previous-$$.ppm"
+  if owe render "$(jq -nc --arg path "$snapshot" '{cmd: "snapshot", path: $path}')" >/dev/null 2>&1; then
+    echo "$snapshot"
+  else
+    current_background=$(readlink -f "$CURRENT_BACKGROUND_LINK" 2>/dev/null || true)
+    snapshot_background_path "$current_background" "previous"
+  fi
+}
+
+theme_background_state_file() {
+  local theme="$1"
+
+  [[ -n $theme && ${theme##*/} == $theme && $theme != "." && $theme != ".." ]] || return 1
+  printf '%s/%s\n' "$THEME_BACKGROUND_STATE_PATH" "$theme"
+}
+
+remember_current_theme_background() {
+  local current_background state_file
+
+  state_file=$(theme_background_state_file "$PREVIOUS_THEME_NAME") || return
+  current_background=$(readlink -f "$CURRENT_BACKGROUND_LINK" 2>/dev/null || true)
+  [[ -f $current_background ]] || return
+
+  mkdir -p "$THEME_BACKGROUND_STATE_PATH"
+  printf '%s\n' "$current_background" >"$state_file"
+}
+
+background_transition_uses_snapshots() {
+  local next_background="$1"
+  local current_background
+
+  current_background=$(readlink -f "$CURRENT_BACKGROUND_LINK" 2>/dev/null || true)
+  ! is_video_path "$current_background" && ! is_video_path "$next_background"
+}
+
+choose_theme_background() {
+  local theme_path="${1:-$CURRENT_THEME_PATH}"
+  local current_theme_backgrounds="$CURRENT_THEME_PATH/backgrounds"
+  local backgrounds=()
+  local current_background remembered_background state_file index next_index i
+
+  CHOSEN_THEME_BACKGROUND=""
+  mapfile -d '' -t backgrounds < <(
+    find -L "$HOME/.config/omarchy/backgrounds/$THEME_NAME/" "$theme_path/backgrounds/" -maxdepth 1 -type f \
+      \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.bmp' -o -iname '*.webp' \
+         -o -iname '*.mp4' -o -iname '*.m4v' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.mkv' -o -iname '*.avi' \) \
+      -print0 2>/dev/null | sort -z
+  )
+
+  (( ${#backgrounds[@]} > 0 )) || return 1
+
+  if [[ $PREVIOUS_THEME_NAME == "$THEME_NAME" ]]; then
+    current_background=$(readlink "$
