@@ -1,26 +1,20 @@
-name: Validate catalog
+name: Validate catalog and engine
 
 on:
   pull_request:
   push:
     branches: [schema-1]
+    tags: ["v*"]
 
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: catalog
-      - uses: actions/checkout@v4
-        with:
-          repository: omacom/omarchy
-          ref: quattro
-          path: omarchy
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
       - name: Validate schema, trust-model rules, artifacts and licenses
-        env:
-          OMARCHY_PATH: ${{ github.workspace }}/omarchy
-        run: python3 omarchy/bin/omarchy-agent-local-validate catalog --online
+        run: ./omarchy-local-ai validate . --online
+      - name: Test engine
+        run: ./tests/engine-test.sh
