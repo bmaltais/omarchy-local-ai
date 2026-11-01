@@ -1,4 +1,3 @@
-# The local model catalog for Omarchy: `omarchy agent local use best`.
-# Omarchy fetches the branch for the schema it reads (schema-1) and accepts a commit only when
-# it validates; who may change it is this repository's access control.
+# The catalog ships with the engine; releases version both together.
 schema = 1
+version = "0.1.0"
