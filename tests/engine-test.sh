@@ -77,6 +77,7 @@ for name, mutate, fragment in (
   ("host IPC", lambda r: r.update(run={"ipc": "host"}), "not an allowed"),
   ("privileged container", lambda r: r.update(run={"privileged": True}), "not an allowed"),
   ("command line key without opt-in", lambda r: r["inputs"].update(key={"arg": "--key"}), "key_on_cmdline = true"),
+  ("a positional input other than the model", lambda r: r["inputs"].update(alias={"positional": True}), "only the model can be positional"),
   ("command line key without shell", lambda r: (r.update(key_on_cmdline=True), r["inputs"].update(key={"arg": "--key"})), "needs shell"),
 ):
   changed = copy.deepcopy(runtime)
@@ -146,6 +147,10 @@ with patch.object(a, "hf_tree", return_value=tree):
   check("LFS expansion uses published SHA256 and LFS size", files[0].get("sha256") == "c" * 64 and files[0]["size"] == 3)
   check("small files retain git blob identity", files[1].get("git_oid") == oid)
   check("dest prefixes the full repository path", files[1]["dest"] == "UD/tokenizer/x.json" and roles["model"] == "UD/model.gguf")
+  changed["artifacts"][0]["model"] = "."
+  check("a '.' role names the directory its artifact lands in", a.build_artifacts(changed)[1]["model"] == "UD" and not a.validate_recipe("model", changed, {"server": runtime}))
+  del changed["artifacts"][0]["dest"]
+  check("a '.' role needs a dest", any("needs a dest" in e for e in a.validate_recipe("model", changed, {"server": runtime})))
   changed["artifacts"][0]["files"] = ["missing*"]
   raises("unmatched artifact pattern raises", lambda: a.build_artifacts(changed), "no file matching")
   changed = copy.deepcopy(recipe)
@@ -178,6 +183,7 @@ for name, record, roles in (
   ("an escaping destination", {**good, "dest": "../../.bashrc"}, {}),
   ("a malformed hash", {**good, "sha256": "../x"}, {}),
   ("a role naming no file", good, {"model": "other.gguf"}),
+  ("a role naming a parent directory", good, {"model": ".."}),
 ):
   try:
     a.validate_files([record], roles)
@@ -185,6 +191,9 @@ for name, record, roles in (
     check(f"a manifest with {name} is refused", True)
   else:
     check(f"a manifest with {name} is refused", False)
+
+a.validate_files([good], {"model": "w"})
+check("a manifest role may name the directory holding its files", True)
 
 # A new file set never touches the one a running or previous unit mounts.
 def plant(record, body):
@@ -216,6 +225,11 @@ env_rt = copy.deepcopy(rt)
 env_rt["inputs"]["model"] = {"env": "MODEL_PATH"}
 env_text = a.render_container("model", changed, env_rt, variant, roles, gpu, "a" * 16)
 check("environment values are quoted and escaped", 'Environment="MODEL_PATH=/models/50%% $$HOME \\"quoted space\\" \\\\tail"' in env_text)
+positional_rt = copy.deepcopy(runtime)
+positional_rt["command"] = ["server", "serve"]
+positional_rt["inputs"]["model"] = {"positional": True}
+_, argv, _, _ = a.server_invocation(positional_rt, recipe, variant, {"model": "w"}, "model")
+check("a positional model follows the command", not a.validate_runtime("server", positional_rt) and argv[:3] == ["server", "serve", "/models/w"] and "--model" not in argv)
 for location in ("name", "args", "env", "command"):
   r, t = copy.deepcopy(changed), copy.deepcopy(env_rt)
   role_values = dict(roles)
