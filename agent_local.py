@@ -42,6 +42,9 @@ NOT_ENOUGH_MEMORY = "Not enough memory to start model"
 RAM_CLASSES = (32, 64, 96, 128, 192, 256, 512)
 STANDARD_INPUTS = ("model", "draft", "ctx", "alias", "key", "temperature", "top_p", "top_k")
 GFX_FAMILIES = {"gfx1151": "amd-strix-halo", "gfx1150": "amd-strix-point"}
+# NVIDIA platforms whose GPU shares the system's memory. The N1x is the GB10's GPU in a
+# laptop, with its own power limits, so it is measured as a family of its own.
+NVIDIA_UNIFIED_FAMILIES = {"aarch64-gb10": "nvidia-gb10", "aarch64-n1x": "nvidia-n1x"}
 
 ID_RE = re.compile(r"^[a-z0-9]+([.-][a-z0-9]+)*$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -208,8 +211,8 @@ def machine_profile():
   ram = gib(mem.get("MemTotal", 0))
   platform = platform_name()
   gpus = amd_gpus()
-  if platform == "aarch64-gb10":
-    gpus.append({"vendor": "nvidia", "family": "nvidia-gb10", "render_node": "", "vram_gib": 0, "gtt_gib": 0, "unified": True, "memory_gib": round(ram, 2), "sysfs": ""})
+  if platform in NVIDIA_UNIFIED_FAMILIES:
+    gpus.append({"vendor": "nvidia", "family": NVIDIA_UNIFIED_FAMILIES[platform], "render_node": "", "vram_gib": 0, "gtt_gib": 0, "unified": True, "memory_gib": round(ram, 2), "sysfs": ""})
   return {"platform": platform, "ram_gib": round(ram, 2), "ram_class": ram_class(ram), "gpus": gpus}
 
 
