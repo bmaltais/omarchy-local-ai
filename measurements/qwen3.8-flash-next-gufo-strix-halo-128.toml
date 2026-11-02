@@ -1,0 +1,73 @@
+recipe = "qwen3.8-flash-next-gufo"
+measured_at = "2026-11-02"
+catalog_version = "0.2.1"
+image = "ghcr.io/gufo-org/toolboxes/gufo-runtime@sha256:faaa6e21afb903bea20cbc893aa30239146e68e0252d412a7ff4932a26f236b8"
+ctx = 262144
+load_seconds = 18.0
+method = "tools/bench: 1 warmup, then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
+
+[machine]
+platform = "x86"
+gpu = "amd-strix-halo"
+ram_class = 128
+kernel = "7.2.14-1-omarchy"
+cpu = "AMD RYZEN AI MAX+ PRO 395 w/ Radeon 8060S"
+
+[memory]
+observed_at_load_gib = 91.9
+min_available_during_bench_gib = 21.1
+total_gib = 125.1
+
+[short]
+prompt_tokens = 41
+completion_tokens = 250
+ttft_s = 0.18
+prefill_tok_s = 228.9
+decode_tok_s = 72.1
+total_s = 3.63
+
+[long]
+prompt_tokens = 31705
+completion_tokens = 512
+ttft_s = 28.04
+prefill_tok_s = 1130.8
+decode_tok_s = 47.5
+total_s = 38.8
+
+[edit]
+prompt_tokens = 2306
+completion_tokens = 512
+ttft_s = 2.09
+prefill_tok_s = 1102.0
+decode_tok_s = 105.2
+total_s = 6.95
+
+[[artifacts]]
+repo = "unsloth/Qwen3.8-Flash-Next-GGUF"
+revision = "38bb39ee97821de2c9009abb7e93950eec396e66"
+path = "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"
+sha256 = "4448186216b3af4cc558bbce2c3213f01608f8f8b2e5267a9767971dd3ec8082"
+
+[[artifacts]]
+repo = "unsloth/Qwen3.8-Flash-Next-GGUF"
+revision = "38bb39ee97821de2c9009abb7e93950eec396e66"
+path = "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf"
+sha256 = "3f342f1c1580473f1ee94ddd5b28206e8c07a70fa1a366f59d1d6c922919a6c9"
+
+[[artifacts]]
+repo = "unsloth/Qwen3.8-Flash-Next-GGUF"
+revision = "38bb39ee97821de2c9009abb7e93950eec396e66"
+path = "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf"
+sha256 = "56758f40269cad5cd9b0d3d6fbae0f40f6d5be6de49e4ab392dbe83157d9cbd3"
+
+[[artifacts]]
+repo = "unsloth/Qwen3.8-Flash-Next-GGUF"
+revision = "38bb39ee97821de2c9009abb7e93950eec396e66"
+path = "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf"
+sha256 = "753bda48b98ba4f1636134a90a967de1b2d3908a236c026e464777342e53510a"
+
+[[artifacts]]
+repo = "unsloth/Qwen3.8-Flash-Next-GGUF"
+revision = "38bb39ee97821de2c9009abb7e93950eec396e66"
+path = "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
+sha256 = "5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6"

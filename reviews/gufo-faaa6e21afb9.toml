@@ -1,14 +1,14 @@
-image = "ghcr.io/gufo-org/toolboxes/gufo-runtime@sha256:ec8c3f0bf06100304f5105590cfe98d62bf21ff133e8c2dea95955eb4028ddb2"
+image = "ghcr.io/gufo-org/toolboxes/gufo-runtime@sha256:faaa6e21afb903bea20cbc893aa30239146e68e0252d412a7ff4932a26f236b8"
 publisher = "gufo-org"
 reviewer = "David Heinemeier Hansson"
-date = "2026-11-01"
-version = "0.23.0 (1fafd5a)"
+date = "2026-11-02"
+version = "0.28.1 (12effe3)"
 source = "open (MIT), https://github.com/gufo-org/gufo"
-license_url = "https://raw.githubusercontent.com/gufo-org/gufo/8fec1ce96bffc728e03a9e271e787cef4a48bbda/LICENSE"
+license_url = "https://raw.githubusercontent.com/gufo-org/gufo/12effe369662ac572cb100cd20157f56a74e2da0/LICENSE"
 license_sha256 = "dc53ee4f56ce33a1587e64df04b0d9ace8abd3e875e2b00f6f9f292405bf1001"
 checked = [
   "license: MIT for Gufo's code; adapted code and dependencies keep their notices",
   "behavior: loads models from local paths only; fetches client-supplied image URLs, which the internal network blocks",
-  "auth: --api-key covers every route including health and readiness",
+  "auth: --api-key covers every route including health and readiness (rechecked on 0.28.1: /ready, /health, /v1/models and /v1/chat/completions refuse a request without it)",
   "caveat: the key is a command-line argument, visible in the process list",
 ]

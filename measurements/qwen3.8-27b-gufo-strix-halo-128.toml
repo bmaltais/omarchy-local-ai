@@ -1,10 +1,10 @@
 recipe = "qwen3.8-27b-gufo"
-measured_at = "2026-11-01"
-catalog_commit = "106b9463be3f1608922eb486de16fd72566f19e8"
-image = "ghcr.io/gufo-org/toolboxes/gufo-runtime@sha256:ec8c3f0bf06100304f5105590cfe98d62bf21ff133e8c2dea95955eb4028ddb2"
-ctx = 131072
-load_seconds = 5.0
-method = "omarchy agent local bench: 1 warmup, then short and ~32K-token prompts from the catalog's bench/context.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
+measured_at = "2026-11-02"
+catalog_version = "0.2.1"
+image = "ghcr.io/gufo-org/toolboxes/gufo-runtime@sha256:faaa6e21afb903bea20cbc893aa30239146e68e0252d412a7ff4932a26f236b8"
+ctx = 262144
+load_seconds = 7.9
+method = "tools/bench: 1 warmup, then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
 
 [machine]
 platform = "x86"
@@ -14,31 +14,39 @@ kernel = "7.2.14-1-omarchy"
 cpu = "AMD RYZEN AI MAX+ PRO 395 w/ Radeon 8060S"
 
 [memory]
-observed_at_load_gib = 46.1
-min_available_during_bench_gib = 67.1
+observed_at_load_gib = 40.4
+min_available_during_bench_gib = 73.5
 total_gib = 125.1
 
 [short]
 prompt_tokens = 41
 completion_tokens = 53
-ttft_s = 0.41
-prefill_tok_s = 99.0
-decode_tok_s = 26.0
-total_s = 2.41
+ttft_s = 0.72
+prefill_tok_s = 57.1
+decode_tok_s = 23.1
+total_s = 2.97
 
 [long]
 prompt_tokens = 31705
 completion_tokens = 512
-ttft_s = 96.41
-prefill_tok_s = 328.9
-decode_tok_s = 14.0
-total_s = 132.95
+ttft_s = 80.65
+prefill_tok_s = 393.1
+decode_tok_s = 20.7
+total_s = 105.32
+
+[edit]
+prompt_tokens = 2306
+completion_tokens = 512
+ttft_s = 5.38
+prefill_tok_s = 428.9
+decode_tok_s = 62.6
+total_s = 13.54
 
 [[artifacts]]
 repo = "unsloth/Qwen3.8-27B-GGUF"
 revision = "4ca720788d1e01f1bff70c033e0d0028fd02e502"
-path = "Qwen3.8-27B-UD-Q8_K_XL.gguf"
-sha256 = "af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377"
+path = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+sha256 = "3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e"
 
 [[artifacts]]
 repo = "z-lab/Qwen3.8-27B-DFlash2-GGUF"
