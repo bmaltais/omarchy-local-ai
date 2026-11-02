@@ -5,6 +5,7 @@ image = "ghcr.io/gufo-org/toolboxes/gufo-runtime@sha256:ec8c3f0bf06100304f510559
 ctx = 131072
 load_seconds = 5.0
 method = "omarchy agent local bench: 1 warmup, then short and ~32K-token prompts from the catalog's bench/context.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
+fileset = "9c0cd5c76efe95d4"
 
 [machine]
 platform = "x86"
@@ -37,11 +38,7 @@ total_s = 132.95
 [[artifacts]]
 repo = "unsloth/Qwen3.8-27B-GGUF"
 revision = "4ca720788d1e01f1bff70c033e0d0028fd02e502"
-path = "Qwen3.8-27B-UD-Q8_K_XL.gguf"
-sha256 = "af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377"
 
 [[artifacts]]
 repo = "z-lab/Qwen3.8-27B-DFlash2-GGUF"
 revision = "2d9571f8ce46e151f61c6499c99dee6079e1d610"
-path = "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
-sha256 = "1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd"
