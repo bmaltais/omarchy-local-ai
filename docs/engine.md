@@ -48,10 +48,12 @@ Artifact repositories are `owner/name`, revisions are 40-hex commits, and files,
 destinations and role paths must be relative without empty, `.` or `..` components.
 File globs expand against the pinned Hugging Face tree. LFS files verify by SHA256;
 small files verify by Git blob identity. Destinations cannot collide and model/draft
-roles must name selected files. Variants require positive context and memory peaks.
+roles must name selected files, or `"."` for the whole directory an artifact with a
+`dest` lands in, for servers that load a checkpoint directory. Variants require positive context and memory peaks.
 
 Runtime inputs map exactly one argument or environment variable per supported
-standard input. Run options support a `devices` list (`render`, `kfd`,
+standard input; the model may instead be `{ positional = true }`, placed right after
+the command for servers that take it bare (`serve <dir>`). Run options support a `devices` list (`render`, `kfd`,
 `cdi-nvidia`), scalar `group_add = "keep-groups"`, scalar `memlock = "unlimited"`,
 and numeric `shm_size_gib` greater than zero and at most 16. Other run options are
 rejected. `validate <catalog-dir>` checks the records and referenced evidence;

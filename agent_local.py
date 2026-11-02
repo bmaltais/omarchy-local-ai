@@ -42,6 +42,9 @@ NOT_ENOUGH_MEMORY = "Not enough memory to start model"
 RAM_CLASSES = (32, 64, 96, 128, 192, 256, 512)
 STANDARD_INPUTS = ("model", "draft", "ctx", "alias", "key", "temperature", "top_p", "top_k")
 GFX_FAMILIES = {"gfx1151": "amd-strix-halo", "gfx1150": "amd-strix-point"}
+# NVIDIA platforms whose GPU shares the system's memory. The N1x is the GB10's GPU in a
+# laptop, with its own power limits, so it is measured as a family of its own.
+NVIDIA_UNIFIED_FAMILIES = {"aarch64-gb10": "nvidia-gb10", "aarch64-n1x": "nvidia-n1x"}
 
 ID_RE = re.compile(r"^[a-z0-9]+([.-][a-z0-9]+)*$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -208,8 +211,8 @@ def machine_profile():
   ram = gib(mem.get("MemTotal", 0))
   platform = platform_name()
   gpus = amd_gpus()
-  if platform == "aarch64-gb10":
-    gpus.append({"vendor": "nvidia", "family": "nvidia-gb10", "render_node": "", "vram_gib": 0, "gtt_gib": 0, "unified": True, "memory_gib": round(ram, 2), "sysfs": ""})
+  if platform in NVIDIA_UNIFIED_FAMILIES:
+    gpus.append({"vendor": "nvidia", "family": NVIDIA_UNIFIED_FAMILIES[platform], "render_node": "", "vram_gib": 0, "gtt_gib": 0, "unified": True, "memory_gib": round(ram, 2), "sysfs": ""})
   return {"platform": platform, "ram_gib": round(ram, 2), "ram_class": ram_class(ram), "gpus": gpus}
 
 
@@ -337,10 +340,15 @@ def validate_runtime(rid, runtime, root=None):
     if name not in STANDARD_INPUTS:
       errors.append(f"{where}.inputs.{name}: not a standard input ({', '.join(STANDARD_INPUTS)})")
       continue
-    if not isinstance(mapping, dict) or len([k for k in ("arg", "env") if k in mapping]) != 1 or set(mapping) - {"arg", "env"}:
-      errors.append(f"{where}.inputs.{name}: must be exactly one of {{ arg = ... }} or {{ env = ... }}")
+    if not isinstance(mapping, dict) or len(mapping) != 1 or set(mapping) - {"arg", "env", "positional"}:
+      errors.append(f"{where}.inputs.{name}: must be exactly one of {{ arg = ... }}, {{ env = ... }} or {{ positional = true }}")
       continue
     kind, target = next(iter(mapping.items()))
+    # A server that takes its model as a bare argument (`serve <dir>`) gets it right after the command.
+    if kind == "positional":
+      if name != "model" or target is not True:
+        errors.append(f"{where}.inputs.{name}: only the model can be positional, as {{ positional = true }}")
+      continue
     if kind == "env" and not ENV_RE.match(str(target)):
       errors.append(f"{where}.inputs.{name}: bad environment variable name")
     if kind == "arg" and not ARG_RE.match(str(target)):
@@ -433,12 +441,20 @@ def validate_recipe(rid, recipe, runtimes, root=None):
       _safe_relpath(artifact["dest"], f"{at}.dest", errors)
     for role in ("model", "draft"):
       if role in artifact:
-        if _safe_relpath(artifact[role], f"{at}.{role}", errors):
+        # "." names the directory the artifact lands in, for servers that load a checkpoint
+        # directory rather than one file; a dest keeps it apart from the other artifacts.
+        if artifact[role] == ".":
+          named = "dest" in artifact
+          if not named:
+            errors.append(f"{at}.{role}: '.' names this artifact's directory, so it needs a dest")
+        else:
+          named = _safe_relpath(artifact[role], f"{at}.{role}", errors)
+          if named and not any(fnmatch.fnmatchcase(artifact[role], pattern) for pattern in files):
+            errors.append(f"{at}.{role}: not matched by this artifact's files")
+        if named:
           if role in roles:
             errors.append(f"{at}.{role}: already named by artifacts[{roles[role]}]")
           roles[role] = index
-          if not any(fnmatch.fnmatchcase(artifact[role], pattern) for pattern in files):
-            errors.append(f"{at}.{role}: not matched by this artifact's files")
   if "model" not in roles:
     errors.append(f"{where}.artifacts: one artifact must name the model file")
   if "draft" in roles and runtime and "draft" not in inputs:
@@ -802,7 +818,10 @@ def build_artifacts(recipe, tree_cache=None):
     for role in ("model", "draft"):
       if role in artifact:
         target = artifact[role]
-        roles[role] = f"{artifact['dest']}/{target}" if artifact.get("dest") else target
+        if target == ".":
+          roles[role] = artifact["dest"]
+        else:
+          roles[role] = f"{artifact['dest']}/{target}" if artifact.get("dest") else target
   return files, roles
 
 
@@ -937,8 +956,12 @@ def validate_files(files, roles):
   if len(dests) != len(files):
     errors.append("files: two records share a destination")
   for role, path in (roles or {}).items():
-    if role not in ("model", "draft") or path not in dests:
-      errors.append(f"roles.{role}: must name one of the files")
+    if role not in ("model", "draft"):
+      errors.append(f"roles.{role}: not a role")
+    elif not _safe_relpath(path, f"roles.{role}", errors):
+      continue
+    elif path not in dests and not any(isinstance(dest, str) and dest.startswith(path + "/") for dest in dests):
+      errors.append(f"roles.{role}: must name one of the files or a directory holding them")
   if errors:
     raise LocalError("Manifest is invalid:\n  " + "\n  ".join(errors))
 
@@ -1047,6 +1070,8 @@ def server_invocation(runtime, recipe, variant, roles, rid):
       continue
     if "arg" in mapping:
       argv += [mapping["arg"], value]
+    elif "positional" in mapping:
+      argv.insert(len(runtime.get("command", [])), value)
     elif name != "key":
       env[mapping["env"]] = value
   argv += recipe.get("server", {}).get("args", [])

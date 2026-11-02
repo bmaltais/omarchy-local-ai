@@ -1,0 +1,26 @@
+# TensorFold (Apache-2.0) with Mia's AI Lab Bolt backend (MIT) for Nemotron 3.5 Bolt on NVIDIA's
+# GB10-class GPUs, built from omacom/tensorfold-nemotron-bolt at f3afca6 on
+# TensorFold eea9dc9 and nvcr.io/nvidia/pytorch:26.07-py3. Configured by `tensorfold-native serve`
+# arguments, with the model directory bare and the key in TENSORFOLD_API_KEY.
+# libbolt reads the drafter's directory from BOLT_DRAFT; its other BOLT_* switches keep their defaults.
+# Published by Omacom from omacom/tensorfold-nemotron-bolt, whose Bolt uploads the checkpoint
+# through pinned memory: without it the driver's slow copies from unaligned mmap addresses
+# take the N1x's load from 45 seconds to 27 minutes. That fix is offered upstream.
+image = "ghcr.io/omacom/tensorfold-nemotron-bolt@sha256:9c248887748b5904c5b13998f6fc8eac6b225146daa4e898c5b066b0c8f212b5"
+tier = "third-party"
+review = "reviews/tensorfold-bolt-9c248887748b.toml"
+port = 8888
+command = ["tensorfold-native", "serve", "--host", "0.0.0.0", "--port", "8888", "--no-update-check", "--snapshot-dir", "none"]
+health = { probe = ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8888/health', timeout=4)"] }
+run = { devices = ["cdi-nvidia"], memlock = "unlimited" }
+reserved = ["--host", "--port", "--api-key", "--api-key-file", "--snapshot-dir", "--learn-dir", "--record", "--dashboard", "--metrics-open", "TENSORFOLD_API_KEY", "HF_HUB_OFFLINE", "HF_TOKEN"]
+
+[inputs]
+model = { positional = true }
+draft = { env = "BOLT_DRAFT" }
+ctx = { arg = "--context" }
+alias = { arg = "--name" }
+key = { env = "TENSORFOLD_API_KEY" }
+temperature = { arg = "--temperature" }
+top_p = { arg = "--top-p" }
+top_k = { arg = "--top-k" }
