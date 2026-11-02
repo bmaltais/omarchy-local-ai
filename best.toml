@@ -5,7 +5,7 @@
 [[class]]
 gpu = "amd-strix-halo"
 ram_class = 128
-recipes = ["qwen3.8-flash-next-halogen", "qwen3.8-27b-gufo"]
+recipes = ["qwen3.8-flash-next-gufo", "qwen3.8-27b-gufo"]
 
 [[class]]
 gpu = "nvidia-n1x"

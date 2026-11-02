@@ -2,9 +2,9 @@
 # It takes its key only as --api-key, so Omarchy substitutes it inside the container from the
 # Podman secret; the key never reaches the unit file but is visible in the process list.
 # Upstream request: an --api-key-file option or environment variable.
-image = "ghcr.io/gufo-org/toolboxes/gufo-runtime@sha256:ec8c3f0bf06100304f5105590cfe98d62bf21ff133e8c2dea95955eb4028ddb2"
+image = "ghcr.io/gufo-org/toolboxes/gufo-runtime@sha256:faaa6e21afb903bea20cbc893aa30239146e68e0252d412a7ff4932a26f236b8"
 tier = "third-party"
-review = "reviews/gufo-ec8c3f0bf061.toml"
+review = "reviews/gufo-faaa6e21afb9.toml"
 port = 8080
 command = ["gufo", "serve", "llm", "--host", "0.0.0.0", "--port", "8080"]
 shell = "/bin/bash"

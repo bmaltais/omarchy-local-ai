@@ -1,0 +1,41 @@
+name = "Qwen3.8 Flash Next"
+summary = "125B mixture of experts, 6B active per token, 4-bit, with MTP drafting. The fastest agent turns, and twice the speed on code edits."
+runtime = "gufo"
+vendor = "qwen"
+architecture = "moe"
+
+[[hardware]]
+gpu = "amd-strix-halo"
+ram_class = 128
+measured = "measurements/qwen3.8-flash-next-gufo-strix-halo-128.toml"
+
+# The Unsloth UD-Q4_K_XL target Gufo supports, with its shared-Q8_0 MTP
+# predictor, at the revision Gufo's own benchmarks use.
+[[artifacts]]
+repo = "unsloth/Qwen3.8-Flash-Next-GGUF"
+revision = "38bb39ee97821de2c9009abb7e93950eec396e66"
+license = "apache-2.0"
+files = ["UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf", "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf", "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf", "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf", "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"]
+model = "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"
+
+# Measured with a 222K-token prompt: about 98 GiB at peak, 92 GiB at load.
+[[variant]]
+ctx = 262144
+peak_ram_gib = 100
+peak_gpu_gib = 92
+
+# 89 GiB at load.
+[[variant]]
+ctx = 131072
+peak_ram_gib = 94
+peak_gpu_gib = 89
+
+[sampling]
+temperature = 1.0
+top_p = 0.95
+top_k = 20
+
+# MTP takes its predictor through --mtp-model, which the runtime has no input
+# for; the path is where the recipe's files are mounted.
+[server]
+args = ["--speculative", "mtp", "--mtp-model", "/models/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"]
