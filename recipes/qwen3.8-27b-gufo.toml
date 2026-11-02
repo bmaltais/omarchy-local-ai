@@ -3,6 +3,8 @@ summary = "Dense 27B at 4-bit with DFlash2 drafting. Under half the memory of Fl
 runtime = "gufo"
 vendor = "qwen"
 architecture = "dense"
+# Screenshots and photos through its vision projector, which loads on first use.
+input = ["text", "image"]
 
 [[hardware]]
 gpu = "amd-strix-halo"
@@ -13,7 +15,7 @@ measured = "measurements/qwen3.8-27b-gufo-strix-halo-128.toml"
 repo = "unsloth/Qwen3.8-27B-GGUF"
 revision = "4ca720788d1e01f1bff70c033e0d0028fd02e502"
 license = "apache-2.0"
-files = ["Qwen3.8-27B-UD-Q4_K_XL.gguf"]
+files = ["Qwen3.8-27B-UD-Q4_K_XL.gguf", "mmproj-BF16.gguf"]
 model = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
 
 [[artifacts]]
@@ -40,4 +42,4 @@ top_p = 0.95
 top_k = 20
 
 [server]
-args = ["--speculative", "dflash2", "--cache-ram-bytes", "4294967296"]
+args = ["--speculative", "dflash2", "--cache-ram-bytes", "4294967296", "--mmproj", "/models/mmproj-BF16.gguf"]

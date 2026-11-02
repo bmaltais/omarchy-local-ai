@@ -3,6 +3,8 @@ summary = "125B mixture of experts, 6B active per token, 4-bit, with MTP draftin
 runtime = "gufo"
 vendor = "qwen"
 architecture = "moe"
+# Screenshots and photos through its vision projector, which loads on first use.
+input = ["text", "image"]
 
 [[hardware]]
 gpu = "amd-strix-halo"
@@ -15,7 +17,7 @@ measured = "measurements/qwen3.8-flash-next-gufo-strix-halo-128.toml"
 repo = "unsloth/Qwen3.8-Flash-Next-GGUF"
 revision = "38bb39ee97821de2c9009abb7e93950eec396e66"
 license = "apache-2.0"
-files = ["UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf", "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf", "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf", "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf", "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"]
+files = ["UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf", "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf", "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf", "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf", "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf", "mmproj-BF16.gguf"]
 model = "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"
 
 # Measured with a 222K-token prompt: about 98 GiB at peak, 92 GiB at load.
@@ -35,7 +37,8 @@ temperature = 1.0
 top_p = 0.95
 top_k = 20
 
-# MTP takes its predictor through --mtp-model, which the runtime has no input
-# for; the path is where the recipe's files are mounted.
+# MTP takes its predictor through --mtp-model and images their projector
+# through --mmproj, which the runtime has no inputs for; the paths are where
+# the recipe's files are mounted.
 [server]
-args = ["--speculative", "mtp", "--mtp-model", "/models/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"]
+args = ["--speculative", "mtp", "--mtp-model", "/models/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf", "--mmproj", "/models/mmproj-BF16.gguf"]
