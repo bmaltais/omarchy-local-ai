@@ -1,0 +1,250 @@
+"""Local models for Omarchy agents: recipes from the packaged catalog, run as Podman Quadlet units.
+
+The catalog (omacom/omarchy-local-ai) chooses what runs: recipes, runtime definitions and the
+per-machine recommendation in best.toml. This module owns the boundary every choice runs inside:
+an internal network with no egress, a read-only root, dropped capabilities, allowlisted devices
+and limits, the key as a Podman secret, typed unit generation, and post-start checks that the
+server answers only with the key. See docs/engine.md.
+"""
+
+import argparse
+import concurrent.futures
+import fcntl
+import fnmatch
+import hashlib
+import json
+import os
+import pty
+import re
+import shlex
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import termios
+import threading
+import time
+import tomllib
+import urllib.error
+import urllib.request
+
+SCHEMA = 1
+BASE_PORT = 11435
+UNIT_PREFIX = "omarchy-agent-local-model-"
+NETWORK_UNIT = "omarchy-agent-local.network"
+NETWORK_NAME = "omarchy-agent-local"
+SECRET = "omarchy-agent-local-key"
+KEY_ENV = "OMARCHY_LOCAL_KEY"
+KEY_PLACEHOLDER = "@OMARCHY_LOCAL_KEY@"
+RESERVE_GIB = 8
+NOT_ENOUGH_MEMORY = "Not enough memory to start model"
+RAM_CLASSES = (32, 64, 96, 128, 192, 256, 512)
+STANDARD_INPUTS = ("model", "draft", "ctx", "alias", "key", "temperature", "top_p", "top_k")
+GFX_FAMILIES = {"gfx1151": "amd-strix-halo", "gfx1150": "amd-strix-point"}
+
+ID_RE = re.compile(r"^[a-z0-9]+([.-][a-z0-9]+)*$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+IMAGE_RE = re.compile(r"^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$")
+ENV_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+ARG_RE = re.compile(r"^-{1,2}[A-Za-z0-9][A-Za-z0-9-]*$")
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+# Run options a runtime may ask for, each mapped to exactly one Quadlet line. Network mode,
+# read-only root, capabilities and privileges are not options: every container gets the same.
+RUN_OPTIONS = {
+  "devices": ("render", "kfd", "cdi-nvidia"),
+  "group_add": ("keep-groups",),
+  "memlock": ("unlimited",),
+}
+MAX_SHM_GIB = 16
+
+
+class LocalError(Exception):
+  """A failure with its full explanation, and optionally a one-line reason
+  short enough for the agents panel to show where a model's progress bar was."""
+
+  def __init__(self, message, short=None):
+    super().__init__(message)
+    self.short = short or str(message).splitlines()[0]
+
+
+# ---------------------------------------------------------------- paths
+
+
+def home():
+  return os.path.expanduser("~")
+
+
+def state_dir():
+  return os.path.join(home(), ".local", "state", "omarchy", "agent-local")
+
+
+def data_dir():
+  return os.path.join(home(), ".local", "share", "omarchy", "agent-local")
+
+
+def config_dir():
+  return os.path.join(home(), ".config", "omarchy", "agent-local")
+
+
+def quadlet_dir():
+  return os.path.join(home(), ".config", "containers", "systemd")
+
+
+def key_path():
+  return os.path.join(config_dir(), "key")
+
+
+def ensure_dir(path, mode=0o755):
+  os.makedirs(path, mode=mode, exist_ok=True)
+  return path
+
+
+def write_atomic(path, text, mode=0o644):
+  ensure_dir(os.path.dirname(path))
+  fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-")
+  try:
+    with os.fdopen(fd, "w") as handle:
+      handle.write(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+  except BaseException:
+    if os.path.exists(tmp):
+      os.unlink(tmp)
+    raise
+
+
+def gib(value):
+  return value / 2**30
+
+
+def say(message):
+  print(message, flush=True)
+
+
+# ---------------------------------------------------------------- machine profile
+
+
+def _read(path, default=""):
+  try:
+    with open(path) as handle:
+      return handle.read().strip()
+  except OSError:
+    return default
+
+
+def _kv_file(path):
+  values = {}
+  for line in _read(path).splitlines():
+    parts = line.split()
+    if len(parts) == 2:
+      values[parts[0]] = parts[1]
+  return values
+
+
+def meminfo():
+  values = {}
+  for line in _read("/proc/meminfo").splitlines():
+    name, _, rest = line.partition(":")
+    number = rest.strip().split()
+    if number:
+      values[name] = int(number[0]) * 1024
+  return values
+
+
+def platform_name():
+  try:
+    return subprocess.run(["omarchy-hw-platform"], capture_output=True, text=True, timeout=10).stdout.strip() or "x86"
+  except (OSError, subprocess.SubprocessError):
+    return "x86"
+
+
+def gfx_name(version):
+  version = int(version)
+  return f"gfx{version // 10000}{(version // 100) % 100:x}{version % 100:x}"
+
+
+def amd_gpus(kfd_root="/sys/class/kfd/kfd/topology/nodes", drm_root="/sys/class/drm"):
+  gpus = []
+  try:
+    nodes = sorted(os.listdir(kfd_root))
+  except OSError:
+    return gpus
+  for node in nodes:
+    props = _kv_file(os.path.join(kfd_root, node, "properties"))
+    version = int(props.get("gfx_target_version", "0") or 0)
+    if not version:
+      continue
+    minor = props.get("drm_render_minor", "")
+    render = f"renderD{minor}"
+    device = os.path.join(drm_root, render, "device")
+    vram = int(_read(os.path.join(device, "mem_info_vram_total"), "0") or 0)
+    gtt = int(_read(os.path.join(device, "mem_info_gtt_total"), "0") or 0)
+    gfx = gfx_name(version)
+    gpus.append({
+      "vendor": "amd",
+      "family": GFX_FAMILIES.get(gfx, f"amd-{gfx}"),
+      "gfx": gfx,
+      "render_node": f"/dev/dri/{render}",
+      "vram_gib": round(gib(vram), 2),
+      "gtt_gib": round(gib(gtt), 2),
+      "unified": vram < 4 * 2**30,
+      "memory_gib": round(gib(vram + gtt), 2),
+      "sysfs": device,
+    })
+  return gpus
+
+
+def ram_class(ram_gib):
+  for size in RAM_CLASSES:
+    if ram_gib <= size:
+      return size
+  return RAM_CLASSES[-1]
+
+
+def machine_profile():
+  mem = meminfo()
+  ram = gib(mem.get("MemTotal", 0))
+  platform = platform_name()
+  gpus = amd_gpus()
+  if platform == "aarch64-gb10":
+    gpus.append({"vendor": "nvidia", "family": "nvidia-gb10", "render_node": "", "vram_gib": 0, "gtt_gib": 0, "unified": True, "memory_gib": round(ram, 2), "sysfs": ""})
+  return {"platform": platform, "ram_gib": round(ram, 2), "ram_class": ram_class(ram), "gpus": gpus}
+
+
+def choose_gpu(profile, family=None):
+  gpus = profile["gpus"]
+  if family:
+    matches = [gpu for gpu in gpus if gpu["family"] == family]
+    if not matches:
+      raise LocalError(f"No {family} GPU on this machine (found: {', '.join(g['family'] for g in gpus) or 'none'})")
+    return max(matches, key=lambda gpu: gpu["memory_gib"])
+  if not gpus:
+    raise LocalError("No supported GPU found on this machine")
+  best = max(gpus, key=lambda gpu: gpu["memory_gib"])
+  rivals = {gpu["family"] for gpu in gpus if gpu["memory_gib"] == best["memory_gib"]}
+  if len(rivals) > 1:
+    raise LocalError(f"Several GPU families tie for the most memory ({', '.join(sorted(rivals))}); choose one with --gpu")
+  return best
+
+
+# ---------------------------------------------------------------- validation
+
+
+def _safe_string(value, where, errors):
+  if not isinstance(value, str) or not value:
+    errors.append(f"{where}: must be a non-empty string")
+    return False
+  if CONTROL_RE.search(value):
+    errors.append(f"{where}: contains control characters")
+    return False
+  return True
+
+
+def _safe_relpath(value, where, errors, glob=False):
+  if not _safe_string(value, where, errors):
+    return False
+  parts = value.split("/")
+  if value.startswith("/") or any(part in ("", ".", "..") for part in parts):
+    errors.append(f"{where}: must be a relative path without '.', '..' or empty parts")

@@ -57,6 +57,9 @@ def toml_dumps(data, prefix=""):
 
 BENCH_SHORT = "Write a bash function that prints the 20 largest files under a directory, human-readable sizes, handling spaces in names. Just the code."
 BENCH_LONG_QUESTION = "Above are shell scripts from a Linux desktop project. Pick the one with the most fragile error handling, name it, and rewrite its worst function to be robust. Show the code."
+# An agent's everyday edit: the reply is mostly a copy of the file, which is
+# where speculative decoding and prompt lookup pay off.
+BENCH_EDIT_QUESTION = "Rename the function `ensure_dir` to `make_dir` everywhere in the file above. Reply with the complete updated file and nothing else."
 
 
 def bench_request(prompt, model, key, max_tokens=512):
@@ -131,12 +134,16 @@ def cmd_bench(argv):
   sampler = threading.Thread(target=sample, daemon=True)
   sampler.start()
   try:
-    say(f"Benchmarking {rid}: short prompt, then a ~32K-token prompt (greedy, thinking off, 512 tokens out)")
+    say(f"Benchmarking {rid}: short prompt, ~32K-token prompt and a code edit (greedy, thinking off, 512 tokens out)")
     bench_request("Say ok.", rid, key, max_tokens=8)
     short = bench_request(BENCH_SHORT, rid, key)
     say(f"  short: decode {short['decode_tok_s']} tok/s, first token {short['ttft_s']}s")
     long = bench_request(context + "\n\n" + BENCH_LONG_QUESTION, rid, key)
     say(f"  long ({long['prompt_tokens']} tokens): first token {long['ttft_s']}s, prefill {long['prefill_tok_s']} tok/s, decode {long['decode_tok_s']} tok/s")
+    with open(os.path.join(ROOT, "bench", "edit.py.txt"), encoding="utf-8") as handle:
+      code = handle.read()
+    edit = bench_request("```python\n" + code + "```\n\n" + BENCH_EDIT_QUESTION, rid, key)
+    say(f"  edit ({edit['prompt_tokens']} tokens): decode {edit['decode_tok_s']} tok/s")
   finally:
     stop.set()
     sampler.join()
@@ -163,7 +170,8 @@ def cmd_bench(argv):
     "artifacts": [{"repo": f["repo"], "revision": f["revision"], "path": f["path"], key_name: f[key_name]} for f in active["files"] for key_name in (("sha256",) if "sha256" in f else ("git_oid",))],
     "short": short,
     "long": long,
-    "method": "tools/bench: 1 warmup, then short and ~32K-token prompts from bench/context.txt, temperature 0, enable_thinking false, 512 tokens out, streamed",
+    "edit": edit,
+    "method": "tools/bench: 1 warmup, then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed",
   }
   text = toml_dumps(record)
   if args.output:
