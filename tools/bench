@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -14,6 +15,38 @@ sys.path.insert(0, ROOT)
 from agent_local import (LocalError, resolve_model, key_path, choose_gpu, machine_profile,
                          free_memory, say, meminfo, gib, _read, endpoint, write_atomic)
 
+
+
+# The machine the numbers came from. On AMD the kernel carries the GPU driver; an NVIDIA driver
+# comes separately and changes what a load or a decode costs, so it is recorded on its own.
+def cpu_name(cpuinfo, lscpu):
+  """x86 names its CPU in /proc/cpuinfo; ARM only in lscpu, one line per core type."""
+  for line in cpuinfo.splitlines():
+    if line.startswith("model name"):
+      return line.split(":", 1)[1].strip()
+  names = []
+  for line in lscpu.splitlines():
+    if line.startswith("Model name:") and (name := line.split(":", 1)[1].strip()) not in names:
+      names.append(name)
+  return " + ".join(names)
+
+
+def lscpu_text():
+  try:
+    return subprocess.run(["lscpu"], capture_output=True, text=True, timeout=10, env={**os.environ, "LC_ALL": "C"}).stdout
+  except (OSError, subprocess.SubprocessError):
+    return ""
+
+
+def nvidia_driver(version_text):
+  match = re.search(r"Kernel Module(?: for \S+)?\s+(\d+(?:\.\d+)+)", version_text)
+  return match.group(1) if match else ""
+
+
+def system_name():
+  vendor = _read("/sys/class/dmi/id/sys_vendor").strip()
+  product = _read("/sys/class/dmi/id/product_name").strip()
+  return " ".join(part for part in (vendor, product) if part)
 
 def _toml_value(value):
   if isinstance(value, bool):
@@ -151,8 +184,10 @@ def cmd_bench(argv):
       "platform": active["profile"]["platform"],
       "gpu": active["gpu"],
       "ram_class": active["profile"]["ram_class"],
+      "system": system_name(),
       "kernel": os.uname().release,
-      "cpu": next((line.split(":", 1)[1].strip() for line in _read("/proc/cpuinfo").splitlines() if line.startswith("model name")), ""),
+      "cpu": cpu_name(_read("/proc/cpuinfo"), lscpu_text()),
+      **({"gpu_driver": driver} if (driver := nvidia_driver(_read("/proc/driver/nvidia/version"))) else {}),
     },
     "memory": {
       "observed_at_load_gib": (active.get("observed") or {}).get("ram_used_gib"),
