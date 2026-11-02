@@ -6,3 +6,8 @@
 gpu = "amd-strix-halo"
 ram_class = 128
 recipes = ["qwen3.8-flash-next-halogen", "qwen3.8-27b-gufo"]
+
+[[class]]
+gpu = "nvidia-n1x"
+ram_class = 128
+recipes = ["nemotron-3.5-bolt-tensorfold"]

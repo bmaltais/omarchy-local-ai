@@ -27,18 +27,13 @@ files = ["model.safetensors", "config.json", "hf_quant_config.json"]
 dest = "drafter"
 draft = "."
 
-# TODO: replace with the measured peaks from tools/bench on the N1x. Estimates from Mia's
-# memory model at four streams, vision on and an 8 GiB prompt cache: 23 GiB weights, 3 GiB
-# vision, 1.2 GiB stream state, 2 GiB of bf16 attention cache per full window, 10 GiB reserve.
+# Measured on the N1x with a 226K-token prompt: 31 GiB at load, about 40 GiB at peak. The peak
+# leaves room for the other three streams' full windows (2 GiB of bf16 attention cache each)
+# and the 8 GiB prompt cache filling, which TensorFold maps as they grow.
 [[variant]]
 ctx = 262144
-peak_ram_gib = 56
-peak_gpu_gib = 56
-
-[[variant]]
-ctx = 131072
-peak_ram_gib = 52
-peak_gpu_gib = 52
+peak_ram_gib = 54
+peak_gpu_gib = 54
 
 [sampling]
 temperature = 1.0

@@ -1,0 +1,647 @@
+recipe = "nemotron-3.5-bolt-tensorfold"
+measured_at = "2026-11-02"
+catalog_version = "0.2.1"
+image = "localhost/tensorfold-nemotron-bolt@sha256:0443af179ae30606e2ee9bb0dee33b014ecdae75d2a04330a555563bd0e8ff49"
+ctx = 262144
+load_seconds = 49.0
+method = "tools/bench: 1 warmup, then short and ~32K-token prompts from bench/context.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
+
+[machine]
+platform = "aarch64-n1x"
+gpu = "nvidia-n1x"
+ram_class = 128
+kernel = "7.3.0-9-omarchy"
+cpu = ""
+
+[memory]
+observed_at_load_gib = 30.8
+min_available_during_bench_gib = 75.2
+total_gib = 120.3
+
+[short]
+prompt_tokens = 45
+completion_tokens = 67
+ttft_s = 0.12
+prefill_tok_s = 380.2
+decode_tok_s = 90.6
+total_s = 0.85
+
+[long]
+prompt_tokens = 32348
+completion_tokens = 512
+ttft_s = 17.06
+prefill_tok_s = 1896.0
+decode_tok_s = 69.5
+total_s = 24.42
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00001-of-00090.safetensors"
+sha256 = "dbc36ec29905093301dd55335c52bc63e367f37b5f31c214f734ad9d5a08c568"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00002-of-00090.safetensors"
+sha256 = "39057c9ed8083885c452e38ded333f97cfb00cc8d58acc1bea83a1ff5792f79e"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00003-of-00090.safetensors"
+sha256 = "75e0abc6a95bbf8de1536f49e8cbea933d03c22786d271f2ee32dbb5f7e11251"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00004-of-00090.safetensors"
+sha256 = "7047e2df7cd37aff7f94a04dd3b4e1666219f7044208c90c69e11b1929c49a14"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00005-of-00090.safetensors"
+sha256 = "5df578abee81e7bbec27227e9cff32b8a033d2bb57018afd6f7dd9dc2810be1d"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00006-of-00090.safetensors"
+sha256 = "a872e38a12938a3d44ce0af7dfba834305868ae007e75598bf7fa536242c2e94"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00007-of-00090.safetensors"
+sha256 = "ea5f48c0d8173c6b6c9175678114064f9b8be66023d201c5e88e30eb1e149f48"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00008-of-00090.safetensors"
+sha256 = "5ac4c9dbf40721f00fa5c402dcdee3ce9f8a19144f8e0e5f4840eaeb83f95f91"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00009-of-00090.safetensors"
+sha256 = "8137ebf1b5fdb6f2fd0e809c57147e99c1d0d179469627896f096d64ec7ae5c7"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00010-of-00090.safetensors"
+sha256 = "2bd8dcd8bf50c3e4b33a0f6f5f839a0d7038739be814aac0c52d4303a002835f"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00011-of-00090.safetensors"
+sha256 = "86bd79c50e365ba70aba34916c144dcd540761a6fac953e01b1c04c2a9027b4d"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00012-of-00090.safetensors"
+sha256 = "e94b7e9d9f7637f0c3bbb68484616f8de43197bc0d00340ce224043a42a97305"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00013-of-00090.safetensors"
+sha256 = "cb1153fe885604ab35d6fdfb318525383b3b24647317760b778b4f6df37deb5d"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00014-of-00090.safetensors"
+sha256 = "df1e376df256a3af2e8cfdd2161ac6a07cb83c900717f41412f4da0c62e1f8a6"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00015-of-00090.safetensors"
+sha256 = "83cfac4f0c33e772d3cc14a1fa5ec55df693d09a5e009c5ee8425826d2e85bca"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00016-of-00090.safetensors"
+sha256 = "07fc64bafd76ac775865bacf64178f09c606b11f1890084e536f532daaae097a"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00017-of-00090.safetensors"
+sha256 = "715669b3d8f8c37a1e7e5c6bfe13c03b413406f665c8ed9389ad114c694f3692"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00018-of-00090.safetensors"
+sha256 = "b97c4fe1b42ad83bc4a08e88d324a3cf420dea755f9052390c8a6a6d324119f0"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00019-of-00090.safetensors"
+sha256 = "4965525c279b3a8d90ed3a17eb80dce05b1b956f6c4370657e71f855e4060588"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00020-of-00090.safetensors"
+sha256 = "0553730544ec723af4aae3851aea4270f11583bbe9f67bccbb0389c1d21b8f2d"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00021-of-00090.safetensors"
+sha256 = "5e55d6bcf532b9e06341945f5c36d22c335aa0d94bfb8065748e1fff3e688513"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00022-of-00090.safetensors"
+sha256 = "06f4d0820e6fa48d59e9fdb5f770de65ccf51b9a5d5b222855d0424d3e734d40"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00023-of-00090.safetensors"
+sha256 = "c3b2d371a46d64c6cc1d81dd7e21984caaa6840f2a3ad7f28758ac8fafb3cc6b"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00024-of-00090.safetensors"
+sha256 = "a671c5a7e516b9e96b9705d84524b56c1f1382d9127c383e2382dbc28a7ede7b"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00025-of-00090.safetensors"
+sha256 = "aa3a22b861affd7375fae241d8c89031d37c9a43ae109c4c7418035243dfab7f"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00026-of-00090.safetensors"
+sha256 = "e920e22dd372a114ef703a7e0705efdbe8f4d392309b4ddba5f273959547c5e0"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00027-of-00090.safetensors"
+sha256 = "c1e2a955db5927b1d5ecfb9c41b27f84440f0f23e909e0499a10614179db4e09"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00028-of-00090.safetensors"
+sha256 = "d889748b07f7f47bea4afd940cc0e7f0a7b498742fe9d2edcd6e0a9cfd2ef88a"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00029-of-00090.safetensors"
+sha256 = "60369f6ca059450dc0e09a8730ff7c1da692142b7d87fdc7768764a2c30745c3"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00030-of-00090.safetensors"
+sha256 = "13d099a42e03e446b511bd504c60b8e6596ea1c2ba0f0835e2b947bb0f1a5f44"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00031-of-00090.safetensors"
+sha256 = "a482a122726be6e7efc13fd87b67f0342f48cb1257965414cc494079a61a1c6c"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00032-of-00090.safetensors"
+sha256 = "7a8204e6497a22ee03c817fe7ef405f3a1334fff7f762b1972d2124015b41aed"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00033-of-00090.safetensors"
+sha256 = "3acb7c27203df29410aecb4a3cd2fd1cbe52c73f1ebfa23f8505d2c59839f992"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00034-of-00090.safetensors"
+sha256 = "7e0aa20cf20baada351a5623322b7e89e40dbb7163da17b98afcc4bd7d60dcb4"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00035-of-00090.safetensors"
+sha256 = "47887449a557ed0abbe55327f1f35dec5b93c42f0f838b52ffe7b75ce1d5ad4e"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00036-of-00090.safetensors"
+sha256 = "f8ed90edd19a496ede387630cff20ce453e419ec6d1b29d370e348e63c83a716"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00037-of-00090.safetensors"
+sha256 = "e422ad8ccefecc2bae2e70c585bf7ae93737ee9b4dec99ffd0898973922a720e"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00038-of-00090.safetensors"
+sha256 = "d0f5a01d78c06d1d7746dadd4a0d08bcc67b893dadf93fa887d2a9fddd1df0a8"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00039-of-00090.safetensors"
+sha256 = "12cea2c4d57adb0c57f79d0508a4751684de7334148be093f678a39f80dcbed3"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00040-of-00090.safetensors"
+sha256 = "3e8f05f5c3a1ed991eaa0de559b2230ff55e24d44e16590ea81e2366ddcd9400"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00041-of-00090.safetensors"
+sha256 = "b0c1f4a8b12608dba56edb1b256f7f7acd00f3844af638705804fe07b91e91f7"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00042-of-00090.safetensors"
+sha256 = "b2eda91a147d30356a3c33558a2b86b9777001738a37cf6b4f50ebe059c291e0"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00043-of-00090.safetensors"
+sha256 = "1a498c72550852fc035f9137615f95a9ba16e62e10442584136b2241abadf8ad"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00044-of-00090.safetensors"
+sha256 = "a21263a229cbd1fdaa5b1207e517a6e34a96726848a02f0184af80188bdcc595"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00045-of-00090.safetensors"
+sha256 = "a24337d2f97f3ebd2c64dbeff6fd1245f03e486b5bad0d15f47e2254fde19819"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00046-of-00090.safetensors"
+sha256 = "a95a1e86e87d9677ebe1cfc0e46db800c36be6d8adf109a55b90efeb5db017f6"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00047-of-00090.safetensors"
+sha256 = "0fc7f0d6df004c70b5ed4abf3a6cbfc9de0ab5195ffe4bf9cc4d2b0c6f2edebf"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00048-of-00090.safetensors"
+sha256 = "f1f636f4c74eb92edc189feac5ca7097c882a39374ae05926011701e494c4fa0"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00049-of-00090.safetensors"
+sha256 = "4f5c0485a543443c001224f82c6a090ef31462a5d9b9fe010447616717e85465"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00050-of-00090.safetensors"
+sha256 = "f2b41201883ab4f9b62f5710e30f7829c8b42c8561fe67e9ea8bfe580feecff0"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00051-of-00090.safetensors"
+sha256 = "cb084dc52ff6b68ea7e614d1968e31f85a1a1ef056b38d9f7695c211f8cde6a9"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00052-of-00090.safetensors"
+sha256 = "c87ab5e18e621816964c27d893424167444c81d21b0c076b25e036f7803a8e42"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00053-of-00090.safetensors"
+sha256 = "6482331c6d1f6aff0d7af22764e27ebba90a60ca4d4623e78731bf72f8bedd40"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00054-of-00090.safetensors"
+sha256 = "d5c565eaa503701cbbf2250059b40523821c167a25cd3f1acf3d13e9921cdb9c"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00055-of-00090.safetensors"
+sha256 = "11f43ad54d6679df5ae83b3e3566983c86380ce3b9b01bf604fcdc2898b0e093"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00056-of-00090.safetensors"
+sha256 = "b679dbf002a9cd5c861847f48d249b1b9ec18b0cde87e6152dcad6672c8db62b"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00057-of-00090.safetensors"
+sha256 = "b9d047a3ddd5ff88cf2c115724ccf7fd57ef99354fb2d5b7292e780f160772b3"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00058-of-00090.safetensors"
+sha256 = "9654af7201dcdc9d8ad64eab9dd039fa7835c0d7346ac72e678eb5797efbf967"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00059-of-00090.safetensors"
+sha256 = "91b56911d936e4931ef1634bf77f9970c00a88dedf291563259526270e314cac"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00060-of-00090.safetensors"
+sha256 = "a3d749bcf0b6cf82e191553ad702979627dca78bbb5f25de19564711469507e5"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00061-of-00090.safetensors"
+sha256 = "980ea028e530e85a088a9a6b83b4be9ad46de1b553e64e4fd4c7d6b2130cca30"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00062-of-00090.safetensors"
+sha256 = "7671fa3968be394cf536c6b80f48c956cbaed8561a73bac6ab2d356a12ece097"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00063-of-00090.safetensors"
+sha256 = "5a692cab50e48058cf831857a27faf784adde6b87962fe0c8a3a8311f420d318"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00064-of-00090.safetensors"
+sha256 = "369608859277f218ea96f6a4dc9f052d4a8cdfca82d0e39027b46adb9c27ae38"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00065-of-00090.safetensors"
+sha256 = "1ec66cb9c34c67ca67dfcc637058a44421ca41a0f25310f331173962f65bb309"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00066-of-00090.safetensors"
+sha256 = "9f38af041874de4d5d9eba2648963c17e0d6f2fac0813b1129687e83231e19b4"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00067-of-00090.safetensors"
+sha256 = "3c879b09c3a7aa8bd260b5f732b8588b5d48cff00b730c001e6bab0ad003b775"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00068-of-00090.safetensors"
+sha256 = "55c5aa17b945031f8acbe1bc44eb8658839e291a8a08059cdd5b01219f9a5761"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00069-of-00090.safetensors"
+sha256 = "9a0f516aecbbf980d168a7b9e44afed48fdfe8179f636512af953f71b3362bc6"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00070-of-00090.safetensors"
+sha256 = "984644d0f23f4b745293c6d5455f52d81b2c39d5026eb305ed23f363d0851a93"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00071-of-00090.safetensors"
+sha256 = "7116cd52440e68080be2f7e40cf461b0004e14bf34af4ebb6c0c4806a3015f69"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00072-of-00090.safetensors"
+sha256 = "709ec421d7afe545cceccac614870a63a7c3bea23336b30e7e790634906034e1"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00073-of-00090.safetensors"
+sha256 = "4ac49149f45ba5bf6286a48a7f844b7560c3e2bcfdf83149baadd1209c286624"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00074-of-00090.safetensors"
+sha256 = "bb4d3eba793c9e983ec3980db7207379e2009d747718ed2452e7383ea1d4a51e"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00075-of-00090.safetensors"
+sha256 = "e7151cb5a891ad5c3b0545a6995bafc1b249ac88f459909ce1e54425cf3246d1"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00076-of-00090.safetensors"
+sha256 = "3a3edde112b640139b2ac39978fb5de8b923435bd25148cb046de757f012e015"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00077-of-00090.safetensors"
+sha256 = "af5ec9fb2c89112e27ea5db6f86c78aba125ea42b4398de4f42de21d2c4f4e22"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00078-of-00090.safetensors"
+sha256 = "14c1f6df9ec4ad6c3de6da78af153a36223ba1e30fc7bf649b7d1024927a1a66"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00079-of-00090.safetensors"
+sha256 = "997b36d08921ea08bbd77b201cd86543712497d590ac9733bd9c3a854e6e893a"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00080-of-00090.safetensors"
+sha256 = "78bab9671156c02691b0ec2e67f61032291937e6c96bbd12ce36046e83cc1f6c"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00081-of-00090.safetensors"
+sha256 = "44a5f9936c5bdfc97312f72a379764caceb05866b8159796451c7a589e2432af"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00082-of-00090.safetensors"
+sha256 = "ec79dbb267deab9b40214d43bec197d2242e6fec4be67cd45d5d1328d5b048e2"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00083-of-00090.safetensors"
+sha256 = "5821a656125d3b4e947ffd27caa2ac9876f5c1c20d9b06562aa8fe6d84d41852"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00084-of-00090.safetensors"
+sha256 = "bca31e562e23a13b8c3a02bbc1308e42b515f3c7abe418a640d3fb9903d32bf2"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00085-of-00090.safetensors"
+sha256 = "fbb938f4882453ccac948c2cf4910e159db37c0c958547de8b134d7a2c8ec06c"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00086-of-00090.safetensors"
+sha256 = "b2c552c12243550bf82a236dab192827cf5ede3fc26c6480fb671528e080d098"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00087-of-00090.safetensors"
+sha256 = "0c5a161808f73d3755f8117caf16c5373b0f1240983b9e9da33f230637a39d00"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00088-of-00090.safetensors"
+sha256 = "b94c19ad505af5f97afd76f3dafea831f01acde299ff276ea141f0bb222ade9f"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00089-of-00090.safetensors"
+sha256 = "b5db6e19d7e0ade5a630bb27c269085dfdf1a6620664a43fdedc061eb535056e"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model-00090-of-00090.safetensors"
+sha256 = "141868c9e4d46d5d0b800454ff2d3ddb98c24a25918a7238cf56ac985bd90e10"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "config.json"
+git_oid = "8e84e6bee014da36444229e6efdef580f2974aeb"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "generation_config.json"
+git_oid = "ea74519ecd977880565c074cd30b256efb290e70"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "hf_quant_config.json"
+git_oid = "5a614045d976bbacd0c320a94d5faffbb074fd1e"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "model.safetensors.index.json"
+git_oid = "f251c9933745f9cbb97376ff26a5b9d64635419b"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "preprocessor_config.json"
+git_oid = "fb02315551fe0fbcdc43e91d74b6d0007de64297"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "processor_config.json"
+git_oid = "34a8e057ecdd6cc6358e3dd46d2b17585b6b2cb1"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "tokenizer.json"
+sha256 = "d0432ad8b1c2984a2e2dca82e1933e3fd5628df6e95c51fba4c3ee9950dce299"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "tokenizer_config.json"
+git_oid = "a3f51f0b7f88a06a30d33316e10259ded89a18e0"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+path = "chat_template.jinja"
+git_oid = "3c7d68e2f3f056cf4811d0fd0b224c880885b971"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr"
+revision = "4c6a5613b6d887194a3a5493e3a18a5b3930bb86"
+path = "model.safetensors"
+sha256 = "850c121c5fa444dfdebbc15d8f23a1ab2beda55863460ab44203e3cb63808562"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr"
+revision = "4c6a5613b6d887194a3a5493e3a18a5b3930bb86"
+path = "config.json"
+git_oid = "abcd8a298bccf583f1933f797b96f48dc8d52924"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr"
+revision = "4c6a5613b6d887194a3a5493e3a18a5b3930bb86"
+path = "hf_quant_config.json"
+git_oid = "07eba3f3ca2f11395dbcdea1b513281662fbbf18"
