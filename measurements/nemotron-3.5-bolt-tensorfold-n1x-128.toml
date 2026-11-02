@@ -1,7 +1,7 @@
 recipe = "nemotron-3.5-bolt-tensorfold"
 measured_at = "2026-11-02"
 catalog_version = "0.2.1"
-image = "localhost/tensorfold-nemotron-bolt@sha256:0443af179ae30606e2ee9bb0dee33b014ecdae75d2a04330a555563bd0e8ff49"
+image = "ghcr.io/omacom/tensorfold-nemotron-bolt@sha256:9c248887748b5904c5b13998f6fc8eac6b225146daa4e898c5b066b0c8f212b5"
 ctx = 262144
 load_seconds = 49.0
 method = "tools/bench: 1 warmup, then short and ~32K-token prompts from bench/context.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
@@ -14,25 +14,25 @@ kernel = "7.3.0-9-omarchy"
 cpu = ""
 
 [memory]
-observed_at_load_gib = 30.8
-min_available_during_bench_gib = 75.2
+observed_at_load_gib = 32.3
+min_available_during_bench_gib = 74.1
 total_gib = 120.3
 
 [short]
 prompt_tokens = 45
 completion_tokens = 67
 ttft_s = 0.12
-prefill_tok_s = 380.2
-decode_tok_s = 90.6
-total_s = 0.85
+prefill_tok_s = 385.3
+decode_tok_s = 86.2
+total_s = 0.88
 
 [long]
 prompt_tokens = 32348
 completion_tokens = 512
-ttft_s = 17.06
-prefill_tok_s = 1896.0
-decode_tok_s = 69.5
-total_s = 24.42
+ttft_s = 17.11
+prefill_tok_s = 1890.8
+decode_tok_s = 72.0
+total_s = 24.21
 
 [[artifacts]]
 repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
