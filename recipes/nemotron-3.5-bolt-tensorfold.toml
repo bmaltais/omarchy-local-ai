@@ -3,6 +3,8 @@ summary = "74B mixture of experts, 9B active per token, packed into 24 GB. The f
 runtime = "tensorfold-bolt"
 vendor = "nvidia"
 architecture = "moe"
+# Screenshots and photos through the checkpoint's own RADIO tower, which --vision loads.
+input = ["text", "image"]
 
 [[hardware]]
 gpu = "nvidia-n1x"
