@@ -37,10 +37,10 @@ The real records are the examples and source of values:
 | Path | Rules |
 | --- | --- |
 | [catalog.toml](../catalog.toml) | Schema 1 and the release version. |
-| [recipes/](../recipes/) | Name, summary, runtime, pinned artifacts, measured hardware, context variants, sampling and optional server arguments. Vendor names the panel logo; architecture is `dense` or `moe`. |
+| [recipes/](../recipes/) | Name, summary, runtime, pinned artifacts, measured hardware, context variants, sampling and optional server arguments. Vendor names the panel logo; architecture is `dense` or `moe`; `input` is `["text"]` (the default) or `["text", "image"]`, which the agent overlays declare so agents can send screenshots. |
 | [runtimes/](../runtimes/) | Digest-pinned image, tier, port, command, standard input mappings, reserved options and nonempty `health.probe` argv. |
 | [reviews/](../reviews/) | Third-party image digest, publisher, reviewer, date, license URL/hash and checked properties. |
-| [measurements/](../measurements/) | Hardware evidence, artifact identities, context, memory, load time and short/long prompt timings. |
+| [measurements/](../measurements/) | Hardware evidence, artifact identities, context, memory, load time and short, long and code-edit prompt timings. |
 | [best.toml](../best.toml) | Unique classes requiring both `gpu` and `ram_class`, with an ordered list of measured recipes. |
 
 IDs contain lowercase alphanumeric components separated by single dots or hyphens.

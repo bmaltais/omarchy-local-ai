@@ -364,6 +364,14 @@ with patch.object(a, "known_models", return_value=["current"]), patch.object(a, 
   a._remove_files("current")
   check("removal drops an image no surviving manifest uses", rmi.call_args.args[0] == ["podman", "rmi", runtime["image"]])
 
+# A recipe that takes images says so to the agents, and only text and image are allowed.
+image_recipe = {**copy.deepcopy(recipe), "input": ["text", "image"]}
+check("a recipe can take images", not [e for e in a.validate_recipe("model", image_recipe, {"server": runtime}, root) if ".input" in e])
+check("a recipe has to take text", any(".input" in e for e in a.validate_recipe("model", {**copy.deepcopy(recipe), "input": ["image"]}, {"server": runtime}, root)))
+with patch.object(a, "resolve_model", return_value={"recipe_id": "model", "recipe": image_recipe, "variant": {"ctx": 4096}}):
+  overlay = json.loads(open(a.opencode_overlay("model")[0]).read())["provider"][a.OVERLAY_PROVIDER]["models"]["model"]
+  check("the OpenCode overlay declares image input", overlay["attachment"] and overlay["modalities"]["input"] == ["text", "image"])
+
 # Setups saved while memory is busy still owe authentication/model-ID checks.
 cat = a.load_catalog()
 rid = next(iter(cat.recipes))

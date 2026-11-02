@@ -379,6 +379,7 @@ def validate_runtime(rid, runtime, root=None):
 
 
 ARCHITECTURES = ("dense", "moe")
+INPUTS = ("text", "image")
 
 
 def validate_recipe(rid, recipe, runtimes, root=None):
@@ -394,6 +395,10 @@ def validate_recipe(rid, recipe, runtimes, root=None):
   # Dense or mixture of experts, shown on the recipe's card.
   if "architecture" in recipe and recipe["architecture"] not in ARCHITECTURES:
     errors.append(f"{where}.architecture: must be one of {', '.join(ARCHITECTURES)}")
+  # What the model takes, which the agent overlays declare: an agent sending a
+  # screenshot to a model it thinks is text-only fails every later request.
+  if "input" in recipe and not (isinstance(recipe["input"], list) and "text" in recipe["input"] and all(item in INPUTS for item in recipe["input"]) and len(set(recipe["input"])) == len(recipe["input"])):
+    errors.append(f"{where}.input: must list text and optionally image")
   runtime_id = recipe.get("runtime")
   runtime = runtimes.get(runtime_id)
   if runtime is None:
@@ -2173,7 +2178,7 @@ def pi_overlay(rid=None):
       "id": rid,
       "name": manifest["recipe"].get("name", rid),
       "reasoning": True,
-      "input": ["text"],
+      "input": model_inputs(manifest),
       "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
       "contextWindow": manifest["variant"]["ctx"],
       "maxTokens": 16384,
@@ -2192,6 +2197,10 @@ def pi_overlay(rid=None):
   return path, OVERLAY_PROVIDER, rid
 
 
+def model_inputs(manifest):
+  return list(manifest["recipe"].get("input", ["text"]))
+
+
 def opencode_overlay(rid=None):
   manifest = resolve_model(rid, running_only=True)
   rid = manifest["recipe_id"]
@@ -2202,7 +2211,12 @@ def opencode_overlay(rid=None):
         "npm": "@ai-sdk/openai-compatible",
         "name": "Omarchy local model",
         "options": {"baseURL": endpoint(rid), "apiKey": "{file:" + key_path() + "}"},
-        "models": {rid: {"name": manifest["recipe"].get("name", rid), "limit": {"context": manifest["variant"]["ctx"], "output": 16384}}},
+        "models": {rid: {
+          "name": manifest["recipe"].get("name", rid),
+          "limit": {"context": manifest["variant"]["ctx"], "output": 16384},
+          "attachment": "image" in model_inputs(manifest),
+          "modalities": {"input": model_inputs(manifest), "output": ["text"]},
+        }},
       }
     },
   }
