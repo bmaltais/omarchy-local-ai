@@ -1,0 +1,19 @@
+image = "ghcr.io/omacom/tensorfold@sha256:c88821d872e22f9dc6148173816b654e2c6dcd712fae50bc5e95915e3f817856"
+publisher = "Omacom (built from omacom/tensorfold-image, TensorFold's signed upstream release with no patches)"
+reviewer = "Claude Code for David Heinemeier Hansson"
+date = "2026-11-03"
+version = "TensorFold 1.2.1 (1db3edbe), linux-aarch64 release archive"
+source = "open"
+license_url = "https://raw.githubusercontent.com/ashhart/TensorFold/1db3edbe7e692e83c7f5056754dc4e69e79a6c22/LICENSE"
+license_sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+checked = [
+  "license: TensorFold is Apache-2.0 (the archive's LICENSE equals the repository's at 1db3edbe); its archive ships xgrammar and dlpack (Apache-2.0), picojson (BSD-2-Clause) and the MIT notices of the kernels it adapts (MiaAI-Lab's among them) in /opt/tensorfold/LICENSES",
+  "license: libturbojpeg 3.1.4.1 (BSD-3-Clause, IJG and zlib) and libwebpdecoder 1.6.0 (BSD-3-Clause and its patent grant) ship with their texts beside TensorFold's; the base is debian:trixie-slim with curl and ca-certificates, under their Debian licenses in /usr/share/doc",
+  "license: libcublasLt.so.13 (cuBLAS 13.8.0.4) is a redistributable under NVIDIA's CUDA EULA, Attachment A, shipped inside this value-added runtime with the EULA text at /opt/tensorfold/LICENSES/NVIDIA-CUDA-EULA-cuBLAS.txt",
+  "build: the Containerfile checks the release archive against the SHA-256 the v1.2.1 release publishes and the archive's own SHA256SUMS, and builds libjpeg-turbo and libwebp from source releases whose signatures verify against their signing keys (7EC2DBB6F4DBF434, F9C3D6BDB8232B5D); nothing from TensorFold is compiled or patched, built with Podman on a DGX Spark (GB10)",
+  "build: cuBLASLt is extracted from NVIDIA's libcublas-13-4_13.8.0.4-1 package, checked against the SHA-256 in NVIDIA's CUDA repository index; the image carries no CUDA toolkit and no Python, the kernels are embedded in tensorfold-native and libcuda comes from the CDI spec",
+  "acceptance: starts and serves on the internal network with outbound connections failing (DNS fails, a direct connect is unreachable), private IPC, read-only root, all capabilities dropped, no-new-privileges",
+  "acceptance: rejects requests without the key on /v1/models (401) and serves them with it (200); /health is open by design",
+  "behavior: the image sets TENSORFOLD_MEMORY_RESERVE_GIB=9 and TF_FLASHNEXT_CHUNK_SOLO=3072, tuning only; both recipes peak under their recorded memory with 194K-token conversations",
+  "acceptance: --no-update-check is fixed in the runtime command and TENSORFOLD_NO_UPDATE_CHECK=1 in the image, so it does not check for updates; learning, recall, recording, the dashboard and open metrics are reserved and stay off",
+]
