@@ -415,6 +415,12 @@ with patch.object(a, "known_models", return_value=["current"]), patch.object(a, 
 a.publish_installing("current", {"name": "Current", "phase": "downloading"})
 check("setting up an installed model again leaves its row as it is", json.loads(Path(a.state_dir(), "status.json").read_text())["models"]["current"]["unit"] != "installing")
 
+a.clear_installing("timed")
+a.begin_installing("timed", {"name": "Timed"}, 48.0)
+check("a setup's row carries the catalog's load time for the panel's bar", json.loads(Path(a.state_dir(), "status.json").read_text())["models"]["timed"]["expected_load_seconds"] == 48.0)
+a.clear_installing("timed")
+check("a first start runs against the catalog's load time", a.expected_load_seconds("never-started", {"measured_load_seconds": 48.0}) == 48.0)
+
 # A failed first setup keeps its row with the reason, and remove dismisses it.
 a.clear_installing(rid)
 with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "compatibility", return_value=(variant, "")), patch.object(a, "load_model", return_value=None), patch.object(a, "preflight"), patch.object(a, "build_artifacts", return_value=([], {"model": "model.gguf"})), patch.object(a, "materialize", side_effect=a.LocalError("Need 90 GiB free for downloads")), patch.object(a, "write_status"):

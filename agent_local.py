@@ -1589,7 +1589,8 @@ def expected_load_seconds(rid, manifest):
   try:
     return float(_read(load_seconds_path(rid)))
   except ValueError:
-    return (manifest.get("observed") or {}).get("load_seconds")
+    # A first start has no history yet: the catalog's measurement stands in.
+    return (manifest.get("observed") or {}).get("load_seconds") or manifest.get("measured_load_seconds")
 
 
 def error_path(rid):
@@ -1723,19 +1724,20 @@ def cmd_use(argv):
       if variant is None:
         raise LocalError(f"{rid} doesn't fit: {fit_reason}")
       say(f"Warning: {reason}")
+  measured_load = load_measurement(catalog, catalog.recipes[rid], profile, gpu).get("load_seconds")
   if args.detach:
-    return detach_use(rid, args, catalog.recipes[rid])
+    return detach_use(rid, args, catalog.recipes[rid], measured_load)
   # A first setup shows in the panel from now on: waiting for the lock, then
   # downloading, then loading once activate() writes its pending row.
   fresh = load_model(rid) is None
   if fresh and load_installing(rid) is None:
-    begin_installing(rid, catalog.recipes[rid])
+    begin_installing(rid, catalog.recipes[rid], measured_load)
   if fresh:
     # remove signals this process to cancel the setup, which holds the lock.
     update_installing(rid, pid=os.getpid())
   try:
     with Lock():
-      return _use_setup(rid, variant, args, catalog, profile, gpu, fresh)
+      return _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load)
   except KeyboardInterrupt:
     if fresh and load_model(rid) is None:
       clear_installing(rid)
@@ -1747,7 +1749,7 @@ def cmd_use(argv):
     raise
 
 
-def detach_use(rid, args, recipe):
+def detach_use(rid, args, recipe, measured_load=None):
   """Run the setup as a transient user unit, so it outlives the panel or
   terminal that asked for it; its output goes to the journal."""
   unit = install_unit(rid)
@@ -1756,7 +1758,7 @@ def detach_use(rid, args, recipe):
     return 0
   systemctl("reset-failed", unit)
   if load_model(rid) is None:
-    begin_installing(rid, recipe)
+    begin_installing(rid, recipe, measured_load)
   entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "omarchy-local-ai")
   command = ["systemd-run", "--user", "--collect", "--quiet", f"--unit={unit}", f"--description=Set up local model {rid}"]
   for name in ("OMARCHY_LOCAL_AI_CATALOG", "HF_TOKEN"):
@@ -1781,7 +1783,7 @@ def detach_use(rid, args, recipe):
   return 0
 
 
-def _use_setup(rid, variant, args, catalog, profile, gpu, fresh):
+def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=None):
   recipe = catalog.recipes[rid]
   runtime = catalog.runtimes[recipe["runtime"]]
   catalog_info = {"version": catalog.version}
@@ -1814,6 +1816,7 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh):
     "roles": roles,
     "fileset": fileset,
     "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    "measured_load_seconds": measured_load,
   }
   _, _, _, skipped = server_invocation(runtime, recipe, variant, roles, rid)
   if skipped:
@@ -2251,9 +2254,12 @@ def installing_models():
   return [name[:-5] for name in names if name.endswith(".json") and ID_RE.match(name[:-5])]
 
 
-def begin_installing(rid, recipe):
+def begin_installing(rid, recipe, load_seconds=None):
+  """`load_seconds` is how long the catalog measured its start: the panel gives the
+  download and the load that follows their shares of one bar from it."""
   record = {"name": recipe.get("name", rid), "vendor": recipe.get("vendor", ""), "phase": "waiting",
-            "done_bytes": 0, "total_bytes": 0, "rate_bytes_s": 0, "since_ms": int(time.time() * 1000), "error": ""}
+            "done_bytes": 0, "total_bytes": 0, "rate_bytes_s": 0, "since_ms": int(time.time() * 1000), "error": "",
+            "expected_load_seconds": load_seconds}
   write_atomic(installing_path(rid), json.dumps(record) + "\n")
   publish_installing(rid, record)
   return record
@@ -2298,7 +2304,7 @@ def install_row(rid, record):
     "catalog_version": None,
     "observed": None,
     "since_ms": record.get("since_ms"),
-    "expected_load_seconds": None,
+    "expected_load_seconds": record.get("expected_load_seconds"),
     "expected_stop_seconds": None,
     "expected_remove_seconds": None,
     "install": {key: record.get(key, 0) for key in ("phase", "done_bytes", "total_bytes", "rate_bytes_s")},
