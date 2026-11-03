@@ -884,6 +884,14 @@ class Progress:
         say(f"  {gib(self.done):6.1f} / {gib(self.total):.1f} GiB  {rate / 2**20:6.0f} MiB/s")
     self.publish()
 
+  def resumed(self, amount):
+    """Bytes already on disk from an interrupted download: done, but not part
+    of the speed, so every sample moves up with them."""
+    with self.lock:
+      self.done += amount
+      self.samples = [(at, done + amount) for at, done in self.samples]
+    self.publish()
+
   def pulled(self, got, total):
     """The runtime image's layers so far, which count toward the same bar."""
     with self.lock:
@@ -917,6 +925,8 @@ def download(record, progress):
   url = f"https://huggingface.co/{record['repo']}/resolve/{record['revision']}/{urllib.request.quote(record['path'])}"
   staging = ensure_dir(os.path.join(data_dir(), "staging"))
   part = os.path.join(staging, os.path.basename(blob_path(record)) + ".part")
+  if os.path.exists(part) and os.path.getsize(part) <= record["size"]:
+    progress.resumed(os.path.getsize(part))
   for attempt in range(5):
     offset = os.path.getsize(part) if os.path.exists(part) else 0
     if offset > record["size"]:
@@ -1040,6 +1050,8 @@ def materialize(rid, files, roles, seed_dir=None, progress=None):
   validate_files(files, roles)
   missing = [record for record in files if not os.path.isfile(blob_path(record))]
   missing = [record for record in missing if not adopt_seed(record, seed_dir)]
+  if missing and load_installing(rid) is not None:
+    update_installing(rid, partials=[os.path.basename(blob_path(record)) + ".part" for record in missing])
   need = sum(record["size"] for record in missing)
   if need:
     ensure_dir(data_dir())
@@ -1730,13 +1742,14 @@ def cmd_use(argv):
   # A first setup shows in the panel from now on: waiting for the lock, then
   # downloading, then loading once activate() writes its pending row.
   fresh = load_model(rid) is None
-  if fresh and load_installing(rid) is None:
+  if fresh and installing_idle(rid):
     begin_installing(rid, catalog.recipes[rid], measured_load)
-  if fresh:
-    # remove signals this process to cancel the setup, which holds the lock.
-    update_installing(rid, pid=os.getpid())
   try:
     with Lock():
+      if fresh:
+        # remove signals the setup holding the lock; a second use of the same
+        # recipe, waiting for it, never takes its place.
+        update_installing(rid, pid=os.getpid())
       return _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load)
   except KeyboardInterrupt:
     if fresh and load_model(rid) is None:
@@ -1757,13 +1770,19 @@ def detach_use(rid, args, recipe, measured_load=None):
     say(f"{rid} is already being set up; follow it with: journalctl --user -u {unit} -f")
     return 0
   systemctl("reset-failed", unit)
-  if load_model(rid) is None:
+  if load_model(rid) is None and installing_idle(rid):
     begin_installing(rid, recipe, measured_load)
   entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "omarchy-local-ai")
   command = ["systemd-run", "--user", "--collect", "--quiet", f"--unit={unit}", f"--description=Set up local model {rid}"]
+  # The unit takes these from systemd-run's own environment by name, so the
+  # token's value never appears in a process's arguments. The catalog is made
+  # absolute: the unit doesn't run from this directory.
+  env = dict(os.environ)
+  if env.get("OMARCHY_LOCAL_AI_CATALOG"):
+    env["OMARCHY_LOCAL_AI_CATALOG"] = os.path.abspath(env["OMARCHY_LOCAL_AI_CATALOG"])
   for name in ("OMARCHY_LOCAL_AI_CATALOG", "HF_TOKEN"):
-    if os.environ.get(name):
-      command.append(f"--setenv={name}={os.environ[name]}")
+    if env.get(name):
+      command.append(f"--setenv={name}")
   command += [entry, "use", rid]
   if args.ctx:
     command += ["--ctx", str(args.ctx)]
@@ -1773,7 +1792,7 @@ def detach_use(rid, args, recipe, measured_load=None):
     command += ["--seed", os.path.abspath(args.seed)]
   if args.unqualified:
     command.append("--unqualified")
-  result = subprocess.run(command, capture_output=True, text=True)
+  result = subprocess.run(command, capture_output=True, text=True, env=env)
   if result.returncode != 0:
     reason = (result.stderr.strip().splitlines() or ["systemd-run failed"])[-1]
     if load_model(rid) is None:
@@ -2154,10 +2173,18 @@ def cmd_remove(argv):
   with Lock():
     manifest = load_model(rid)
     if manifest is None and setting_up is not None:
+      # Cancelled while its model loaded: activation starts the unit before
+      # the manifest exists, so stop it before its files go.
+      systemctl("stop", unit_name(rid))
       clear_installing(rid)
       freed, _ = _remove_files(rid)
-      # Setups run one at a time, so what's left half-downloaded was this one's.
-      shutil.rmtree(os.path.join(data_dir(), "staging"), ignore_errors=True)
+      # Only this setup's half-downloaded files: others resume from theirs.
+      for name in setting_up.get("partials") or []:
+        if isinstance(name, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", name.removesuffix(".part")):
+          path = os.path.join(data_dir(), "staging", name)
+          if os.path.exists(path):
+            freed += os.path.getsize(path)
+            os.unlink(path)
       write_status(catalog, profile)
       refresh_list_cache(catalog, profile)
       say(f"Cancelled the setup of {rid}" + (f", freeing {gib(freed):.1f} GiB" if freed else ""))
@@ -2272,6 +2299,13 @@ def update_installing(rid, **fields):
   record.update(fields)
   write_atomic(installing_path(rid), json.dumps(record) + "\n")
   publish_installing(rid, record)
+
+
+def installing_idle(rid):
+  """No setup of this recipe is under way: none listed, or only one that failed,
+  which a new attempt replaces rather than inheriting its error and start."""
+  record = load_installing(rid)
+  return record is None or record.get("phase") == "failed"
 
 
 def fail_installing(rid, reason):
