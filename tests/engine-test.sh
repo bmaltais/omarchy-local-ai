@@ -391,6 +391,54 @@ for response, succeeds in (([(200, b"")], False),
       raises("first start refuses failed authentication or wrong model ID", lambda: a._start(SimpleNamespace(recipe=rid), cat, profile))
       check("failed first check stops the model and retains its check obligation", ("stop", a.unit_name(rid)) in [call.args for call in systemctl.call_args_list] and a.load_model(rid)["unchecked"])
 
+# A first setup is listed while it fetches: bytes so far, total and speed, in
+# the panel's status, until its manifest exists or remove dismisses it.
+a.clear_installing("fresh")
+a.begin_installing("fresh", {"name": "Fresh model", "vendor": "qwen"})
+status = json.loads(Path(a.state_dir(), "status.json").read_text())
+check("a setup shows as installing before it fetches anything", status["models"]["fresh"]["unit"] == "installing" and status["models"]["fresh"]["install"]["phase"] == "waiting" and status["models"]["fresh"]["name"] == "Fresh model")
+progress = a.Progress(rid="fresh")
+progress.samples = [(progress.started - 1, 0)]
+progress.grow(4 * 2**20)
+progress.published = 0
+progress.add(3 * 2**20)
+progress.published = 0
+progress.pulled(2**20, 2 * 2**20)
+row = json.loads(Path(a.state_dir(), "status.json").read_text())["models"]["fresh"]
+check("progress counts weights and image layers toward one bar", row["install"]["phase"] == "downloading" and row["install"]["done_bytes"] == 4 * 2**20 and row["install"]["total_bytes"] == 6 * 2**20, json.dumps(row["install"]))
+check("progress reports a download speed", row["install"]["rate_bytes_s"] > 0)
+with patch.object(a, "known_models", return_value=[]), patch.object(a, "unit_props", return_value={}):
+  listed = a.status_record(a.load_catalog(), profile)
+check("a full status rewrite keeps the setup's row", listed["models"]["fresh"]["unit"] == "installing")
+with patch.object(a, "known_models", return_value=["current"]), patch.object(a, "unit_props", return_value={}), patch.object(a, "free_memory", return_value=(64, 48)):
+  a.write_status(a.load_catalog(), profile)
+a.publish_installing("current", {"name": "Current", "phase": "downloading"})
+check("setting up an installed model again leaves its row as it is", json.loads(Path(a.state_dir(), "status.json").read_text())["models"]["current"]["unit"] != "installing")
+
+# A failed first setup keeps its row with the reason, and remove dismisses it.
+a.clear_installing(rid)
+with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "compatibility", return_value=(variant, "")), patch.object(a, "load_model", return_value=None), patch.object(a, "preflight"), patch.object(a, "build_artifacts", return_value=([], {"model": "model.gguf"})), patch.object(a, "materialize", side_effect=a.LocalError("Need 90 GiB free for downloads")), patch.object(a, "write_status"):
+  raises("a failed setup reports its reason", lambda: a.cmd_use([rid]), "Need 90 GiB")
+failed = a.load_installing(rid)
+check("a failed setup stays listed with its reason", failed is not None and failed["phase"] == "failed" and failed["error"].startswith("Need 90 GiB"), json.dumps(failed))
+check("a setup records its process for cancelling", failed["pid"] == os.getpid())
+a.clear_installing(rid)
+Path(a.model_manifest_path("dismissed")).unlink(missing_ok=True)
+a.begin_installing("dismissed", {"name": "Dismissed"})
+a.fail_installing("dismissed", "Download failed")
+with patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0)) as stop, patch.object(a, "known_models", return_value=[]), patch.object(a, "write_unit_files"), patch.object(a, "refresh_list_cache"), patch.object(a, "write_status"):
+  check("remove dismisses a failed setup", a.cmd_remove(["dismissed"]) == 0 and a.load_installing("dismissed") is None)
+  check("remove stops the setup's unit first", ("stop", a.install_unit("dismissed")) in [call.args for call in stop.call_args_list])
+
+# --detach hands the setup to a transient user unit and returns.
+a.clear_installing(rid)
+with patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=3)), patch.object(a, "load_model", return_value=None), patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as run:
+  check("a detached setup returns at once", a.detach_use(rid, SimpleNamespace(ctx=8192, gpu=None, seed=None, unqualified=False), cat.recipes[rid]) == 0)
+  argv = run.call_args.args[0]
+check("a detached setup runs use in its own user unit", argv[:3] == ["systemd-run", "--user", "--collect"] and f"--unit={a.install_unit(rid)}" in argv and argv[-4:-2] == ["use", rid] and argv[-2:] == ["--ctx", "8192"], " ".join(argv))
+check("a detached setup is listed before its unit starts", a.load_installing(rid)["phase"] == "waiting")
+a.clear_installing(rid)
+
 # Refresh shares one catalog/profile across both caches.
 with patch.object(a, "load_catalog", return_value=cat) as load, patch.object(a, "machine_profile", return_value=profile) as machine, patch.object(a, "known_models", return_value=[]), patch.object(a, "running_models", return_value=set()):
   a.cmd_refresh(["--quiet"])
