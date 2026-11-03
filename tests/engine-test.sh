@@ -436,6 +436,31 @@ with patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0)) as
   check("remove dismisses a failed setup", a.cmd_remove(["dismissed"]) == 0 and a.load_installing("dismissed") is None)
   check("remove stops the setup's unit first", ("stop", a.install_unit("dismissed")) in [call.args for call in stop.call_args_list])
 
+# A setup waiting for another's lock is already cancellable, and stops if its
+# record was removed while it waited.
+class Waiting:
+  def __init__(self, during=None):
+    self.during = during
+  def __enter__(self):
+    self.seen = (a.load_installing(rid) or {}).get("pid")
+    if self.during:
+      self.during()
+    return self
+  def __exit__(self, *exc):
+    return False
+a.clear_installing(rid)
+waiting = Waiting()
+with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "compatibility", return_value=(variant, "")), patch.object(a, "load_model", return_value=None), patch.object(a, "Lock", return_value=waiting), patch.object(a, "_use_setup", return_value=0), patch.object(a, "write_status"):
+  a.cmd_use([rid])
+check("a setup records its process before it waits for the lock", waiting.seen == os.getpid())
+a.update_installing(rid, pid=os.getppid())
+with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "compatibility", return_value=(variant, "")), patch.object(a, "load_model", return_value=None), patch.object(a, "Lock", return_value=Waiting()), patch.object(a, "_use_setup", return_value=0), patch.object(a, "write_status"):
+  a.cmd_use([rid])
+check("a second use of the same recipe leaves the live owner's process in place", a.load_installing(rid)["pid"] == os.getppid())
+with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "compatibility", return_value=(variant, "")), patch.object(a, "load_model", return_value=None), patch.object(a, "Lock", return_value=Waiting(lambda: a.clear_installing(rid))), patch.object(a, "_use_setup", return_value=0) as setup, patch.object(a, "write_status"):
+  raises("a setup removed while it waited stops", lambda: a.cmd_use([rid]), "cancelled")
+  check("a cancelled setup fetches nothing", not setup.called and a.load_installing(rid) is None)
+
 # Bytes an interrupted download left on disk count as done, but not as speed.
 resumed = a.Progress()
 resumed.grow(10 * 2**20)

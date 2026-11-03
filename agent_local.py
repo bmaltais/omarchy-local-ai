@@ -1742,14 +1742,21 @@ def cmd_use(argv):
   # A first setup shows in the panel from now on: waiting for the lock, then
   # downloading, then loading once activate() writes its pending row.
   fresh = load_model(rid) is None
-  if fresh and installing_idle(rid):
-    begin_installing(rid, catalog.recipes[rid], measured_load)
+  if fresh:
+    if installing_idle(rid):
+      begin_installing(rid, catalog.recipes[rid], measured_load)
+    # The process carrying the setup is the one remove signals, from now on,
+    # so a setup waiting for another's lock can be cancelled too. A second use
+    # of the same recipe leaves a live owner in place; a detached unit takes
+    # over the record its caller wrote.
+    owner = (load_installing(rid) or {}).get("pid")
+    if not (isinstance(owner, int) and owner != os.getpid() and os.path.exists(f"/proc/{owner}")):
+      update_installing(rid, pid=os.getpid())
   try:
     with Lock():
-      if fresh:
-        # remove signals the setup holding the lock; a second use of the same
-        # recipe, waiting for it, never takes its place.
-        update_installing(rid, pid=os.getpid())
+      if fresh and load_model(rid) is None and load_installing(rid) is None:
+        # remove cleared its record while it waited: nothing to fetch.
+        raise LocalError(f"The setup of {rid} was cancelled")
       return _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load)
   except KeyboardInterrupt:
     if fresh and load_model(rid) is None:
