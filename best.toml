@@ -11,3 +11,8 @@ recipes = ["qwen3.8-flash-next-gufo", "qwen3.8-27b-gufo"]
 gpu = "nvidia-n1x"
 ram_class = 128
 recipes = ["nemotron-3.5-bolt-tensorfold"]
+
+[[class]]
+gpu = "nvidia-gb10"
+ram_class = 128
+recipes = ["qwen3.8-flash-next-tensorfold", "qwen3.8-27b-tensorfold"]
