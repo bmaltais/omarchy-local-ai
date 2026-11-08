@@ -648,7 +648,9 @@ def fits(variant, profile, gpu):
 
 
 def pick_variant(recipe, profile, gpu, ctx=None):
-  variants = sorted(recipe.get("variant", []), key=lambda v: v["ctx"], reverse=True)
+  # The largest context first, and at the same context the larger setup (more streams, a bigger
+  # prompt cache) where it fits, so a smaller machine falls back to the variant sized for it.
+  variants = sorted(recipe.get("variant", []), key=lambda v: (v["ctx"], v["peak_ram_gib"]), reverse=True)
   if ctx:
     variants = [v for v in variants if v["ctx"] == ctx]
     if not variants:

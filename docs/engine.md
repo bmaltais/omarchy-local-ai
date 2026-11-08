@@ -65,7 +65,7 @@ rejected. `validate <catalog-dir>` checks the records and referenced evidence;
 
 `use best` matches the GPU class and RAM class, tries the class's recipes
 in order, checks runtime compatibility and measured hardware qualification, and
-chooses the largest fitting context.
+chooses the largest fitting context, and at the same context the variant with the larger memory peak that fits.
 A GPU class is its family, except that the N1x (`nvidia-n1x`) shares the GB10's (`nvidia-gb10`): the same
 chip, so what either can run depends only on memory. Measurements keep the family they ran on. `use <recipe>` supports `--ctx`, `--gpu`,
 `--seed` and explicit `--unqualified`; static memory limits still apply. Admission
