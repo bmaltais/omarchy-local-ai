@@ -692,7 +692,11 @@ def resolve_best(catalog, profile, gpu, ctx=None):
   for rid in entry["recipes"]:
     if rid not in catalog.recipes:
       continue
-    variant, reason = compatibility(catalog, rid, profile, gpu, ctx)
+    try:
+      variant, reason = compatibility(catalog, rid, profile, gpu, ctx)
+    except LocalError as error:
+      # A requested context this recipe has no variant for passes to the next recommendation.
+      variant, reason = None, str(error)
     if variant:
       return rid, variant, skipped
     skipped.append((rid, reason))

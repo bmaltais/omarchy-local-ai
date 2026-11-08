@@ -132,6 +132,10 @@ for reason, bad in (("non-fitting variants", dict(recipe, variant=[dict(variant,
   catalog.best = {"class": [dict(entry, recipes=["first", "model"])]}
   result = a.resolve_best(catalog, profile, gpu)
   check(f"best falls through {reason}", result[0] == "model" and result[2][0][0] == "first")
+catalog.recipes["first"] = recipe
+catalog.recipes["model"]["variant"] = [variant, dict(variant, ctx=8192)]
+result = a.resolve_best(catalog, profile, gpu, ctx=8192)
+check("best falls through a recipe without the requested context", result[0] == "model" and result[1]["ctx"] == 8192 and "ctx 8192" in result[2][0][1])
 catalog.best = {"class": []}
 try:
   a.resolve_best(catalog, profile, gpu)
