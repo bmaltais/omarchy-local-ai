@@ -50,6 +50,8 @@ File globs expand against the pinned Hugging Face tree. LFS files verify by SHA2
 small files verify by Git blob identity. Destinations cannot collide and model/draft
 roles must name selected files, or `"."` for the whole directory an artifact with a
 `dest` lands in, for servers that load a checkpoint directory. Variants require positive context and memory peaks.
+A variant may add `args` after the recipe's server arguments, for settings sized to its memory such as streams
+and caches; they follow the same rules and may not repeat a flag the server arguments already set.
 
 Runtime inputs map exactly one argument or environment variable per supported
 standard input; the model may instead be `{ positional = true }`, placed right after
@@ -61,9 +63,11 @@ rejected. `validate <catalog-dir>` checks the records and referenced evidence;
 
 ## Lifecycle
 
-`use best` matches the exact GPU family and RAM class, tries the class's recipes
+`use best` matches the GPU class and RAM class, tries the class's recipes
 in order, checks runtime compatibility and measured hardware qualification, and
-chooses the largest fitting context. `use <recipe>` supports `--ctx`, `--gpu`,
+chooses the largest fitting context.
+A GPU class is its family, except that the N1x (`nvidia-n1x`) shares the GB10's (`nvidia-gb10`): the same
+chip, so what either can run depends only on memory. Measurements keep the family they ran on. `use <recipe>` supports `--ctx`, `--gpu`,
 `--seed` and explicit `--unqualified`; static memory limits still apply. Admission
 also checks current free RAM and GPU memory and reserves 8 GiB for the desktop.
 Use, start and removal are serialized. Several models can run at once on distinct,

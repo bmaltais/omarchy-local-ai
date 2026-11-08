@@ -43,8 +43,15 @@ RAM_CLASSES = (32, 64, 96, 128, 192, 256, 512)
 STANDARD_INPUTS = ("model", "draft", "ctx", "alias", "key", "temperature", "top_p", "top_k")
 GFX_FAMILIES = {"gfx1151": "amd-strix-halo", "gfx1150": "amd-strix-point"}
 # NVIDIA platforms whose GPU shares the system's memory. The N1x is the GB10's GPU in a
-# laptop, with its own power limits, so it is measured as a family of its own.
+# laptop: it keeps its own family name so a measurement records which machine it came from,
+# but it runs what a GB10 with the same memory runs.
 NVIDIA_UNIFIED_FAMILIES = {"aarch64-gb10": "nvidia-gb10", "aarch64-n1x": "nvidia-n1x"}
+# Families that share recipes, qualification and recommendations: only memory sets them apart.
+GPU_CLASSES = {"nvidia-n1x": "nvidia-gb10"}
+
+
+def gpu_class(family):
+  return GPU_CLASSES.get(family, family)
 
 ID_RE = re.compile(r"^[a-z0-9]+([.-][a-z0-9]+)*$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -486,16 +493,35 @@ def validate_recipe(rid, recipe, runtimes, root=None):
     args = []
   reserved = set(runtime.get("reserved", []))
   mapped = {mapping.get("arg") for mapping in inputs.values() if isinstance(mapping, dict)}
-  for index, arg in enumerate(args):
-    if not _safe_string(arg, f"{where}.server.args[{index}]", errors):
+
+  def check_args(args, at):
+    flags = set()
+    for index, arg in enumerate(args):
+      if not _safe_string(arg, f"{at}[{index}]", errors):
+        continue
+      flag = arg.split("=", 1)[0]
+      if flag.startswith("-"):
+        flags.add(flag)
+      if flag in reserved:
+        errors.append(f"{at}[{index}]: {flag} is reserved by runtime '{runtime_id}'")
+      if flag in mapped:
+        errors.append(f"{at}[{index}]: {flag} is set by Omarchy from the recipe's inputs")
+      if KEY_PLACEHOLDER in arg:
+        errors.append(f"{at}[{index}]: may not reference the key")
+    return flags
+
+  shared = check_args(args, f"{where}.server.args")
+  # A variant's own args follow the shared ones, for settings that depend on the memory it is
+  # sized for (streams, caches). They add flags; overriding a shared one would leave both.
+  for index, variant in enumerate(variants):
+    if not isinstance(variant, dict) or "args" not in variant:
       continue
-    flag = arg.split("=", 1)[0]
-    if flag in reserved:
-      errors.append(f"{where}.server.args[{index}]: {flag} is reserved by runtime '{runtime_id}'")
-    if flag in mapped:
-      errors.append(f"{where}.server.args[{index}]: {flag} is set by Omarchy from the recipe's inputs")
-    if KEY_PLACEHOLDER in arg:
-      errors.append(f"{where}.server.args[{index}]: may not reference the key")
+    at = f"{where}.variant[{index}].args"
+    if not isinstance(variant["args"], list):
+      errors.append(f"{at}: must be a list")
+      continue
+    for flag in sorted(check_args(variant["args"], at) & shared):
+      errors.append(f"{at}: {flag} is already in server.args")
   return errors
 
 
@@ -516,7 +542,7 @@ def validate_best(best, recipes):
       continue
     if "platform" in entry:
       errors.append(f"{where}.platform: not a class selector; use gpu and ram_class")
-    selectors = (entry.get("gpu"), entry.get("ram_class"))
+    selectors = (gpu_class(entry.get("gpu")), entry.get("ram_class"))
     if selectors in seen:
       errors.append(f"{where}: same selectors as class[{seen[selectors]}]")
     seen[selectors] = index
@@ -531,7 +557,7 @@ def validate_best(best, recipes):
         continue
       qualified = any(
         hw.get("ram_class") == entry.get("ram_class")
-        and hw.get("gpu") == entry.get("gpu")
+        and gpu_class(hw.get("gpu")) == gpu_class(entry.get("gpu"))
         for hw in recipe.get("hardware", []) if isinstance(hw, dict)
       )
       if not qualified:
@@ -607,7 +633,7 @@ def runtime_supports(runtime, gpu):
 
 def qualified(recipe, profile, gpu):
   return any(
-    hw.get("gpu") == gpu["family"] and hw.get("ram_class") == profile["ram_class"] and hw.get("platform") in (None, profile["platform"])
+    gpu_class(hw.get("gpu")) == gpu_class(gpu["family"]) and hw.get("ram_class") == profile["ram_class"] and hw.get("platform") in (None, profile["platform"])
     for hw in recipe.get("hardware", [])
   )
 
@@ -649,13 +675,13 @@ def compatibility(catalog, rid, profile, gpu, ctx=None):
 
 def match_class(best, profile, gpu):
   return next((entry for entry in best["class"]
-               if entry["gpu"] == gpu["family"] and entry["ram_class"] == profile["ram_class"]), None)
+               if gpu_class(entry["gpu"]) == gpu_class(gpu["family"]) and entry["ram_class"] == profile["ram_class"]), None)
 
 
 def resolve_best(catalog, profile, gpu, ctx=None):
   entry = match_class(catalog.best, profile, gpu)
   if entry is None:
-    near = [rid for rid, recipe in catalog.recipes.items() if any(hw.get("gpu") == gpu["family"] for hw in recipe.get("hardware", []))]
+    near = [rid for rid, recipe in catalog.recipes.items() if any(gpu_class(hw.get("gpu")) == gpu_class(gpu["family"]) for hw in recipe.get("hardware", []))]
     raise LocalError(
       f"No recommendation for this machine yet ({gpu['family']}, {profile['ram_class']} GB, {profile['platform']}).\n"
       + (f"Recipes measured on the same GPU family: {', '.join(near)}" if near else "No recipes are measured on this GPU family yet.")
@@ -725,7 +751,7 @@ def recipe_installed(rid):
 def load_measurement(catalog, recipe, profile, gpu):
   """The bench numbers the catalog recorded for this recipe on this machine class."""
   for hw in recipe.get("hardware", []):
-    if hw.get("gpu") == gpu["family"] and hw.get("ram_class") == profile["ram_class"] and hw.get("platform") in (None, profile["platform"]):
+    if gpu_class(hw.get("gpu")) == gpu_class(gpu["family"]) and hw.get("ram_class") == profile["ram_class"] and hw.get("platform") in (None, profile["platform"]):
       try:
         with open(os.path.join(catalog.root, hw["measured"]), "rb") as handle:
           return tomllib.load(handle)
@@ -1075,6 +1101,7 @@ def server_invocation(runtime, recipe, variant, roles, rid):
     elif name != "key":
       env[mapping["env"]] = value
   argv += recipe.get("server", {}).get("args", [])
+  argv += variant.get("args", [])
   entrypoint = None
   if KEY_PLACEHOLDER in argv:
     script = f'a=(); for x in "$@"; do [[ $x == {KEY_PLACEHOLDER} ]] && x=${KEY_ENV}; a+=("$x"); done; exec "${{a[@]}}"'
