@@ -303,8 +303,8 @@ pair_rt = copy.deepcopy(runtime)
 pair_rt.update(command=["server", "serve"], listen={"host": "--host", "port": "--port"}, reserved=["--host", "--port", "API_KEY"],
                run={"devices": ["cdi-nvidia", "infiniband"], "network": "fabric", "memlock": "unlimited"},
                health={"probe": ["curl", "http://127.0.0.1:@PORT@/health"]},
-               pair={"nodes": 2, "master_port": 29620, "prepare": ["prep", "@RANK@", "@WORLD@"], "worker": ["lanes", "@RANK@", "@MASTER_ADDR@"],
-                     "env": {"TF_GID": "@GID_INDEX@"}, "head_env": {"TF_MASTER": "@MASTER_ADDR@"}})
+               pair={"nodes": 2, "master_port": 29620, "state": "/state",
+                     "env": {"NCCL_COMM_ID": "@MASTER_ADDR@:@MASTER_PORT@", "TF_RANK": "@RANK@"}})
 check("a paired runtime fixture is accepted", not a.validate_runtime("pair", pair_rt), "\n".join(a.validate_runtime("pair", pair_rt)))
 for name, mutate, fragment in (
   ("host network without a pair", lambda r: r.pop("pair"), "only for runtimes with a [pair]"),
@@ -314,7 +314,7 @@ for name, mutate, fragment in (
   ("unreserved bind flags", lambda r: r.update(reserved=["API_KEY"]), "must reserve"),
   ("NCCL settings in the runtime", lambda r: r["pair"]["env"].update(NCCL_IB_HCA="mlx5_0"), "NCCL_"),
   ("three nodes", lambda r: r["pair"].update(nodes=3), "only 2"),
-  ("a served folder outside /prepared", lambda r: r["pair"].update(model="/prepared/../etc"), "under /prepared"),
+  ("no state path", lambda r: r["pair"].pop("state"), "pair.state"),
   ("a state path over the models", lambda r: r["pair"].update(state="/models"), "pair.state"),
   ("the link's NCCL interface", lambda r: r["pair"]["env"].update(NCCL_SOCKET_IFNAME="eth0"), "NCCL_SOCKET_IFNAME"),
 ):
@@ -343,18 +343,10 @@ pair_text = a.render_container("paired", paired, pair_rt, paired["variant"][0], 
 pair_port = a.port_for("paired")
 check("the pair unit shares the host network and publishes nothing", "Network=host" in pair_text and "PublishPort" not in pair_text)
 check("the pair unit binds its API to loopback on the model's port", f'"--host" "127.0.0.1" "--port" "{pair_port}"' in pair_text and f"127.0.0.1:{pair_port}/health" in pair_text)
-check("the pair unit mounts rank 0's inputs and reads the link from its environment file", f"models/paired/{'b' * 16}.rank0:/prepared:ro" in pair_text and "EnvironmentFile=%h/.local/state/omarchy/agent-local/pair/paired.env" in pair_text)
+check("the pair unit mounts rank 0's state folder writable and reads the link from its environment file", f"models/paired/{'b' * 16}.rank0:/state\n" in pair_text and "EnvironmentFile=%h/.local/state/omarchy/agent-local/pair/paired.env" in pair_text)
 check("the pair unit starts and stops rank 1 with itself", "ExecStartPre=/usr/bin/env omarchy-agent-local link-worker start paired" in pair_text and "ExecStopPost=-/usr/bin/env omarchy-agent-local link-worker stop paired" in pair_text)
-check("a paired runtime may serve its prepared folder", '"--model" "/prepared/model"' in a.render_container("paired", paired, dict(pair_rt, pair=dict(pair_rt["pair"], model="/prepared/model")), paired["variant"][0], {"model": "model"}, pair_gpu, "b" * 16))
-same_rt = copy.deepcopy(pair_rt)
-for key in ("worker", "prepare"):
-  same_rt["pair"].pop(key)
-same_rt["pair"].update(state="/state", env={"NCCL_COMM_ID": "@MASTER_ADDR@:@MASTER_PORT@", "TF_RANK": "@RANK@"})
-check("a paired runtime may run the head's command on both ranks, with its own NCCL settings", not a.validate_runtime("same", same_rt), "\n".join(a.validate_runtime("same", same_rt)))
-same_text = a.render_container("paired", paired, same_rt, paired["variant"][0], {"model": "model"}, pair_gpu, "b" * 16)
-check("a state path mounts the rank folder writable", f"models/paired/{'b' * 16}.rank0:/state\n" in same_text)
-_, same_argv, _, _ = a.head_argv(same_rt, paired, paired["variant"][0], {"model": "model"}, "paired")
-check("rank 1's default command is the head's, bound to loopback", same_argv[-4:] == ["--host", "127.0.0.1", "--port", str(a.port_for("paired"))] and same_argv[:2] == ["server", "serve"])
+_, rank_argv, _, _ = a.head_argv(pair_rt, paired, paired["variant"][0], {"model": "model"}, "paired")
+check("both ranks run the runtime's command, bound to loopback", rank_argv[-4:] == ["--host", "127.0.0.1", "--port", str(a.port_for("paired"))] and rank_argv[:2] == ["server", "serve"])
 check("the pair unit keeps the container restrictions", all(line in pair_text for line in ("ReadOnly=true", "DropCapability=all", "NoNewPrivileges=true", "AddDevice=/dev/infiniband")))
 if generator:
   quadlets = Path(a.quadlet_dir())
