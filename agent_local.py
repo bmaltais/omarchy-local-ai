@@ -2575,7 +2575,13 @@ def survey_network(previous, now=None):
     for mid, model in previous.get("models", {}).items():
       if isinstance(model, dict) and model.get("host") == host and isinstance(model.get("recipe"), str) and ID_RE.match(model["recipe"]):
         models[mid] = {**model, "paired": paired, "offline": reason, "unit": "inactive", "since_ms": None}
-  return {"schema": NETWORK_SCHEMA, "updated_ms": now, "tailnet": status is not None, "self": me.split(".")[0] if me else "", "hosts": hosts, "models": models}
+  return {
+    "schema": NETWORK_SCHEMA, "updated_ms": now, "tailnet": status is not None,
+    # Whether `share` can work here: tailscale serve needs MagicDNS and HTTPS
+    # certificates. The panel only offers sharing when it can.
+    "can_share": bool(me) and bool((status or {}).get("CertDomains")),
+    "self": me.split(".")[0] if me else "", "hosts": hosts, "models": models,
+  }
 
 
 def write_network(transitions=None, forget=None):
