@@ -2253,7 +2253,7 @@ set -euo pipefail
 command -v ufw >/dev/null || exit 0
 ufw status | grep -q '^Status: active' || exit 0
 for dev in "$@"; do
-  if ! ufw status | grep -qE "^Anywhere on $dev +ALLOW IN"; then
+  if ! ufw status | grep -qE "^Anywhere on $dev +ALLOW( |$)"; then
     ufw insert 1 allow in on "$dev" comment "omarchy-local-ai pair link" >/dev/null
     echo "  firewall: allowing the pair link on $dev"
   fi
