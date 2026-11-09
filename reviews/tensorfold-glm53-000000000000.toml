@@ -1,0 +1,7 @@
+image = "ghcr.io/omacom/tensorfold-glm53@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+publisher = "Omacom (built from omacom/tensorfold-glm53-image: upstream TensorFold f350cd3e with MiaAI-Lab's GLM-5.3-Flash-DGX-Sparks-1104 patches)"
+reviewer = "Claude Code for David Heinemeier Hansson"
+date = "2026-11-09"
+license_url = "https://raw.githubusercontent.com/ashhart/TensorFold/f350cd3ea253a042e205746928271f9d8f71a82d/LICENSE"
+license_sha256 = "pending"
+checked = ["pending: filled in once the image is built and pushed"]

@@ -1,0 +1,53 @@
+# GLM-5.3-Flash across two DGX Sparks: upstream TensorFold (ashhart/TensorFold at f350cd3e, tensorfold-native 1.1.9)
+# with MiaAI-Lab's GLM-5.3-Flash-DGX-Sparks-1104 patches, on NVIDIA's CUDA runtime, built by omacom/tensorfold-glm53-image.
+# Both ranks run the same tensorfold-native serve: rank 0 here answers the API, rank 1 on the paired machine; they
+# rendezvous through NCCL_COMM_ID over the ConnectX-7 cable and all-gather over RoCE on both rails. Their startup
+# fingerprints compare the serve arguments, so rank 1 gets exactly rank 0's (no [pair] worker command). Settings are
+# MiaAI-Lab's config.sh defaults.
+image = "ghcr.io/omacom/tensorfold-glm53@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+tier = "third-party"
+review = "reviews/tensorfold-glm53-000000000000.toml"
+port = 8888
+command = ["tensorfold-native", "serve", "--no-update-check", "--chat-template", "/opt/omarchy/chat_template.jinja"]
+listen = { host = "--host", port = "--port" }
+health = { probe = ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:@PORT@/health"] }
+run = { devices = ["cdi-nvidia", "infiniband"], memlock = "unlimited", network = "fabric", shm_size_gib = 16 }
+reserved = ["--host", "--port", "--api-key", "--api-key-file", "--allowed-host", "--allowed-origin", "--learn", "--learn-dir", "--learn-conversations", "--recall", "--recall-dir", "--record", "--dashboard", "--metrics-open", "--speed-up", "--vision-urls", "--chat-template", "--drafter", "TENSORFOLD_API_KEY", "TENSORFOLD_NO_UPDATE_CHECK", "TENSORFOLD_MEMORY_RESERVE_GIB", "HF_HUB_OFFLINE", "HF_TOKEN"]
+
+[inputs]
+model = { positional = true }
+ctx = { arg = "--context" }
+alias = { arg = "--name" }
+key = { env = "TENSORFOLD_API_KEY" }
+temperature = { arg = "--temperature" }
+top_p = { arg = "--top-p" }
+top_k = { arg = "--top-k" }
+
+[pair]
+nodes = 2
+master_port = 29583
+# Each rank's HOME, where the engine keeps its per-file checkpoint digests and compiled kernels between starts.
+state = "/state"
+
+[pair.env]
+HOME = "/state"
+HF_HUB_OFFLINE = "1"
+TENSORFOLD_NO_LIVE = "1"
+TENSORFOLD_MEMORY_RESERVE_GIB = "12"
+TENSORFOLD_PREFILL_SHARE = "0.68"
+TF_CUDA_DEVICE = "0"
+TF_GLM_RANK = "@RANK@"
+TF_GLM_WORLD = "@WORLD@"
+TF_GLM_DENSE_BITS = "8"
+TF_GLM_HEAD_BITS = "16"
+TF_GLM_CLEAR_THINKING = "1"
+TF_GLM_CE_EXCHANGE = "0"
+TF_GLM_ABSORB_MMA = "1"
+TF_GLM_W8A8 = "0"
+TF_KV_PAGES = "on"
+TF_ROCE = "1"
+TF_ROCE_MAX_KB = "4096"
+TF_ROCE_HCA = "@RDMA_DEVICES@"
+NCCL_COMM_ID = "@MASTER_ADDR@:@MASTER_PORT@"
+NCCL_MIN_NCHANNELS = "4"
+NCCL_MAX_NCHANNELS = "4"
