@@ -1757,14 +1757,19 @@ def cmd_use(argv):
       if fresh and load_model(rid) is None and load_installing(rid) is None:
         # remove cleared its record while it waited: nothing to fetch.
         raise LocalError(f"The setup of {rid} was cancelled")
+      if fresh:
+        # Whoever holds the lock does the work, so it is the one remove signals:
+        # a queued retry takes over from the attempt that failed before it.
+        update_installing(rid, pid=os.getpid())
       return _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load)
   except KeyboardInterrupt:
-    if fresh and load_model(rid) is None:
+    # A caller still waiting on another's setup leaves that setup's record alone.
+    if fresh and load_model(rid) is None and owns_installing(rid):
       clear_installing(rid)
       write_status(catalog, profile)
     raise
   except Exception as error:
-    if fresh and load_model(rid) is None:
+    if fresh and load_model(rid) is None and owns_installing(rid):
       fail_installing(rid, getattr(error, "short", None) or (str(error).splitlines() or ["Setup failed"])[0])
     raise
 
@@ -1825,6 +1830,9 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
     say(f"  weights: {license_name}")
   progress = Progress(rid=rid if fresh else None)
   fileset = materialize(rid, files, roles, args.seed, progress)
+  if fresh:
+    # Until the manifest exists, removal knows the image from the record.
+    update_installing(rid, image=runtime["image"])
   ensure_image(runtime["image"], progress)
   key = ensure_key()
   manifest = {
@@ -2183,8 +2191,10 @@ def cmd_remove(argv):
       # Cancelled while its model loaded: activation starts the unit before
       # the manifest exists, so stop it before its files go.
       systemctl("stop", unit_name(rid))
+      # Read again: the setup may have reached its image since the first look.
+      setting_up = load_installing(rid) or setting_up
       clear_installing(rid)
-      freed, _ = _remove_files(rid)
+      freed, _ = _remove_files(rid, setting_up.get("image"))
       # Only this setup's half-downloaded files: others resume from theirs.
       for name in setting_up.get("partials") or []:
         if isinstance(name, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", name.removesuffix(".part")):
@@ -2308,6 +2318,10 @@ def update_installing(rid, **fields):
   publish_installing(rid, record)
 
 
+def owns_installing(rid):
+  return (load_installing(rid) or {}).get("pid") == os.getpid()
+
+
 def installing_idle(rid):
   """No setup of this recipe is under way: none listed, or only one that failed,
   which a new attempt replaces rather than inheriting its error and start."""
@@ -2381,7 +2395,7 @@ def removal_rate():
     return 0.1
 
 
-def _remove_files(rid):
+def _remove_files(rid, setup_image=None):
   write_unit_files(rid, None)
   for path in (error_path(rid), stop_seconds_path(rid), load_seconds_path(rid)):
     if os.path.exists(path):
@@ -2393,6 +2407,8 @@ def _remove_files(rid):
     write_atomic(ports_path(), json.dumps(ports, indent=2, sort_keys=True) + "\n")
   manifest = load_model(rid)
   removed_images = {manifest["image"]} if manifest else set()
+  if isinstance(setup_image, str) and IMAGE_RE.match(setup_image):
+    removed_images.add(setup_image)
   shutil.rmtree(os.path.join(data_dir(), "models", rid), ignore_errors=True)
   freed = 0
   # A blob stays only while another recipe's files link it. A link from

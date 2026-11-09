@@ -454,9 +454,28 @@ with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine
   a.cmd_use([rid])
 check("a setup records its process before it waits for the lock", waiting.seen == os.getpid())
 a.update_installing(rid, pid=os.getppid())
-with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "compatibility", return_value=(variant, "")), patch.object(a, "load_model", return_value=None), patch.object(a, "Lock", return_value=Waiting()), patch.object(a, "_use_setup", return_value=0), patch.object(a, "write_status"):
+second = Waiting()
+with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "compatibility", return_value=(variant, "")), patch.object(a, "load_model", return_value=None), patch.object(a, "Lock", return_value=second), patch.object(a, "_use_setup", return_value=0), patch.object(a, "write_status"):
   a.cmd_use([rid])
-check("a second use of the same recipe leaves the live owner's process in place", a.load_installing(rid)["pid"] == os.getppid())
+check("a second use of the same recipe leaves the live owner's process in place while it waits", second.seen == os.getppid())
+check("a queued use takes the setup over once it holds the lock", a.load_installing(rid)["pid"] == os.getpid())
+a.update_installing(rid, pid=os.getppid())
+class Interrupted(Waiting):
+  def __enter__(self):
+    raise KeyboardInterrupt
+with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "compatibility", return_value=(variant, "")), patch.object(a, "load_model", return_value=None), patch.object(a, "Lock", return_value=Interrupted()), patch.object(a, "_use_setup", return_value=0), patch.object(a, "write_status"):
+  try:
+    a.cmd_use([rid])
+  except KeyboardInterrupt:
+    pass
+check("interrupting a use still waiting leaves the active setup's record", (a.load_installing(rid) or {}).get("pid") == os.getppid())
+a.update_installing(rid, image=runtime["image"])
+with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "Lock", return_value=Waiting()), patch.object(a, "load_model", return_value=None), patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0)), patch.object(a, "stop_setup_process"), patch.object(a, "write_status"), patch.object(a, "refresh_list_cache"), patch.object(a, "_remove_files", return_value=(0, [])) as removed:
+  a.cmd_remove([rid])
+check("cancelling a setup removes the image it pulled", removed.call_args.args == (rid, runtime["image"]))
+with patch.object(a, "known_models", return_value=[]), patch.object(a, "write_unit_files"), patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as rmi:
+  a._remove_files(rid, runtime["image"])
+check("removal drops a cancelled setup's image no installed model uses", rmi.call_args.args[0] == ["podman", "rmi", runtime["image"]])
 with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "compatibility", return_value=(variant, "")), patch.object(a, "load_model", return_value=None), patch.object(a, "Lock", return_value=Waiting(lambda: a.clear_installing(rid))), patch.object(a, "_use_setup", return_value=0) as setup, patch.object(a, "write_status"):
   raises("a setup removed while it waited stops", lambda: a.cmd_use([rid]), "cancelled")
   check("a cancelled setup fetches nothing", not setup.called and a.load_installing(rid) is None)
