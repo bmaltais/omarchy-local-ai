@@ -2629,7 +2629,8 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
       write_status(catalog, profile)
       say("")
       say(f"Installed {rid}, but it can't start now: {error}")
-      say(f"Stop another model, then press play in the agents panel or run: omarchy agent local start {rid}")
+      first = "Stop another model, then press" if error.short.startswith(NOT_ENOUGH_MEMORY) else "Then press"
+      say(f"{first} play in the agents panel or run: omarchy agent local start {rid}")
       say(f"Manifest: {path}")
       return 0
   activate(manifest, recipe, runtime, gpu, key, catalog, profile)
