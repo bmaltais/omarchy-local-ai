@@ -1,0 +1,17 @@
+image = "ghcr.io/omacom/tensorfold-nemotron-bolt@sha256:cae70d9ade0dd6f762d86b1fe5cb84e8a66cbb881d886a96b76bf89e81f3bc3a"
+publisher = "Omacom (built from omacom/tensorfold-nemotron-bolt, a fork of MiaAI-Lab/Nemotron-3.5-Bolt-TensorFold-DGX-Spark)"
+reviewer = "Claude Code for David Heinemeier Hansson"
+date = "2026-11-09"
+version = "TensorFold 1.1.6 (eea9dc9c) with Bolt at 578415f"
+source = "open"
+license_url = "https://raw.githubusercontent.com/omacom/tensorfold-nemotron-bolt/578415f81ef0b1ac40e51b19449b78c0f64bae35/LICENSE"
+license_sha256 = "6d45bbbae33dfa976372075a870091cfb308f27f60ae200cfbd09b7ffb538e48"
+checked = [
+  "license: the recipe kit is MIT; TensorFold, built from source at eea9dc9c, is Apache-2.0; xgrammar and dlpack Apache-2.0; FFmpeg decoders LGPL; their texts ship in /opt/tensorfold/share/doc/tensorfold",
+  "license: the base is nvcr.io/nvidia/pytorch:26.07-py3, redistributed as a value-added runtime under NVIDIA's Software License Agreement and Product-Specific Terms for AI Products, which the container prints at every start",
+  "build: Containerfile is the recipe's scripts/prepare.sh at 578415f, built with Docker on an RTX Spark N1X; the Bolt changes from upstream 6b064a3 are engine/bolt_upload.h (pinned checkpoint upload) and, in engine/bolt_host.cu, counting the host's reclaimable memory as free on unified-memory GPUs and dropping the checkpoint's page cache after upload",
+  "fix: with the page cache refilled, the f3afca6 image (9c248887748b) refused a fresh 12K-token request (\"no memory to grow sequence 0 past 4096 tokens\", 1.6 GiB free) and this image served it; a 97K-token conversation resumes its follow-ups in 0.23 to 0.27 s as before",
+  "acceptance: starts and serves on the internal network with outbound connections failing (DNS fails, a direct connect is unreachable), its own IPC namespace, read-only root, all capabilities dropped, no-new-privileges",
+  "acceptance: rejects requests without the key on /v1/models (401) and serves them with it (200); /health is open by design",
+  "acceptance: --no-update-check and --snapshot-dir none are fixed in the runtime command, so it neither checks for updates nor writes prompt snapshots",
+]

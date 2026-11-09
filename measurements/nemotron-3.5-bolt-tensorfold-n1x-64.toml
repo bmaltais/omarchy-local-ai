@@ -1,0 +1,54 @@
+recipe = "nemotron-3.5-bolt-tensorfold"
+measured_at = "2026-11-09"
+catalog_version = "0.4.0"
+image = "ghcr.io/omacom/tensorfold-nemotron-bolt@sha256:cae70d9ade0dd6f762d86b1fe5cb84e8a66cbb881d886a96b76bf89e81f3bc3a"
+ctx = 262144
+load_seconds = 36.2
+fileset = "de7510e84456025e"
+method = "tools/bench: 1 warmup, then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
+
+[machine]
+platform = "aarch64-n1x"
+gpu = "nvidia-n1x"
+ram_class = 64
+system = "Dell Inc. XPS 16 DX16263"
+kernel = "7.3.0-40-omarchy"
+cpu = "Cortex-X925 + Cortex-A725"
+gpu_driver = "615.78.08"
+
+[memory]
+observed_at_load_gib = 29.5
+min_available_during_bench_gib = 18.3
+total_gib = 57.5
+
+[short]
+prompt_tokens = 45
+completion_tokens = 67
+ttft_s = 0.12
+prefill_tok_s = 380.6
+decode_tok_s = 90.9
+total_s = 0.84
+
+[long]
+prompt_tokens = 32348
+completion_tokens = 512
+ttft_s = 14.41
+prefill_tok_s = 2244.7
+decode_tok_s = 81.7
+total_s = 20.66
+
+[edit]
+prompt_tokens = 2273
+completion_tokens = 512
+ttft_s = 1.12
+prefill_tok_s = 2035.4
+decode_tok_s = 183.8
+total_s = 3.9
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+revision = "a326822af111290f2af5ac59ef4b5040347dabc4"
+
+[[artifacts]]
+repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr"
+revision = "4c6a5613b6d887194a3a5493e3a18a5b3930bb86"

@@ -1,5 +1,5 @@
 name = "Qwen3.8 27B"
-summary = "27B dense model, 4-bit, with DFlash2 drafting. Three full-window agents at once, and long conversations resume where they left off."
+summary = "27B dense model, 4-bit, with DFlash2 drafting. Long conversations resume where they left off, and 128 GB runs three agents at once."
 runtime = "tensorfold"
 vendor = "qwen"
 architecture = "dense"
@@ -10,6 +10,11 @@ input = ["text", "image"]
 gpu = "nvidia-gb10"
 ram_class = 128
 measured = "measurements/qwen3.8-27b-tensorfold-gb10-128.toml"
+
+[[hardware]]
+gpu = "nvidia-n1x"
+ram_class = 64
+measured = "measurements/qwen3.8-27b-tensorfold-n1x-64.toml"
 
 # TensorFold's MLX affine 4-bit, group-64 export. The server loads the directory.
 [[artifacts]]
@@ -32,18 +37,29 @@ draft = "."
 # Measured on a DGX Spark with a 194K-token conversation and its follow-up turn: 70 GiB at load (three
 # streams' bf16 attention caches, 16.9 GiB each at the full window, are reserved up front), about
 # 94 GiB at peak once the 24 GiB prompt cache in host memory has filled.
+# Three streams and a 24 GiB prompt cache rather than four streams and 8 GiB: the cache keeps
+# conversations where their last turn ended (64 KiB a token), so a follow-up after 194K tokens starts
+# in 3.4 s instead of 241 s, for two or three long agent sessions at once.
 [[variant]]
 ctx = 262144
 peak_ram_gib = 95
 peak_gpu_gib = 86
+args = ["--parallel", "3", "--prompt-cache-gib", "24"]
+
+# For 64 GB: one stream at a 131K window and a 12 GiB prompt cache, which holds more than a full
+# window, so an agent's follow-up resumes (1.7 s against 133 s after 95K tokens). The full 262K
+# window would leave 4 GiB for the cache and resume nothing past about 65K tokens. Measured on an
+# N1x laptop with two long conversations filling the cache: 27.6 GiB at load, 38.5 GiB at peak.
+[[variant]]
+ctx = 131072
+peak_ram_gib = 40
+peak_gpu_gib = 30
+args = ["--parallel", "1", "--prompt-cache-gib", "12"]
 
 [sampling]
 temperature = 1.0
 top_p = 0.95
 top_k = 20
 
-# Three streams and a 24 GiB prompt cache rather than four streams and 8 GiB: the cache keeps
-# conversations where their last turn ended (64 KiB a token), so a follow-up after 194K tokens starts
-# in 3.4 s instead of 241 s, for two or three long agent sessions at once.
 [server]
-args = ["--parallel", "3", "--prompt-cache-gib", "24", "--max-tokens", "32768", "--vision"]
+args = ["--max-tokens", "32768", "--vision"]
