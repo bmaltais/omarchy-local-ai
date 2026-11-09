@@ -331,6 +331,21 @@ def fabric_side(peer):
       if other != hca and v2_ipv4(other, gid):
         hcas.append(other)
   return {"addr": src, "dev": dev, "hca": hca, "gid": gid, "hcas": hcas}
+def drop_cache(root, marker):
+  """Drops the page cache of every file under root's directories whose name holds marker."""
+  for top in (os.listdir(root) if os.path.isdir(root) else []):
+    if marker not in top:
+      continue
+    for directory, _, names in os.walk(os.path.join(root, top)):
+      for name in names:
+        try:
+          fd = os.open(os.path.join(directory, name), os.O_RDONLY)
+        except OSError:
+          continue
+        try:
+          os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        finally:
+          os.close(fd)
 def node():
   name = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True).stdout.strip()
   mem = {line.split(":")[0]: int(line.split()[1]) * 1024 for line in open("/proc/meminfo") if line.split()[1:2]}
@@ -1861,6 +1876,15 @@ def evict_idle_weights(keep=()):
         os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
       finally:
         os.close(fd)
+  # A paired recipe's per-rank inputs (a weight file the size of the rank's share) are copied
+  # into GPU memory as it loads; on unified memory a cached copy only competes with the model.
+  # Prepare leaves them cached right after writing them.
+  running = running_models()
+  scope = {}
+  exec(FABRIC_SIDE, scope)
+  for rid in os.listdir(os.path.join(data_dir(), "models")) if os.path.isdir(os.path.join(data_dir(), "models")) else []:
+    if rid not in running:
+      scope["drop_cache"](os.path.join(data_dir(), "models", rid), ".rank")
 
 
 def check_headroom(variant, gpu):
@@ -1997,6 +2021,8 @@ def pair_worker_start(rid):
   pair = {"peer": setup["peer"], "host": setup["host"], "home": setup["home"]}
   here, there = pair_link(pair)
   pair_limits(pair["peer"])
+  peer_models = os.path.join(pair["home"], ".local", "share", "omarchy", "agent-local", "models", rid)
+  pair_python(pair["peer"], f"drop_cache({peer_models!r}, '.rank')", timeout=60)
   peer_headroom(pair["peer"], variant)
   spec = runtime["pair"]
   def values(rank, side):
