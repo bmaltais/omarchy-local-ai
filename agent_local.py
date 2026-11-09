@@ -1959,6 +1959,25 @@ def pair_env_path(rid):
   return os.path.join(state_dir(), "pair", f"{rid}.env")
 
 
+def pair_setup_path(rid):
+  """The setup the paired unit runs: written with the unit, before its first start, since
+  the current manifest is only saved once a setup has started."""
+  return os.path.join(state_dir(), "pair", f"{rid}.json")
+
+
+def write_pair_setup(manifest):
+  if manifest and manifest.get("pair"):
+    write_atomic(pair_setup_path(manifest["recipe_id"]), json.dumps(manifest, indent=2) + "\n")
+
+
+def pair_manifest(rid):
+  try:
+    with open(pair_setup_path(rid)) as handle:
+      return json.load(handle)
+  except (OSError, ValueError):
+    return resolve_model(rid)
+
+
 def peer_headroom(peer, variant):
   node = pair_python(peer, "node()", timeout=10)
   available = gib(node["ram_available"])
@@ -2039,7 +2058,7 @@ def _placeholders(text, values):
 def pair_worker_start(rid):
   """From the head unit's ExecStartPre: the link as it is now into the head's environment file,
   then rank 1 on the peer."""
-  manifest = resolve_model(rid)
+  manifest = pair_manifest(rid)
   runtime, setup, variant = manifest["runtime"], manifest.get("pair"), manifest["variant"]
   if not runtime.get("pair") or not setup:
     raise LocalError(f"{rid} isn't a paired setup")
@@ -2082,7 +2101,7 @@ def pair_worker_start(rid):
 
 
 def pair_worker_stop(rid):
-  manifest = load_model(rid) or {}
+  manifest = pair_manifest(rid) if os.path.exists(pair_setup_path(rid)) else (load_model(rid) or {})
   setup = manifest.get("pair")
   if not setup:
     return
@@ -2105,8 +2124,9 @@ def pair_remove(manifest):
     pair_ssh(setup["peer"], command + "; true", timeout=600)
   except LocalError as error:
     say(f"Couldn't clean up on {setup['host']}: {error.short}")
-  if os.path.exists(pair_env_path(rid)):
-    os.unlink(pair_env_path(rid))
+  for path in (pair_env_path(rid), pair_setup_path(rid)):
+    if os.path.exists(path):
+      os.unlink(path)
 
 
 def cmd_pair_worker(argv):
@@ -2496,6 +2516,7 @@ def activate(manifest, recipe, runtime, gpu, key, catalog, profile):
     evict_idle_weights(keep=[rid])
     before_ram, before_gpu = check_headroom(manifest["variant"], gpu)
     write_unit_files(rid, container_text)
+    write_pair_setup(manifest)
     systemctl("reset-failed", unit_name(rid))
     write_status(catalog, profile, {rid: "activating"}, pending={rid: manifest})
     load_seconds = start_unit(rid)
@@ -2503,6 +2524,9 @@ def activate(manifest, recipe, runtime, gpu, key, catalog, profile):
   except (LocalError, subprocess.CalledProcessError) as error:
     systemctl("stop", unit_name(rid))
     write_unit_files(rid, previous_text)
+    if os.path.exists(pair_setup_path(rid)):
+      os.unlink(pair_setup_path(rid))
+    write_pair_setup(load_model(rid))
     if previous_text is not None and was_running:
       say(f"Restoring the previous setup of {rid}")
       systemctl("start", unit_name(rid))
@@ -2689,6 +2713,7 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
       check_headroom(variant, gpu)
     except LocalError as error:
       write_unit_files(rid, render_container(rid, recipe, runtime, variant, roles, gpu, fileset))
+      write_pair_setup(manifest)
       clear_error(rid)
       # Its first start runs the checks activate() would have.
       manifest["unchecked"] = True
