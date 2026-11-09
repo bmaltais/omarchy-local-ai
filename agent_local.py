@@ -13,6 +13,7 @@ import fcntl
 import fnmatch
 import hashlib
 import ipaddress
+import itertools
 import json
 import os
 import pty
@@ -332,7 +333,12 @@ def fabric_side(peer):
     for other in sorted(os.listdir(base)):
       if other != hca and v2_ipv4(other, gid):
         hcas.append(other)
-  return {"addr": src, "dev": dev, "hca": hca, "gid": gid, "hcas": hcas}
+  def netdevs(device):
+    try:
+      return sorted(os.listdir(f"{base}/{device}/device/net"))
+    except OSError:
+      return []
+  return {"addr": src, "dev": dev, "hca": hca, "gid": gid, "hcas": hcas, "devs": [d for h in hcas for d in netdevs(h)]}
 def drop_cache(root, marker):
   """Drops the page cache of every file under root's directories whose name holds marker."""
   for top in (os.listdir(root) if os.path.isdir(root) else []):
@@ -348,6 +354,19 @@ def drop_cache(root, marker):
           os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
         finally:
           os.close(fd)
+def ports():
+  """Each RDMA-capable netdev with a carrier, and its IPv4 addresses as address/prefix."""
+  links = json.loads(subprocess.run(["ip", "-j", "-4", "addr"], capture_output=True, text=True).stdout or "[]")
+  found = {}
+  for link in links:
+    dev = link.get("ifname", "")
+    try:
+      carrier = open(f"/sys/class/net/{dev}/carrier").read().strip() == "1"
+    except OSError:
+      carrier = False
+    if carrier and os.path.isdir(f"/sys/class/net/{dev}/device/infiniband"):
+      found[dev] = [f"{a['local']}/{a['prefixlen']}" for a in link.get("addr_info", []) if a.get("family") == "inet"]
+  return found
 def node():
   name = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True).stdout.strip()
   mem = {line.split(":")[0]: int(line.split()[1]) * 1024 for line in open("/proc/meminfo") if line.split()[1:2]}
@@ -379,11 +398,23 @@ def pair_python(peer, expression, timeout=20):
   return json.loads(result.stdout)
 
 
+PEER_RE = re.compile(r"^([A-Za-z0-9._-]+@)?[A-Za-z0-9._:%-]+$")
+
+
 def pair_override():
-  """An explicit peer, for when the cable's other end isn't found: one host or address in
-  ~/.config/omarchy/agent-local/link."""
+  """An explicit peer, for when the cable's other end isn't found: one [user@]host or address
+  in ~/.config/omarchy/agent-local/link."""
   value = _read(os.path.join(config_dir(), "link")).split()
-  return value[0] if value and re.match(r"^[A-Za-z0-9._:-]+$", value[0]) else None
+  return value[0] if value and PEER_RE.match(value[0]) else None
+
+
+def peer_user(peer):
+  return peer.split("@", 1)[0] if peer and "@" in peer else None
+
+
+def peer_address(peer):
+  """The address part of an SSH target, user@address or address."""
+  return peer.rsplit("@", 1)[-1]
 
 
 def fabric_candidates():
@@ -407,7 +438,7 @@ def fabric_candidates():
       for entry in json.loads(neighbors or "[]"):
         if entry.get("dst") and entry.get("state") != ["FAILED"]:
           candidates.append(entry["dst"])
-      hosts = [str(host) for host in (mine.network.hosts() if mine.network.prefixlen >= 30 else list(mine.network.hosts())[:2])]
+      hosts = [str(host) for host in itertools.islice(mine.network.hosts(), 2)]
       candidates += [host for host in hosts if host != str(mine.ip)]
   return list(dict.fromkeys(candidates))
 
@@ -427,22 +458,25 @@ def cached_pair(profile):
   return pair if isinstance(pair, dict) and pair.get("peer") else None
 
 
-def detect_pair(profile):
+def detect_pair(profile, user=None):
   """Finds a machine of this one's GPU family on a direct ConnectX-7 link, records it in
-  pair.json, and returns it, or None (and forgets the old one) when there is none."""
+  pair.json, and returns it, or None (and forgets the old one) when there is none. The peer is
+  reached as `user` when given, else as the user it was last reached as."""
   family = NVIDIA_UNIFIED_FAMILIES.get(profile["platform"])
   if family not in PAIR_FAMILIES:
     return None
   override = pair_override()
+  user = user or peer_user(override) or peer_user((cached_pair(profile) or {}).get("peer"))
+  candidates = [peer_address(override)] if override else fabric_candidates()
   found = None
-  for peer in ([override] if override else fabric_candidates()):
+  for peer in (f"{user}@{address}" if user else address for address in candidates):
     try:
       node = pair_python(peer, "node()", timeout=8)
     except (LocalError, ValueError):
       continue
     if "GB10" not in node.get("gpu", "") or ram_class(gib(node["ram_total"])) != profile["ram_class"]:
       continue
-    side = _fabric(peer)
+    side = _fabric(peer_address(peer))
     if not side or not side.get("hca"):
       continue
     found = {"peer": peer, "host": node["host"], "home": node["home"], "ram_gib": round(gib(node["ram_total"]), 2)}
@@ -457,7 +491,7 @@ def detect_pair(profile):
 def pair_link(pair):
   """Both sides of the cable as the ranks use them now: rank 0 here, rank 1 on the peer.
   Rails are used only when both sides have as many."""
-  here = _fabric(pair["peer"])
+  here = _fabric(peer_address(pair["peer"]))
   if not here or not here.get("hca") or here.get("gid") is None:
     raise LocalError(f"No RoCE v2 address on this machine's link to {pair['peer']}: is it the ConnectX-7 cable, with an IPv4 address on each end?", short="Pair link has no RoCE address")
   there = pair_python(pair["peer"], f"fabric_side({here['addr']!r})")
@@ -1374,9 +1408,18 @@ def prune_filesets(rid, keep):
   if not os.path.isdir(base) or not FILESET_RE.match(keep or ""):
     return
   for name in os.listdir(base):
-    # A paired recipe's per-rank inputs (<fileset>.rank<N>) go with their file set.
+    # A paired recipe's rank folders (<fileset>.rank<N>) go with their file set.
     if name != keep and not name.startswith(keep + "."):
       shutil.rmtree(os.path.join(base, name), ignore_errors=True)
+  # The peer's copies too, once the setup that replaced them is the current one.
+  setup = (load_model(rid) or {}).get("pair")
+  if setup:
+    peer_base = os.path.dirname(peer_fileset_dir(setup, rid, keep))
+    q = shlex.quote
+    try:
+      pair_ssh(setup["peer"], f"cd {q(peer_base)} && for d in *; do case $d in {q(keep)}|{q(keep)}.*) ;; *) rm -rf -- \"$d\" ;; esac; done", check=False)
+    except LocalError:
+      pass
 
 
 def materialize(rid, files, roles, seed_dir=None, progress=None):
@@ -2008,6 +2051,9 @@ def pair_setup(rid, manifest, runtime, pair):
   models = fileset_dir(rid, fileset)
   ident = image_id(runtime["image"])
   manifest["pair"] = {"peer": pair["peer"], "host": pair["host"], "home": pair["home"], "image_id": ident}
+  # A first setup cancelled from here on still knows where its copies went.
+  if load_installing(rid) is not None:
+    update_installing(rid, pair=manifest["pair"])
   local_rank = rank_dir(rid, fileset, 0)
   ensure_dir(local_rank)
   if runtime["pair"].get("prepare"):
@@ -2038,9 +2084,6 @@ def pair_setup(rid, manifest, runtime, pair):
     command = shlex.join(["podman", "run", "--rm", "--network", "none", *RANK_CONTAINER,
                           "-v", f"{target}:/models:ro", "-v", f"{peer_rank}:/prepared", ident, *prepare_command(runtime, 1)])
     stream(pair_ssh_argv() + [peer, command], f"Preparing rank 1 on {pair['host']}")
-  # Older file sets of this recipe on the peer go once this one is in place.
-  base = os.path.dirname(target)
-  pair_ssh(peer, f"cd {q(base)} && for d in *; do case $d in {q(fileset)}|{q(fileset)}.*) ;; *) rm -rf -- \"$d\" ;; esac; done", check=False)
 
 
 def _placeholders(text, values):
@@ -2102,8 +2145,10 @@ def pair_worker_stop(rid):
   pair_ssh(setup["peer"], f"podman stop -t 30 {shlex.quote(worker_name(rid))}", timeout=90, check=False)
 
 
-def pair_remove(manifest):
-  """Removes a paired recipe's rank 1 container, files and (when unused) image from the peer."""
+def pair_remove(manifest, local_only=False):
+  """Removes a paired recipe's rank 1 container, files and (when unused) image from the peer.
+  Fails while the peer can't be reached, before anything here is deleted, so remove can run
+  again; local_only skips the peer, for one that's gone for good."""
   setup = manifest.get("pair")
   if not setup:
     return
@@ -2117,7 +2162,10 @@ def pair_remove(manifest):
   try:
     pair_ssh(setup["peer"], command + "; true", timeout=600)
   except LocalError as error:
-    say(f"Couldn't clean up on {setup['host']}: {error.short}")
+    if not local_only:
+      raise LocalError(f"Can't reach {setup['host']} to remove {rid}'s copies there ({error.short}). Run remove again once it's back, "
+                       f"or with --local-only if it's gone for good", short=f"{setup['host']} unreachable")
+    say(f"Leaving {rid}'s copies on {setup['host']}, which can't be reached: {error.short}")
   for path in (pair_env_path(rid), pair_setup_path(rid)):
     if os.path.exists(path):
       os.unlink(path)
@@ -2161,10 +2209,15 @@ if [[ ! -f /etc/systemd/user.conf.d/99-rdma-memlock.conf ]]; then
   echo "  unlimited locked memory for user services"
 fi
 manager=$(pgrep -u "$user" -x systemd | head -1 || true)
-if [[ -n "$manager" ]] && ! grep -q '^Max locked memory *unlimited' "/proc/$manager/limits"; then
-  systemctl --user -M "$user@" daemon-reexec
-  prlimit --pid "$manager" --memlock=unlimited:unlimited
-  echo "  applied to $user's running services"
+if [[ -n "$manager" ]]; then
+  # The default its services get, then its own limit, which caps theirs (a re-exec resets it).
+  if [[ "$(systemctl --user -M "$user@" show -p DefaultLimitMEMLOCK --value)" != infinity ]]; then
+    systemctl --user -M "$user@" daemon-reexec
+    echo "  applied to $user's running services"
+  fi
+  if ! grep -q '^Max locked memory *unlimited' "/proc/$manager/limits"; then
+    prlimit --pid "$manager" --memlock=unlimited:unlimited
+  fi
 fi
 missing=()
 for tool in podman rsync python3; do command -v "$tool" >/dev/null || missing+=("$tool"); done
@@ -2218,57 +2271,97 @@ with open(tmp, "w") as handle:
 os.chmod(tmp, 0o644)
 os.replace(tmp, "/etc/cdi/nvidia.yaml")'''
 
-# The cable's addresses when it has none: one /24 per PCIe link of the cabled port (a Spark's
-# QSFP port is two netdevs, each a rail), .1 on the machine running setup, .2 on the peer.
+# Addresses for cable ports, as dev=address/prefix (plan_link chooses them), through NetworkManager.
 LINK_SETUP = r'''
 set -euo pipefail
-host=$1; shift
+command -v nmcli >/dev/null || { echo "  NetworkManager (nmcli) is needed to address the cable" >&2; exit 1; }
 for spec in "$@"; do
-  dev=${spec%%=*}; net=${spec#*=}
+  dev=${spec%%=*}; address=${spec#*=}
   name="omarchy-pair-$dev"
-  if nmcli -t -f NAME connection show | grep -qx "$name"; then continue; fi
-  for old in $(nmcli -t -f NAME,DEVICE connection show --active | awk -F: -v d="$dev" '$2 == d {print $1}'); do
+  for old in $(nmcli -t -f NAME,DEVICE connection show --active | awk -F: -v d="$dev" -v n="$name" '$2 == d && $1 != n {print $1}'); do
     nmcli connection modify "$old" connection.autoconnect no
   done
-  nmcli connection add type ethernet ifname "$dev" con-name "$name" ipv4.method manual ipv4.addresses "$net.$host/24" \
-    ipv6.method link-local 802-3-ethernet.mtu 9000 connection.autoconnect yes >/dev/null
+  if nmcli -t -f NAME connection show | grep -qx "$name"; then
+    nmcli connection modify "$name" ipv4.method manual ipv4.addresses "$address"
+  else
+    nmcli connection add type ethernet ifname "$dev" con-name "$name" ipv4.method manual ipv4.addresses "$address" \
+      ipv6.method link-local 802-3-ethernet.mtu 9000 connection.autoconnect yes >/dev/null
+  fi
   nmcli connection up "$name" >/dev/null
-  echo "  $dev: $net.$host/24, MTU 9000"
+  echo "  $dev: $address, MTU 9000"
 done
 '''
 
 
-# The cable is a private link between the two machines: the ranks' rendezvous, NCCL's sockets and
-# the engine's SSH all cross it. Where ufw guards a machine (Omarchy turns it on), everything
-# arriving on the cable's own ports is let in, ahead of the SSH rate limit.
+# The ranks' rendezvous, NCCL's sockets and the engine's SSH cross the cable. Where ufw guards a
+# machine (Omarchy turns it on), what the peer's own address sends to a cable port is let in, ahead
+# of the SSH rate limit, as dev=address pairs (link_rules); nothing else on that port. A broader
+# rule an earlier setup inserted for the port goes.
 FIREWALL_SETUP = r'''
 set -euo pipefail
 command -v ufw >/dev/null || exit 0
 ufw status | grep -q '^Status: active' || exit 0
-for dev in "$@"; do
-  if ! ufw status | grep -qE "^Anywhere on $dev +ALLOW( |$)"; then
-    ufw insert 1 allow in on "$dev" comment "omarchy-local-ai pair link" >/dev/null
-    echo "  firewall: allowing the pair link on $dev"
+for spec in "$@"; do
+  dev=${spec%%=*}; from=${spec#*=}
+  if ufw status | grep -qE "^Anywhere on $dev +ALLOW +Anywhere +# omarchy-local-ai"; then
+    ufw delete allow in on "$dev" >/dev/null || true
+  fi
+  if ! ufw status | grep -qE "^Anywhere on $dev +ALLOW +${from//./\\.}( |$)"; then
+    ufw insert 1 allow in on "$dev" from "$from" comment "omarchy-local-ai pair link" >/dev/null
+    echo "  firewall: allowing $from on $dev"
   fi
 done
 '''
 
 
-def cabled_ports():
-  """This machine's RDMA-capable netdevs with a carrier, in name order."""
-  ports = []
-  for dev in sorted(os.listdir("/sys/class/net")):
-    if os.path.isdir(f"/sys/class/net/{dev}/device/infiniband") and _read(f"/sys/class/net/{dev}/carrier") == "1":
-      ports.append(dev)
-  return ports
+def local_ports():
+  scope = {}
+  exec(FABRIC_SIDE, scope)
+  return scope["ports"]()
 
 
-PORTS_LISTING = "for d in /sys/class/net/*; do [ -d $d/device/infiniband ] && [ \"$(cat $d/carrier 2>/dev/null)\" = 1 ] && basename $d; done; true"
+def plan_link(here, there):
+  """Addresses for the cable ports both machines share by name (dev=address/prefix, for each
+  end). A port addressed on one end only gets the other host of that /24 on the other end, so
+  an interrupted setup finishes; a port addressed on neither gets a fresh 10.99.N.0/24, .1 here
+  and .2 there. Ports on only one machine aren't the cable and are left alone."""
+  taken = {ipaddress.ip_interface(c).network for side in (here, there) for cidrs in side.values() for c in cidrs}
+  mine, theirs, subnet = [], [], 0
+  def other_end(cidr):
+    iface = ipaddress.ip_interface(cidr)
+    host = next(h for h in itertools.islice(iface.network.hosts(), 2) if h != iface.ip)
+    return f"{host}/{iface.network.prefixlen}"
+  for dev in sorted(set(here) & set(there)):
+    a = [ipaddress.ip_interface(c) for c in here[dev]]
+    b = [ipaddress.ip_interface(c) for c in there[dev]]
+    if any(x.network == y.network for x in a for y in b):
+      continue
+    if a and not b:
+      theirs.append(f"{dev}={other_end(here[dev][0])}")
+    elif b and not a:
+      mine.append(f"{dev}={other_end(there[dev][0])}")
+    elif not a and not b:
+      while ipaddress.ip_network(f"10.99.{subnet}.0/24") in taken:
+        subnet += 1
+      taken.add(ipaddress.ip_network(f"10.99.{subnet}.0/24"))
+      mine.append(f"{dev}=10.99.{subnet}.1/24")
+      theirs.append(f"{dev}=10.99.{subnet}.2/24")
+  return mine, theirs
 
 
-def has_ipv4(dev):
-  out = subprocess.run(["ip", "-j", "-4", "addr", "show", "dev", dev], capture_output=True, text=True).stdout
-  return any(link.get("addr_info") for link in json.loads(out or "[]"))
+def link_rules(here, there, rails):
+  """Firewall rules for the cable, as dev=address for each end: each rail port the ranks use (on
+  both ends) lets in the other end's address on the same network, and only that. Other RDMA
+  ports, on a shared network say, are left to the firewall as they were."""
+  mine, theirs = [], []
+  for dev in sorted(set(here) & set(there) & set(rails)):
+    for x in here[dev]:
+      for y in there[dev]:
+        x_iface, y_iface = ipaddress.ip_interface(x), ipaddress.ip_interface(y)
+        if x_iface.network == y_iface.network:
+          mine.append(f"{dev}={y_iface.ip}")
+          theirs.append(f"{dev}={x_iface.ip}")
+  return mine, theirs
 
 
 def root_script(script, *args, peer=None):
@@ -2289,10 +2382,9 @@ def cmd_link_setup(argv):
   if NVIDIA_UNIFIED_FAMILIES.get(profile["platform"]) not in PAIR_FAMILIES:
     raise LocalError("Pairs are supported between DGX Sparks (GB10) only")
   peer = args.peer or (cached_pair(profile) or {}).get("peer") or pair_override()
-  if not peer or not re.match(r"^([A-Za-z0-9._-]+@)?[A-Za-z0-9._:%-]+$", peer):
+  if not peer or not PEER_RE.match(peer):
     raise LocalError("Name the other Spark as SSH reaches it, e.g.: omarchy agent local link setup spark-1234.local")
-  ports = cabled_ports()
-  if not ports:
+  if not local_ports():
     raise LocalError("No ConnectX-7 port has a link: connect the two Sparks' QSFP ports with a direct cable")
 
   say("SSH key to the peer")
@@ -2313,32 +2405,26 @@ def cmd_link_setup(argv):
   root_script(HOST_SETUP.replace("@CDI_COMPAT@", CDI_COMPAT), pair_ssh(peer, "id -un").stdout.strip(), peer=peer)
 
   say("Addresses on the cable")
-  bare = [dev for dev in ports if not has_ipv4(dev)]
-  if bare:
-    if not shutil.which("nmcli"):
-      raise LocalError(f"{', '.join(bare)} have no IPv4 address and NetworkManager isn't here to give them one")
-    there = pair_ssh(peer, PORTS_LISTING).stdout.split()
-    taken = {line.split()[3].split("/")[0].rsplit(".", 1)[0] for line in subprocess.run(["ip", "-o", "-4", "addr"], capture_output=True, text=True).stdout.splitlines() if len(line.split()) > 3}
-    specs, subnet = [], 0
-    for dev in bare:
-      if dev not in there:
-        raise LocalError(f"The peer has no linked port named {dev}: are the Sparks cabled port to port?")
-      while f"10.99.{subnet}" in taken:
-        subnet += 1
-      specs.append(f"{dev}=10.99.{subnet}")
-      subnet += 1
-    root_script(LINK_SETUP, "1", *specs)
-    root_script(LINK_SETUP, "2", *specs, peer=peer)
-  else:
-    say(f"  {', '.join(ports)} already addressed")
+  here, there = local_ports(), pair_python(peer, "ports()")
+  if not set(here) & set(there):
+    raise LocalError("The two Sparks share no linked ConnectX-7 port name: are they cabled port to port?")
+  mine, theirs = plan_link(here, there)
+  if mine:
+    root_script(LINK_SETUP, *mine)
+  if theirs:
+    root_script(LINK_SETUP, *theirs, peer=peer)
+  if not mine and not theirs:
+    say(f"  {', '.join(sorted(set(here) & set(there)))} already addressed")
 
-  say("Firewalls")
-  root_script(FIREWALL_SETUP, *ports)
-  root_script(FIREWALL_SETUP, *pair_ssh(peer, PORTS_LISTING).stdout.split(), peer=peer)
-
-  pair = detect_pair(machine_profile())
+  pair = detect_pair(machine_profile(), user=peer_user(peer))
   if not pair:
     raise LocalError("The peer wasn't found on the cable after setup: check that both ends of the link are up (omarchy agent local link)")
+
+  say("Firewalls")
+  near, far = pair_link(pair)
+  mine, theirs = link_rules(local_ports(), pair_python(pair["peer"], "ports()"), set(near["devs"]) & set(far["devs"]))
+  root_script(FIREWALL_SETUP, *mine)
+  root_script(FIREWALL_SETUP, *theirs, peer=pair["peer"])
   say(f"Linked to {pair['host']} at {pair['peer']}")
   pair_limits(pair["peer"])
   return 0
@@ -3044,6 +3130,7 @@ def _start(args, catalog, profile):
 def cmd_remove(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local remove")
   parser.add_argument("recipe")
+  parser.add_argument("--local-only", action="store_true", help="for a model across two machines: remove it here even if the other can't be reached")
   args = parser.parse_args(argv)
   catalog = load_catalog()
   profile = machine_profile()
@@ -3063,6 +3150,8 @@ def cmd_remove(argv):
       systemctl("stop", unit_name(rid))
       # Read again: the setup may have reached its image since the first look.
       setting_up = load_installing(rid) or setting_up
+      if setting_up.get("pair"):
+        pair_remove({"recipe_id": rid, "pair": setting_up["pair"]}, args.local_only)
       clear_installing(rid)
       freed, _ = _remove_files(rid, setting_up.get("image"))
       # Only this setup's half-downloaded files: others resume from theirs.
@@ -3091,7 +3180,7 @@ def cmd_remove(argv):
         systemctl("stop", unit_name(rid))
       deleting = time.time()
       if manifest:
-        pair_remove(manifest)
+        pair_remove(manifest, args.local_only)
       result = _remove_files(rid)
       if size_gib > 1:
         write_atomic(os.path.join(state_dir(), "removal_rate"), f"{(time.time() - deleting) / size_gib:.4f}\n")

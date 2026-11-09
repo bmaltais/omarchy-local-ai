@@ -376,10 +376,32 @@ with patch.object(a, "platform_name", return_value="aarch64-gb10"), patch.object
   cached = a.machine_profile()
   check("a recorded pair adds the pair GPU without probing", [g["family"] for g in cached["gpus"]] == ["nvidia-gb10", "nvidia-gb10-pair"] and cached["gpus"][1]["peer"] == "10.99.0.2", json.dumps(cached))
   os.unlink(a.pair_path())
+  # A peer reached as another user stays reached as that user, and its route is the address alone.
+  routed = []
+  with patch.object(a, "fabric_candidates", return_value=["10.99.1.2"]), \
+       patch.object(a, "pair_python", return_value={"gpu": "NVIDIA GB10", "ram_total": 128 * 2**30, "home": "/home/bob", "host": "spark2"}), \
+       patch.object(a, "_fabric", side_effect=lambda address: routed.append(address) or {"hca": "rocep1s0f0"}):
+    first = a.detect_pair(a.machine_profile(), user="bob")
+    again = a.detect_pair(a.machine_profile())
+  check("a peer keeps the SSH user it was set up with", first["peer"] == again["peer"] == "bob@10.99.1.2" and routed == ["10.99.1.2", "10.99.1.2"], repr((first, again, routed)))
+  os.unlink(a.pair_path())
 
 for name, script in (("host", a.HOST_SETUP.replace("@CDI_COMPAT@", a.CDI_COMPAT)), ("link", a.LINK_SETUP), ("firewall", a.FIREWALL_SETUP)):
   result = subprocess.run(["bash", "-n", "-c", script], capture_output=True, text=True)
   check(f"link setup's {name} script parses", result.returncode == 0, result.stderr)
+# Cable addressing finishes whatever an earlier setup left, and leaves ports that aren't shared alone.
+fresh = a.plan_link({"enp1": [], "enP2": []}, {"enp1": [], "enP2": []})
+check("a fresh cable gets a /24 per port, .1 here and .2 there", fresh == (["enP2=10.99.0.1/24", "enp1=10.99.1.1/24"], ["enP2=10.99.0.2/24", "enp1=10.99.1.2/24"]), repr(fresh))
+half = a.plan_link({"enp1": ["10.99.1.1/24"], "lan0": ["192.168.1.5/24"]}, {"enp1": []})
+check("an interrupted setup gives the peer the other end of this side's /24 and ignores unshared ports", half == ([], ["enp1=10.99.1.2/24"]), repr(half))
+check("a cable addressed on both ends is left alone", a.plan_link({"enp1": ["10.99.1.1/24"]}, {"enp1": ["10.99.1.2/24"]}) == ([], []))
+check("a new /24 avoids networks either end already uses", a.plan_link({"enp1": [], "enp2": ["10.99.0.1/24"]}, {"enp1": [], "enp2": ["10.99.0.2/24"]})[0] == ["enp1=10.99.1.1/24"])
+rules = a.link_rules({"enp1": ["10.99.1.1/24"], "lan0": ["192.168.1.5/24"]}, {"enp1": ["10.99.1.2/24"], "lan0": ["192.168.1.9/24"], "ib9": ["10.0.0.2/8"]}, {"enp1"})
+check("the firewall lets in only the other end's address, on the rails alone", rules == (["enp1=10.99.1.2"], ["enp1=10.99.1.1"]), repr(rules))
+with patch.object(a, "pair_ssh", side_effect=a.LocalError("unreachable")), patch.object(a, "known_models", return_value=[]):
+  raises("removing a paired model stops while its peer can't be reached", lambda: a.pair_remove({"recipe_id": "paired", "pair": {"peer": "10.99.1.2", "host": "spark2", "home": "/home/u", "image_id": "c" * 64}}), "--local-only")
+  a.pair_remove({"recipe_id": "paired", "pair": {"peer": "10.99.1.2", "host": "spark2", "home": "/home/u", "image_id": "c" * 64}}, local_only=True)
+  check("--local-only removes a paired model whose peer is gone", True)
 compile(a.CDI_COMPAT, "nvidia-cdi-podman-compat", "exec")
 check("the CDI compatibility script compiles", True)
 
