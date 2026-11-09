@@ -134,8 +134,9 @@ user's systemd manager in user.conf.d, applied to a running manager at once), in
 0.6 copy of NVIDIA's spec for Podman before 5 (Ubuntu's DGX OS) through a drop-in on
 nvidia-cdi-refresh, lets the peer's user linger, and gives cable ports without an
 address one /24 per PCIe link (10.99.N.1 here, .2 there, MTU 9000) through
-NetworkManager, and where ufw is active lets in everything arriving on the cable's
-ports (the ranks' rendezvous and NCCL sockets), ahead of Omarchy's SSH rate limit. `use` of a paired recipe:
+NetworkManager (finishing a half-addressed cable on a re-run), and where ufw is active
+lets in, on each rail port the ranks use, only the other end's address (the ranks'
+rendezvous and NCCL sockets), ahead of Omarchy's SSH rate limit. `use` of a paired recipe:
 
 1. materializes the file set here, as for any recipe, with rank 0's state folder
    `models/<recipe>/<fileset>.rank0` beside it;
@@ -149,7 +150,9 @@ IPv4 address), checks the peer's free memory, writes the unit's environment file
 starts rank 1 on the peer as `omarchy-agent-local-model-<recipe>-rank1`; its
 `ExecStopPost` stops it. Start, stop and the panel treat the pair as one model.
 Admission checks free memory on both machines. `remove` also removes the peer's
-container, files and, when no other paired recipe uses it, its image.
+container, files and, when no other paired recipe uses it, its image; while the peer
+can't be reached it fails before deleting anything, so it can run again, unless
+given `--local-only` for a peer that's gone for good.
 
 ## State and panel API
 

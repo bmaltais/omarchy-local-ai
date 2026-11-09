@@ -333,7 +333,12 @@ def fabric_side(peer):
     for other in sorted(os.listdir(base)):
       if other != hca and v2_ipv4(other, gid):
         hcas.append(other)
-  return {"addr": src, "dev": dev, "hca": hca, "gid": gid, "hcas": hcas}
+  def netdevs(device):
+    try:
+      return sorted(os.listdir(f"{base}/{device}/device/net"))
+    except OSError:
+      return []
+  return {"addr": src, "dev": dev, "hca": hca, "gid": gid, "hcas": hcas, "devs": [d for h in hcas for d in netdevs(h)]}
 def ports():
   """Each RDMA-capable netdev with a carrier, and its IPv4 addresses as address/prefix."""
   links = json.loads(subprocess.run(["ip", "-j", "-4", "addr"], capture_output=True, text=True).stdout or "[]")
@@ -2067,8 +2072,10 @@ def pair_worker_stop(rid):
   pair_ssh(setup["peer"], f"podman stop -t 30 {shlex.quote(worker_name(rid))}", timeout=90, check=False)
 
 
-def pair_remove(manifest):
-  """Removes a paired recipe's rank 1 container, files and (when unused) image from the peer."""
+def pair_remove(manifest, local_only=False):
+  """Removes a paired recipe's rank 1 container, files and (when unused) image from the peer.
+  Fails while the peer can't be reached, before anything here is deleted, so remove can run
+  again; local_only skips the peer, for one that's gone for good."""
   setup = manifest.get("pair")
   if not setup:
     return
@@ -2082,11 +2089,10 @@ def pair_remove(manifest):
   try:
     pair_ssh(setup["peer"], command + "; true", timeout=600)
   except LocalError as error:
-    # While it's still the linked machine, removal waits for it: nothing here is deleted yet, so
-    # remove can run again once it's back. A machine no longer linked can't be cleaned up.
-    if (cached_pair(machine_profile()) or {}).get("peer") == setup["peer"]:
-      raise LocalError(f"Can't reach {setup['host']} to remove {rid}'s copies there ({error.short}); run remove again once it's back", short=f"{setup['host']} unreachable")
-    say(f"Couldn't clean up on {setup['host']}, which is no longer linked: {error.short}")
+    if not local_only:
+      raise LocalError(f"Can't reach {setup['host']} to remove {rid}'s copies there ({error.short}). Run remove again once it's back, "
+                       f"or with --local-only if it's gone for good", short=f"{setup['host']} unreachable")
+    say(f"Leaving {rid}'s copies on {setup['host']}, which can't be reached: {error.short}")
   for path in (pair_env_path(rid), pair_setup_path(rid)):
     if os.path.exists(path):
       os.unlink(path)
@@ -2270,11 +2276,12 @@ def plan_link(here, there):
   return mine, theirs
 
 
-def link_rules(here, there):
-  """Firewall rules for the cable, as dev=address for each end: a port lets in the other end's
-  address on the same network, and only that."""
+def link_rules(here, there, rails):
+  """Firewall rules for the cable, as dev=address for each end: each rail port the ranks use (on
+  both ends) lets in the other end's address on the same network, and only that. Other RDMA
+  ports, on a shared network say, are left to the firewall as they were."""
   mine, theirs = [], []
-  for dev in sorted(set(here) & set(there)):
+  for dev in sorted(set(here) & set(there) & set(rails)):
     for x in here[dev]:
       for y in there[dev]:
         x_iface, y_iface = ipaddress.ip_interface(x), ipaddress.ip_interface(y)
@@ -2336,14 +2343,15 @@ def cmd_link_setup(argv):
   if not mine and not theirs:
     say(f"  {', '.join(sorted(set(here) & set(there)))} already addressed")
 
-  say("Firewalls")
-  mine, theirs = link_rules(local_ports(), pair_python(peer, "ports()"))
-  root_script(FIREWALL_SETUP, *mine)
-  root_script(FIREWALL_SETUP, *theirs, peer=peer)
-
   pair = detect_pair(machine_profile(), user=peer_user(peer))
   if not pair:
     raise LocalError("The peer wasn't found on the cable after setup: check that both ends of the link are up (omarchy agent local link)")
+
+  say("Firewalls")
+  near, far = pair_link(pair)
+  mine, theirs = link_rules(local_ports(), pair_python(pair["peer"], "ports()"), set(near["devs"]) & set(far["devs"]))
+  root_script(FIREWALL_SETUP, *mine)
+  root_script(FIREWALL_SETUP, *theirs, peer=pair["peer"])
   say(f"Linked to {pair['host']} at {pair['peer']}")
   pair_limits(pair["peer"])
   return 0
@@ -3049,6 +3057,7 @@ def _start(args, catalog, profile):
 def cmd_remove(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local remove")
   parser.add_argument("recipe")
+  parser.add_argument("--local-only", action="store_true", help="for a model across two machines: remove it here even if the other can't be reached")
   args = parser.parse_args(argv)
   catalog = load_catalog()
   profile = machine_profile()
@@ -3069,7 +3078,7 @@ def cmd_remove(argv):
       # Read again: the setup may have reached its image since the first look.
       setting_up = load_installing(rid) or setting_up
       if setting_up.get("pair"):
-        pair_remove({"recipe_id": rid, "pair": setting_up["pair"]})
+        pair_remove({"recipe_id": rid, "pair": setting_up["pair"]}, args.local_only)
       clear_installing(rid)
       freed, _ = _remove_files(rid, setting_up.get("image"))
       # Only this setup's half-downloaded files: others resume from theirs.
@@ -3098,7 +3107,7 @@ def cmd_remove(argv):
         systemctl("stop", unit_name(rid))
       deleting = time.time()
       if manifest:
-        pair_remove(manifest)
+        pair_remove(manifest, args.local_only)
       result = _remove_files(rid)
       if size_gib > 1:
         write_atomic(os.path.join(state_dir(), "removal_rate"), f"{(time.time() - deleting) / size_gib:.4f}\n")
