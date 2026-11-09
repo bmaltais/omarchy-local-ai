@@ -2110,10 +2110,15 @@ if [[ ! -f /etc/systemd/user.conf.d/99-rdma-memlock.conf ]]; then
   echo "  unlimited locked memory for user services"
 fi
 manager=$(pgrep -u "$user" -x systemd | head -1 || true)
-if [[ -n "$manager" ]] && ! grep -q '^Max locked memory *unlimited' "/proc/$manager/limits"; then
-  systemctl --user -M "$user@" daemon-reexec
-  prlimit --pid "$manager" --memlock=unlimited:unlimited
-  echo "  applied to $user's running services"
+if [[ -n "$manager" ]]; then
+  # The default its services get, then its own limit, which caps theirs (a re-exec resets it).
+  if [[ "$(systemctl --user -M "$user@" show -p DefaultLimitMEMLOCK --value)" != infinity ]]; then
+    systemctl --user -M "$user@" daemon-reexec
+    echo "  applied to $user's running services"
+  fi
+  if ! grep -q '^Max locked memory *unlimited' "/proc/$manager/limits"; then
+    prlimit --pid "$manager" --memlock=unlimited:unlimited
+  fi
 fi
 missing=()
 for tool in podman rsync python3; do command -v "$tool" >/dev/null || missing+=("$tool"); done
