@@ -254,7 +254,7 @@ def choose_gpu(profile, family=None):
   if not gpus:
     raise LocalError("No supported GPU found on this machine")
   # A pair outranks its own single node, whose memory per node it shares.
-  rank = lambda gpu: (gpu["memory_gib"], gpu.get("nodes", 1))
+  rank = lambda gpu: (gpu.get("nodes", 1), gpu["memory_gib"])
   best = max(gpus, key=rank)
   rivals = {gpu["family"] for gpu in gpus if rank(gpu) == rank(best)}
   if len(rivals) > 1:
@@ -270,7 +270,7 @@ def recipe_gpu(profile, recipe, family=None):
   measured = {hw.get("gpu") for hw in recipe.get("hardware", [])}
   matches = [gpu for gpu in profile["gpus"] if gpu["family"] in measured]
   if matches:
-    return max(matches, key=lambda gpu: (gpu["memory_gib"], gpu.get("nodes", 1)))
+    return max(matches, key=lambda gpu: (gpu.get("nodes", 1), gpu["memory_gib"]))
   return choose_gpu(profile)
 
 
@@ -281,7 +281,19 @@ def recipe_gpu(profile, recipe, family=None):
 # key-based SSH (no password prompts: BatchMode), and needs rootless Podman with the NVIDIA CDI
 # GPU and its RDMA devices. Nothing of the engine is installed there; this machine drives it.
 
-PAIR_SSH = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", "-o", "StrictHostKeyChecking=accept-new", "-o", "ServerAliveInterval=15"]
+def pair_key():
+  return os.path.join(home(), ".ssh", "id_ed25519")
+
+
+def pair_ssh_argv(tty=False):
+  """SSH to the peer with the key `pair setup` installed there, and only that key: an agent
+  offering several (1Password's does) would spend the server's MaxAuthTries before it."""
+  argv = ["ssh", "-t" if tty else "-T", "-o", "ConnectTimeout=4", "-o", "StrictHostKeyChecking=accept-new", "-o", "ServerAliveInterval=15"]
+  if not tty:
+    argv += ["-o", "BatchMode=yes"]
+  if os.path.exists(pair_key()):
+    argv += ["-o", "IdentitiesOnly=yes", "-i", pair_key()]
+  return argv
 
 # This machine's (or, sent over SSH, the peer's) side of the cable to an address: the netdev and
 # source address the route takes, its RoCE device, the RoCE v2 GID index holding that IPv4
@@ -335,7 +347,7 @@ def _fabric(peer):
 def pair_ssh(peer, command, input=None, timeout=60, check=True, binary=False):
   """Runs a shell command on the peer. Every value interpolated into it is shlex-quoted by the caller."""
   try:
-    result = subprocess.run(PAIR_SSH + [peer, command], input=input, capture_output=True, text=not binary, timeout=timeout)
+    result = subprocess.run(pair_ssh_argv() + [peer, command], input=input, capture_output=True, text=not binary, timeout=timeout)
   except subprocess.TimeoutExpired:
     raise LocalError(f"The peer {peer} didn't answer within {timeout}s", short="Peer machine not answering")
   if check and result.returncode != 0:
@@ -942,7 +954,7 @@ def resolve_best(catalog, profile, gpu=None, ctx=None):
   GPUs from the strongest down: a pair's class first, then its own node's."""
   if gpu is not None:
     return _resolve_class(catalog, profile, gpu, ctx)
-  gpus = sorted(profile["gpus"], key=lambda g: (g["memory_gib"], g.get("nodes", 1)), reverse=True)
+  gpus = sorted(profile["gpus"], key=lambda g: (g.get("nodes", 1), g["memory_gib"]), reverse=True)
   if not gpus:
     raise LocalError("No supported GPU found on this machine")
   failures = []
@@ -1943,7 +1955,7 @@ def pair_setup(rid, manifest, runtime, pair):
   if pair_ssh(peer, f"podman image exists {q(ident)}", check=False).returncode != 0:
     say(f"Copying the runtime image to {pair['host']} over the link")
     save = subprocess.Popen(["podman", "save", runtime["image"]], stdout=subprocess.PIPE)
-    load = subprocess.run(PAIR_SSH + [peer, "podman load -q"], stdin=save.stdout, capture_output=True, text=True)
+    load = subprocess.run(pair_ssh_argv() + [peer, "podman load -q"], stdin=save.stdout, capture_output=True, text=True)
     save.stdout.close()
     if save.wait() != 0 or load.returncode != 0:
       raise LocalError(f"Copying the image to {pair['host']} failed: {load.stderr.strip()[-400:]}", short="Image copy to the peer failed")
@@ -1952,13 +1964,13 @@ def pair_setup(rid, manifest, runtime, pair):
   say(f"Copying the model files to {pair['host']} over the link (only what it lacks)")
   pair_ssh(peer, f"mkdir -p {q(target)}")
   stream(["rsync", "-a", "--partial", "--delete", "--info=progress2", "--no-inc-recursive",
-          "-e", " ".join(PAIR_SSH + ["-o", "Compression=no", "-c", "aes128-gcm@openssh.com"]),
+          "-e", shlex.join(pair_ssh_argv() + ["-o", "Compression=no", "-c", "aes128-gcm@openssh.com"]),
           f"{models}/", f"{peer}:{target}/"], f"Copying the model files to {pair['host']}")
   peer_rank = rank_dir(rid, fileset, 1, pair["home"])
   say(f"Preparing rank 1's inputs on {pair['host']}")
   command = shlex.join(["podman", "run", "--rm", "--network", "none", *RANK_CONTAINER,
                         "-v", f"{target}:/models:ro", "-v", f"{peer_rank}:/prepared", ident, *prepare_command(runtime, 1)])
-  stream(PAIR_SSH + [peer, f"mkdir -p {q(peer_rank)} && {command}"], f"Preparing rank 1 on {pair['host']}")
+  stream(pair_ssh_argv() + [peer, f"mkdir -p {q(peer_rank)} && {command}"], f"Preparing rank 1 on {pair['host']}")
   # Older file sets of this recipe on the peer go once this one is in place.
   base = os.path.dirname(target)
   pair_ssh(peer, f"cd {q(base)} && for d in *; do case $d in {q(fileset)}|{q(fileset)}.*) ;; *) rm -rf -- \"$d\" ;; esac; done", check=False)
@@ -2158,7 +2170,7 @@ def root_script(script, *args, peer=None):
   """Runs a setup script as root here or on the peer; sudo asks for a password on this terminal when it needs one."""
   argv = ["sudo", "bash", "-c", script, "omarchy-local-pair", *args]
   if peer:
-    argv = ["ssh", "-t", "-o", "StrictHostKeyChecking=accept-new", peer, shlex.join(argv)]
+    argv = pair_ssh_argv(tty=True) + [peer, shlex.join(argv)]
   if subprocess.run(argv).returncode != 0:
     raise LocalError(f"Setting up {'the peer ' + peer if peer else 'this machine'} failed (see above)")
 
@@ -2179,12 +2191,12 @@ def cmd_pair_setup(argv):
     raise LocalError("No ConnectX-7 port has a link: connect the two Sparks' QSFP ports with a direct cable")
 
   say("SSH key to the peer")
-  key = os.path.join(home(), ".ssh", "id_ed25519")
+  key = pair_key()
   if not os.path.exists(key):
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"{os.environ.get('USER', 'user')}@{os.uname().nodename}", "-f", key], check=True)
-  if subprocess.run(PAIR_SSH + [peer, "true"], capture_output=True).returncode != 0:
+  if subprocess.run(pair_ssh_argv() + [peer, "true"], capture_output=True).returncode != 0:
     say(f"  copying {key}.pub to {peer} (asks for its password once)")
-    if subprocess.run(["ssh-copy-id", "-i", key + ".pub", "-o", "StrictHostKeyChecking=accept-new", peer]).returncode != 0:
+    if subprocess.run(["ssh-copy-id", "-i", key + ".pub", "-o", "StrictHostKeyChecking=accept-new", "-o", "PubkeyAuthentication=no", peer]).returncode != 0:
       raise LocalError(f"Can't log in to {peer} with a key: check the name and password")
   node = pair_python(peer, "node()")
   if "GB10" not in node.get("gpu", ""):
@@ -2656,7 +2668,8 @@ def cmd_list(argv):
     print(json.dumps(rows, indent=2))
     return 0
   gpu = profile["gpus"][0]["family"] if profile["gpus"] else "no GPU"
-  say(f"Catalog {catalog.version} · this machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}")
+  paired = f" · paired with {profile['pair']['host']}" if profile.get("pair") else ""
+  say(f"Catalog {catalog.version} · this machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}{paired}")
   for row in rows:
     marks = [mark for mark, on in (("best", row["best"]), ("running", row["active"]), ("installed", row["installed"])) if on]
     tier = f" · third-party ({row['publisher']})" if row["tier"] == "third-party" else ""
