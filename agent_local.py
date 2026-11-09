@@ -1765,16 +1765,21 @@ def preflight(runtime, gpu):
       raise LocalError("rsync is needed to copy the model files to the paired machine: omarchy agent local pair setup")
 
 
+# Whether this user's services may lock unlimited memory: the manager's default for its units and
+# its own limit, which caps theirs.
+MEMLOCK_CHECK = r'''[[ "$(systemctl --user show -p DefaultLimitMEMLOCK --value)" == infinity ]] && grep -q '^Max locked memory *unlimited' "/proc/$(pgrep -u "$(id -u)" -x systemd | head -1)/limits"'''
+
+
 def pair_limits(peer):
   """RDMA registers the ranks' buffers as locked memory. A rootless container can't raise its
   limit past its user's, and systemd's user manager takes that from PAM at login, so a limit
   `pair setup` just lifted applies after the next login. Checked at admission: a setup is
   prepared and kept even while it can't start yet."""
-  fix = "run omarchy agent local pair setup, then log out and in again (or reboot)"
-  if systemctl("show", "-p", "DefaultLimitMEMLOCK", "--value").stdout.strip() != "infinity":
-    raise LocalError(f"Locked memory is still limited here, which RDMA between the two machines needs unlimited: {fix}", short="Log in again for locked memory")
-  if pair_ssh(peer, "systemctl --user show -p DefaultLimitMEMLOCK --value", check=False).stdout.strip() != "infinity":
-    raise LocalError(f"Locked memory is still limited on the peer {peer}, which RDMA between the two machines needs unlimited: {fix} there", short="Peer needs locked memory unlimited")
+  fix = "run: omarchy agent local pair setup"
+  if subprocess.run(["bash", "-c", MEMLOCK_CHECK], capture_output=True).returncode != 0:
+    raise LocalError(f"Locked memory is limited for services here, which RDMA between the two machines needs unlimited; {fix}", short="Locked memory limited: run pair setup")
+  if pair_ssh(peer, MEMLOCK_CHECK, check=False).returncode != 0:
+    raise LocalError(f"Locked memory is limited for services on the peer {peer}, which RDMA between the two machines needs unlimited; {fix}", short="Locked memory limited on the peer: run pair setup")
 
 
 def http_status(url, key=None, timeout=10):
@@ -2075,10 +2080,23 @@ MEMLOCK_CONF = "/etc/security/limits.d/99-rdma-memlock.conf"
 HOST_SETUP = r'''
 set -euo pipefail
 user=$1
+# Logins (PAM) and the user's systemd manager, whose units the models run in; a running manager
+# gets it now: re-executed to read the default, then its own limit raised to match.
 if ! grep -qs '^\*[[:space:]]*hard[[:space:]]*memlock[[:space:]]*unlimited' /etc/security/limits.d/*.conf; then
   mkdir -p /etc/security/limits.d
   printf '# RDMA between paired DGX Sparks registers large buffers as locked memory.\n*   soft    memlock   unlimited\n*   hard    memlock   unlimited\n' > /etc/security/limits.d/99-rdma-memlock.conf
-  echo "  unlimited locked memory (takes effect at the next login)"
+  echo "  unlimited locked memory for logins"
+fi
+if [[ ! -f /etc/systemd/user.conf.d/99-rdma-memlock.conf ]]; then
+  mkdir -p /etc/systemd/user.conf.d
+  printf '# RDMA between paired DGX Sparks registers large buffers as locked memory.\n[Manager]\nDefaultLimitMEMLOCK=infinity\n' > /etc/systemd/user.conf.d/99-rdma-memlock.conf
+  echo "  unlimited locked memory for user services"
+fi
+manager=$(pgrep -u "$user" -x systemd | head -1 || true)
+if [[ -n "$manager" ]] && ! grep -q '^Max locked memory *unlimited' "/proc/$manager/limits"; then
+  systemctl --user -M "$user@" daemon-reexec
+  prlimit --pid "$manager" --memlock=unlimited:unlimited
+  echo "  applied to $user's running services"
 fi
 missing=()
 for tool in podman rsync python3; do command -v "$tool" >/dev/null || missing+=("$tool"); done
@@ -2231,10 +2249,7 @@ def cmd_pair_setup(argv):
   if not pair:
     raise LocalError("The peer wasn't found on the cable after setup: check that both ends of the link are up (omarchy agent local pair)")
   say(f"Paired with {pair['host']} at {pair['peer']}")
-  for label, unit_limit in (("here", systemctl("show", "-p", "DefaultLimitMEMLOCK", "--value").stdout.strip()),
-                            ("on the peer", pair_ssh(pair["peer"], "systemctl --user show -p DefaultLimitMEMLOCK --value", check=False).stdout.strip())):
-    if unit_limit != "infinity":
-      say(f"Log out and in again {label} (or reboot) for unlimited locked memory to apply, before starting a paired model.")
+  pair_limits(pair["peer"])
   return 0
 
 

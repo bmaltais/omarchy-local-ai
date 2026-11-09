@@ -129,8 +129,8 @@ The peer needs key-based SSH from this machine, rootless Podman that runs
 `nvidia.com/gpu=all`, unlimited locked memory for its user's systemd manager, and
 rsync. Nothing of the engine is installed there. `pair setup <peer>` makes all of
 that true, safe to run again: it creates and copies an SSH key (asking for the peer's
-password once), gives both machines unlimited locked memory (99-rdma-memlock.conf,
-effective at the next login), installs Podman and rsync where missing, keeps a CDI
+password once), gives both machines unlimited locked memory (for logins in limits.d, for the
+user's systemd manager in user.conf.d, applied to a running manager at once), installs Podman and rsync where missing, keeps a CDI
 0.6 copy of NVIDIA's spec for Podman before 5 (Ubuntu's DGX OS) through a drop-in on
 nvidia-cdi-refresh, lets the peer's user linger, and gives cable ports without an
 address one /24 per PCIe link (10.99.N.1 here, .2 there, MTU 9000) through
