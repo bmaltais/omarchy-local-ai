@@ -1,0 +1,54 @@
+recipe = "qwen3.8-27b-tensorfold"
+measured_at = "2026-11-03"
+catalog_version = "0.4.0"
+image = "ghcr.io/omacom/tensorfold@sha256:c88821d872e22f9dc6148173816b654e2c6dcd712fae50bc5e95915e3f817856"
+ctx = 262144
+load_seconds = 48.0
+fileset = "dab67b7a287bcf57"
+method = "tools/bench: 1 warmup, then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
+
+[machine]
+platform = "aarch64-gb10"
+gpu = "nvidia-gb10"
+ram_class = 128
+system = "NVIDIA NVIDIA_DGX_Spark"
+kernel = "7.3.0-9-omarchy"
+cpu = "Cortex-X925 + Cortex-A725"
+gpu_driver = "615.78.08"
+
+[memory]
+observed_at_load_gib = 69.6
+min_available_during_bench_gib = 31.8
+total_gib = 121.9
+
+[short]
+prompt_tokens = 41
+completion_tokens = 99
+ttft_s = 0.1
+prefill_tok_s = 408.2
+decode_tok_s = 57.7
+total_s = 1.8
+
+[long]
+prompt_tokens = 31705
+completion_tokens = 512
+ttft_s = 25.34
+prefill_tok_s = 1251.0
+decode_tok_s = 52.7
+total_s = 35.04
+
+[edit]
+prompt_tokens = 2306
+completion_tokens = 512
+ttft_s = 1.69
+prefill_tok_s = 1366.5
+decode_tok_s = 415.4
+total_s = 2.92
+
+[[artifacts]]
+repo = "TensorFold/Qwen3.8-27B-MLX-4bit"
+revision = "22d8d538154e0e5b6f8dcb1fcc74a60a0798104c"
+
+[[artifacts]]
+repo = "z-lab/Qwen3.8-27B-DFlash2"
+revision = "50307d4c4cde6860d4eee73e2547cd786fe8e8a4"

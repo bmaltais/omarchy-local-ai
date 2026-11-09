@@ -1,0 +1,49 @@
+name = "Qwen3.8 27B"
+summary = "27B dense model, 4-bit, with DFlash2 drafting. Three full-window agents at once, and long conversations resume where they left off."
+runtime = "tensorfold"
+vendor = "qwen"
+architecture = "dense"
+# Screenshots and photos through the checkpoint's Qwen-VL tower, which --vision loads.
+input = ["text", "image"]
+
+[[hardware]]
+gpu = "nvidia-gb10"
+ram_class = 128
+measured = "measurements/qwen3.8-27b-tensorfold-gb10-128.toml"
+
+# TensorFold's MLX affine 4-bit, group-64 export. The server loads the directory.
+[[artifacts]]
+repo = "TensorFold/Qwen3.8-27B-MLX-4bit"
+revision = "22d8d538154e0e5b6f8dcb1fcc74a60a0798104c"
+license = "apache-2.0"
+files = ["*.safetensors", "*.json", "chat_template.jinja", "vocab.json"]
+dest = "target"
+model = "."
+
+# z-lab's DFlash2 block drafter: a tree of draft tokens a round, checked by the target.
+[[artifacts]]
+repo = "z-lab/Qwen3.8-27B-DFlash2"
+revision = "50307d4c4cde6860d4eee73e2547cd786fe8e8a4"
+license = "apache-2.0"
+files = ["*.safetensors", "config.json"]
+dest = "drafter"
+draft = "."
+
+# Measured on a DGX Spark with a 194K-token conversation and its follow-up turn: 70 GiB at load (three
+# streams' bf16 attention caches, 16.9 GiB each at the full window, are reserved up front), about
+# 94 GiB at peak once the 24 GiB prompt cache in host memory has filled.
+[[variant]]
+ctx = 262144
+peak_ram_gib = 95
+peak_gpu_gib = 86
+
+[sampling]
+temperature = 1.0
+top_p = 0.95
+top_k = 20
+
+# Three streams and a 24 GiB prompt cache rather than four streams and 8 GiB: the cache keeps
+# conversations where their last turn ended (64 KiB a token), so a follow-up after 194K tokens starts
+# in 3.4 s instead of 241 s, for two or three long agent sessions at once.
+[server]
+args = ["--parallel", "3", "--prompt-cache-gib", "24", "--max-tokens", "32768", "--vision"]
