@@ -9,5 +9,7 @@ license_sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d
 checked = [
   "license: TensorFold is Apache-2.0 (its LICENSE at f350cd3e equals the 1.2.1 release's); MiaAI-Lab's recipe, whose patches and template the image carries, is Apache-2.0; xgrammar and dlpack (Apache-2.0), libjpeg-turbo and libwebp ship their texts in /opt/tensorfold/LICENSES; NVIDIA's CUDA runtime base is under NVIDIA's Deep Learning Container License",
   "build: the Containerfile is the recipe's docker/Dockerfile with its pins as defaults (TensorFold by full commit, Zig 0.17.0 by SHA-256, xgrammar by commit, the codecs by SHA-256, the 112 patches by content); built with Podman (Docker format) on a DGX Spark (GB10) for sm_121",
+  "acceptance: on two DGX Sparks (one Omarchy, one DGX OS) both ranks run rootless with read-only root and model mounts, all capabilities dropped and no-new-privileges, on the host network for the ConnectX-7 link (NCCL over NET/IB, 12 connections); rank 0's API listens on 127.0.0.1 only and rank 1 binds loopback too",
+  "acceptance: rejects /v1/models without the key (401) and serves it with the key (200), advertising the recipe ID; a chat completion and tools/bench ran through both ranks",
   "drafting: the runtime passes no --drafter; the checkpoint's own MTP head drafts. The recipe's default DFlash2 drafter (CC BY-NC-ND 4.0) is not downloaded or used",
 ]
