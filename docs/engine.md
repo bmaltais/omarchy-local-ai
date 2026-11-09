@@ -127,7 +127,14 @@ before the machine's own; single-node recipes keep running on the machine's own 
 
 The peer needs key-based SSH from this machine, rootless Podman that runs
 `nvidia.com/gpu=all`, unlimited locked memory for its user's systemd manager, and
-rsync. Nothing of the engine is installed there. `use` of a paired recipe:
+rsync. Nothing of the engine is installed there. `pair setup <peer>` makes all of
+that true, safe to run again: it creates and copies an SSH key (asking for the peer's
+password once), gives both machines unlimited locked memory (99-rdma-memlock.conf,
+effective at the next login), installs Podman and rsync where missing, keeps a CDI
+0.6 copy of NVIDIA's spec for Podman before 5 (Ubuntu's DGX OS) through a drop-in on
+nvidia-cdi-refresh, lets the peer's user linger, and gives cable ports without an
+address one /24 per PCIe link (10.99.N.1 here, .2 there, MTU 9000) through
+NetworkManager. `use` of a paired recipe:
 
 1. materializes the file set here, as for any recipe;
 2. runs the runtime's `prepare` command for rank 0 in a container without network,

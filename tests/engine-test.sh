@@ -364,6 +364,12 @@ with patch.object(a, "platform_name", return_value="aarch64-gb10"), patch.object
   check("a recorded pair adds the pair GPU without probing", [g["family"] for g in cached["gpus"]] == ["nvidia-gb10", "nvidia-gb10-pair"] and cached["gpus"][1]["peer"] == "10.99.0.2", json.dumps(cached))
   os.unlink(a.pair_path())
 
+for name, script in (("host", a.HOST_SETUP.replace("@CDI_COMPAT@", a.CDI_COMPAT)), ("link", a.LINK_SETUP)):
+  result = subprocess.run(["bash", "-n", "-c", script], capture_output=True, text=True)
+  check(f"pair setup's {name} script parses", result.returncode == 0, result.stderr)
+compile(a.CDI_COMPAT, "nvidia-cdi-podman-compat", "exec")
+check("the CDI compatibility script compiles", True)
+
 # The default root must work without an Omarchy checkout or a catalog override.
 check("installed catalog loads and validates from the engine directory", not a.load_catalog().errors() and a.load_catalog().root == os.environ["ENGINE_ROOT"])
 root = Path(os.environ["HOME"])

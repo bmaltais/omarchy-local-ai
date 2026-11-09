@@ -2045,7 +2045,180 @@ def cmd_pair_worker(argv):
   return 0
 
 
+# What `pair setup` makes true on each machine, as one root shell script per machine: every step
+# checks first, so it can run again at any time. RDMA needs unlimited locked memory (DGX OS ships
+# it in 99-nv-spark-limits.conf, Arch doesn't); the worker runs rootless Podman with the NVIDIA CDI
+# GPU and rsync; its user lingers, so rank 1 outlives the SSH session that started it.
+MEMLOCK_CONF = "/etc/security/limits.d/99-rdma-memlock.conf"
+HOST_SETUP = r'''
+set -euo pipefail
+user=$1
+if ! grep -qs '^\*[[:space:]]*hard[[:space:]]*memlock[[:space:]]*unlimited' /etc/security/limits.d/*.conf; then
+  mkdir -p /etc/security/limits.d
+  printf '# RDMA between paired DGX Sparks registers large buffers as locked memory.\n*   soft    memlock   unlimited\n*   hard    memlock   unlimited\n' > /etc/security/limits.d/99-rdma-memlock.conf
+  echo "  unlimited locked memory (takes effect at the next login)"
+fi
+missing=()
+for tool in podman rsync python3; do command -v "$tool" >/dev/null || missing+=("$tool"); done
+if (( ${#missing[@]} )); then
+  echo "  installing ${missing[*]}"
+  if command -v pacman >/dev/null; then pacman -S --needed --noconfirm "${missing[@]}" >/dev/null
+  elif command -v apt-get >/dev/null; then DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" >/dev/null
+  else echo "  no pacman or apt-get: install ${missing[*]} yourself" >&2; exit 1; fi
+fi
+# Podman before 5 can't read the CDI 0.7 spec nvidia-ctk 1.18+ writes (Ubuntu 24.04 ships 4.9): keep a 0.6 copy in
+# /etc/cdi, rewritten after every nvidia-cdi-refresh.
+major=$(podman version --format '{{.Client.Version}}' 2>/dev/null | cut -d. -f1)
+if [[ -n "$major" ]] && (( major < 5 )) && grep -qs additionalGids /var/run/cdi/nvidia.yaml; then
+  cat > /usr/local/sbin/nvidia-cdi-podman-compat <<'PYEOF'
+@CDI_COMPAT@
+PYEOF
+  chmod 755 /usr/local/sbin/nvidia-cdi-podman-compat
+  mkdir -p /etc/systemd/system/nvidia-cdi-refresh.service.d
+  printf '[Service]\nExecStartPost=/usr/local/sbin/nvidia-cdi-podman-compat\n' > /etc/systemd/system/nvidia-cdi-refresh.service.d/podman-compat.conf
+  systemctl daemon-reload
+  /usr/local/sbin/nvidia-cdi-podman-compat
+  echo "  NVIDIA CDI spec for Podman $major"
+fi
+if [[ "$(loginctl show-user "$user" -p Linger --value 2>/dev/null)" != yes ]]; then
+  loginctl enable-linger "$user"
+  echo "  lingering user $user"
+fi
+'''
+CDI_COMPAT = r'''#!/usr/bin/python3 -I
+# Written by omarchy-local-ai pair setup. Podman before 5 predates CDI spec 0.7.0 and rejects the additionalGids
+# field nvidia-ctk 1.18+ writes. This writes /etc/cdi/nvidia.yaml as the same spec without it, at 0.6.0, after every
+# nvidia-cdi-refresh (a drop-in runs it), so rootless Podman keeps the GPU across driver updates.
+import os, re
+src = open("/var/run/cdi/nvidia.yaml").read()
+out, skip, indent = [], False, 0
+for line in src.splitlines():
+    if skip:
+        if line.lstrip().startswith("- ") and len(line) - len(line.lstrip()) >= indent:
+            continue
+        skip = False
+    match = re.match(r"^(\s*)additionalGids:\s*$", line)
+    if match:
+        skip, indent = True, len(match.group(1))
+        continue
+    out.append(line)
+text = re.sub(r"^cdiVersion: 0\.7\.0$", "cdiVersion: 0.6.0", "\n".join(out) + "\n", count=1, flags=re.M)
+os.makedirs("/etc/cdi", exist_ok=True)
+tmp = "/etc/cdi/.nvidia.yaml.tmp"
+with open(tmp, "w") as handle:
+    handle.write(text)
+os.chmod(tmp, 0o644)
+os.replace(tmp, "/etc/cdi/nvidia.yaml")'''
+
+# The cable's addresses when it has none: one /24 per PCIe link of the cabled port (a Spark's
+# QSFP port is two netdevs, each a rail), .1 on the machine running setup, .2 on the peer.
+LINK_SETUP = r'''
+set -euo pipefail
+host=$1; shift
+for spec in "$@"; do
+  dev=${spec%%=*}; net=${spec#*=}
+  name="omarchy-pair-$dev"
+  if nmcli -t -f NAME connection show | grep -qx "$name"; then continue; fi
+  for old in $(nmcli -t -f NAME,DEVICE connection show --active | awk -F: -v d="$dev" '$2 == d {print $1}'); do
+    nmcli connection modify "$old" connection.autoconnect no
+  done
+  nmcli connection add type ethernet ifname "$dev" con-name "$name" ipv4.method manual ipv4.addresses "$net.$host/24" \
+    ipv6.method link-local 802-3-ethernet.mtu 9000 connection.autoconnect yes >/dev/null
+  nmcli connection up "$name" >/dev/null
+  echo "  $dev: $net.$host/24, MTU 9000"
+done
+'''
+
+
+def cabled_ports():
+  """This machine's RDMA-capable netdevs with a carrier, in name order."""
+  ports = []
+  for dev in sorted(os.listdir("/sys/class/net")):
+    if os.path.isdir(f"/sys/class/net/{dev}/device/infiniband") and _read(f"/sys/class/net/{dev}/carrier") == "1":
+      ports.append(dev)
+  return ports
+
+
+def has_ipv4(dev):
+  out = subprocess.run(["ip", "-j", "-4", "addr", "show", "dev", dev], capture_output=True, text=True).stdout
+  return any(link.get("addr_info") for link in json.loads(out or "[]"))
+
+
+def root_script(script, *args, peer=None):
+  """Runs a setup script as root here or on the peer; sudo asks for a password on this terminal when it needs one."""
+  argv = ["sudo", "bash", "-c", script, "omarchy-local-pair", *args]
+  if peer:
+    argv = ["ssh", "-t", "-o", "StrictHostKeyChecking=accept-new", peer, shlex.join(argv)]
+  if subprocess.run(argv).returncode != 0:
+    raise LocalError(f"Setting up {'the peer ' + peer if peer else 'this machine'} failed (see above)")
+
+
+def cmd_pair_setup(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local pair setup",
+                                   description="Prepare this Spark and the one cabled to it to run models across both. Safe to run again.")
+  parser.add_argument("peer", nargs="?", help="the other Spark as SSH reaches it now, e.g. user@spark-1234.local (default: the detected pair)")
+  args = parser.parse_args(argv)
+  profile = machine_profile()
+  if NVIDIA_UNIFIED_FAMILIES.get(profile["platform"]) not in PAIR_FAMILIES:
+    raise LocalError("Pairs are supported between DGX Sparks (GB10) only")
+  peer = args.peer or (cached_pair(profile) or {}).get("peer") or pair_override()
+  if not peer or not re.match(r"^([A-Za-z0-9._-]+@)?[A-Za-z0-9._:%-]+$", peer):
+    raise LocalError("Name the other Spark as SSH reaches it, e.g.: omarchy agent local pair setup spark-1234.local")
+  ports = cabled_ports()
+  if not ports:
+    raise LocalError("No ConnectX-7 port has a link: connect the two Sparks' QSFP ports with a direct cable")
+
+  say("SSH key to the peer")
+  key = os.path.join(home(), ".ssh", "id_ed25519")
+  if not os.path.exists(key):
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"{os.environ.get('USER', 'user')}@{os.uname().nodename}", "-f", key], check=True)
+  if subprocess.run(PAIR_SSH + [peer, "true"], capture_output=True).returncode != 0:
+    say(f"  copying {key}.pub to {peer} (asks for its password once)")
+    if subprocess.run(["ssh-copy-id", "-i", key + ".pub", "-o", "StrictHostKeyChecking=accept-new", peer]).returncode != 0:
+      raise LocalError(f"Can't log in to {peer} with a key: check the name and password")
+  node = pair_python(peer, "node()")
+  if "GB10" not in node.get("gpu", ""):
+    raise LocalError(f"{peer} doesn't report a GB10 GPU ({node.get('gpu') or 'nvidia-smi found none'})")
+
+  say("This machine")
+  root_script(HOST_SETUP.replace("@CDI_COMPAT@", CDI_COMPAT), os.environ.get("USER") or os.path.basename(home()))
+  say(f"The peer, {node['host']}")
+  root_script(HOST_SETUP.replace("@CDI_COMPAT@", CDI_COMPAT), pair_ssh(peer, "id -un").stdout.strip(), peer=peer)
+
+  say("Addresses on the cable")
+  bare = [dev for dev in ports if not has_ipv4(dev)]
+  if bare:
+    if not shutil.which("nmcli"):
+      raise LocalError(f"{', '.join(bare)} have no IPv4 address and NetworkManager isn't here to give them one")
+    there = pair_ssh(peer, "for d in /sys/class/net/*; do [ -d $d/device/infiniband ] && [ \"$(cat $d/carrier 2>/dev/null)\" = 1 ] && basename $d; done; true").stdout.split()
+    taken = {line.split()[3].split("/")[0].rsplit(".", 1)[0] for line in subprocess.run(["ip", "-o", "-4", "addr"], capture_output=True, text=True).stdout.splitlines() if len(line.split()) > 3}
+    specs, subnet = [], 0
+    for dev in bare:
+      if dev not in there:
+        raise LocalError(f"The peer has no linked port named {dev}: are the Sparks cabled port to port?")
+      while f"10.99.{subnet}" in taken:
+        subnet += 1
+      specs.append(f"{dev}=10.99.{subnet}")
+      subnet += 1
+    root_script(LINK_SETUP, "1", *specs)
+    root_script(LINK_SETUP, "2", *specs, peer=peer)
+  else:
+    say(f"  {', '.join(ports)} already addressed")
+
+  pair = detect_pair(machine_profile())
+  if not pair:
+    raise LocalError("The peer wasn't found on the cable after setup: check that both ends of the link are up (omarchy agent local pair)")
+  say(f"Paired with {pair['host']} at {pair['peer']}")
+  for label, unit_limit in (("here", systemctl("show", "-p", "DefaultLimitMEMLOCK", "--value").stdout.strip()),
+                            ("on the peer", pair_ssh(pair["peer"], "systemctl --user show -p DefaultLimitMEMLOCK --value", check=False).stdout.strip())):
+    if unit_limit != "infinity":
+      say(f"Log out and in again {label} (or reboot) for unlimited locked memory to apply, before starting a paired model.")
+  return 0
+
+
 def cmd_pair(argv):
+  if argv[:1] == ["setup"]:
+    return cmd_pair_setup(argv[1:])
   parser = argparse.ArgumentParser(prog="omarchy agent local pair")
   parser.add_argument("--json", action="store_true")
   args = parser.parse_args(argv)
@@ -3145,6 +3318,7 @@ SUMMARIES = {
   "start": "Start a model that's set up, the last one started by default",
   "stop": "Stop a model, or every running one",
   "remove": "Remove a model's weights, manifests and unused image",
+  "pair": "Show the Spark cabled to this one; 'pair setup <peer>' prepares both",
 }
 
 
