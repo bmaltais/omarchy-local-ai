@@ -611,6 +611,9 @@ def validate_pair_runtime(where, runtime, run):
   port = pair.get("master_port")
   if not isinstance(port, int) or not 1024 <= port <= 65535:
     errors.append(f"{where}.pair.master_port: must be 1024-65535")
+  model = pair.get("model")
+  if model is not None and not (isinstance(model, str) and model.startswith("/prepared/") and _safe_relpath(model[len("/prepared/"):], f"{where}.pair.model", [])):
+    errors.append(f"{where}.pair.model: must be a path under /prepared")
   for name in ("prepare", "worker"):
     command = pair.get(name)
     if not isinstance(command, list) or not command:
@@ -1407,7 +1410,9 @@ def server_invocation(runtime, recipe, variant, roles, rid):
   """Returns (entrypoint, argv, env) with the key as KEY_PLACEHOLDER when it's an argument."""
   inputs = runtime["inputs"]
   values = {
-    "model": f"/models/{roles['model']}",
+    # A paired runtime may serve a folder its prepare step made (the checkpoint linked, beside
+    # files the release lacks) instead of the file set itself.
+    "model": runtime.get("pair", {}).get("model") or f"/models/{roles['model']}",
     "draft": f"/models/{roles['draft']}" if roles.get("draft") else None,
     "ctx": str(variant["ctx"]),
     "alias": rid,
@@ -1742,19 +1747,22 @@ def preflight(runtime, gpu):
     if device.startswith("/dev/") and not os.access(device, os.R_OK | os.W_OK):
       raise LocalError(f"{device} isn't accessible to {user}; add the user to its group (ls -l {device}) and log in again")
   if runtime.get("pair"):
-    # RDMA registers the ranks' buffers as locked memory. A rootless container can't raise its
-    # limit past the user's own, and systemd's user manager takes that from PAM at login.
-    fix = "echo '* soft memlock unlimited\n* hard memlock unlimited' | sudo tee /etc/security/limits.d/99-rdma-memlock.conf, then log out and in"
-    if systemctl("show", "-p", "DefaultLimitMEMLOCK", "--value").stdout.strip() != "infinity":
-      raise LocalError(f"Locked memory is limited for {user} here, which RDMA between the ranks needs unlimited: {fix}", short="Locked memory limited")
-    pair = gpu.get("peer")
-    if pair and pair_ssh(pair, "systemctl --user show -p DefaultLimitMEMLOCK --value", check=False).stdout.strip() != "infinity":
-      raise LocalError(f"Locked memory is limited for the user on the peer {pair}, which RDMA between the ranks needs unlimited. There: {fix}", short="Locked memory limited on the peer")
-    for path in ("/dev/infiniband",):
-      if not os.path.isdir(path):
-        raise LocalError(f"{path} is missing: the RDMA devices of the ConnectX-7 ports are needed (rdma-core)")
+    if not os.path.isdir("/dev/infiniband"):
+      raise LocalError("/dev/infiniband is missing: the RDMA devices of the ConnectX-7 ports are needed (rdma-core)")
     if not shutil.which("rsync"):
-      raise LocalError("rsync is needed to copy the model files to the paired machine")
+      raise LocalError("rsync is needed to copy the model files to the paired machine: omarchy agent local pair setup")
+
+
+def pair_limits(peer):
+  """RDMA registers the ranks' buffers as locked memory. A rootless container can't raise its
+  limit past its user's, and systemd's user manager takes that from PAM at login, so a limit
+  `pair setup` just lifted applies after the next login. Checked at admission: a setup is
+  prepared and kept even while it can't start yet."""
+  fix = "run omarchy agent local pair setup, then log out and in again (or reboot)"
+  if systemctl("show", "-p", "DefaultLimitMEMLOCK", "--value").stdout.strip() != "infinity":
+    raise LocalError(f"Locked memory is still limited here, which RDMA between the two machines needs unlimited: {fix}", short="Log in again for locked memory")
+  if pair_ssh(peer, "systemctl --user show -p DefaultLimitMEMLOCK --value", check=False).stdout.strip() != "infinity":
+    raise LocalError(f"Locked memory is still limited on the peer {peer}, which RDMA between the two machines needs unlimited: {fix} there", short="Peer needs locked memory unlimited")
 
 
 def http_status(url, key=None, timeout=10):
@@ -1840,6 +1848,7 @@ def evict_idle_weights(keep=()):
 
 def check_headroom(variant, gpu):
   if gpu.get("nodes") == 2:
+    pair_limits(gpu["peer"])
     peer_headroom(gpu["peer"], variant)
   for _ in range(15):
     available, gpu_free = free_memory(gpu)
@@ -1970,6 +1979,7 @@ def pair_worker_start(rid):
     raise LocalError(f"{rid} isn't a paired setup")
   pair = {"peer": setup["peer"], "host": setup["host"], "home": setup["home"]}
   here, there = pair_link(pair)
+  pair_limits(pair["peer"])
   peer_headroom(pair["peer"], variant)
   spec = runtime["pair"]
   def values(rank, side):

@@ -4,11 +4,11 @@
 # tf-dsv41-lanes on the paired machine. They rendezvous over the ConnectX-7 cable (TCP on master_port) and exchange a
 # decode round's activations over RoCE on both rails. Settings are MiaAI-Lab's start.sh defaults, which its
 # measurements were taken with.
-image = "ghcr.io/omacom/tensorfold-dsv41@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+image = "ghcr.io/omacom/tensorfold-dsv41@sha256:58d7e9c5524df6d2f72515c6661c31074d7dadd5cbcd2491e608f2d7aa08ae84"
 tier = "third-party"
-review = "reviews/tensorfold-dsv41-000000000000.toml"
+review = "reviews/tensorfold-dsv41-58d7e9c5524d.toml"
 port = 8888
-command = ["tensorfold-native", "serve", "--backend", "cuda", "--no-update-check", "--chat-template", "/opt/omarchy/chat_template.jinja"]
+command = ["tensorfold-native", "serve", "--backend", "cuda", "--no-update-check"]
 listen = { host = "--host", port = "--port" }
 health = { probe = ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:@PORT@/health"] }
 run = { devices = ["cdi-nvidia", "infiniband"], memlock = "unlimited", network = "fabric", shm_size_gib = 16 }
@@ -29,6 +29,9 @@ master_port = 29620
 # Each rank's inputs, from the checkpoint alone: the kit with this checkpoint's RoPE tables, Engram's token map and
 # the rank's weight file (/opt/omarchy/prepare in the image).
 prepare = ["/opt/omarchy/prepare", "@RANK@", "@WORLD@"]
+# Rank 0 serves the checkpoint linked beside MiaAI-Lab's chat template (the release ships its chat format as Python),
+# a folder prepare makes.
+model = "/prepared/model"
 # Rank 1. Its pool is rank 0's context; its streams are the recipe's --parallel.
 worker = ["tf-dsv41-lanes", "/models/model", "/prepared/rank-cache", "@RANK@", "@WORLD@", "@MASTER_ADDR@", "@MASTER_PORT@", "/prepared/kit",
           "--engram", "/models/engram", "--token-map", "/prepared/dsv41_token_map.json", "--pool", "@CTX@", "--streams", "4",
