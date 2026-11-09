@@ -13,6 +13,7 @@ import fcntl
 import fnmatch
 import hashlib
 import ipaddress
+import itertools
 import json
 import os
 import pty
@@ -364,11 +365,23 @@ def pair_python(peer, expression, timeout=20):
   return json.loads(result.stdout)
 
 
+PEER_RE = re.compile(r"^([A-Za-z0-9._-]+@)?[A-Za-z0-9._:%-]+$")
+
+
 def pair_override():
-  """An explicit peer, for when the cable's other end isn't found: one host or address in
-  ~/.config/omarchy/agent-local/link."""
+  """An explicit peer, for when the cable's other end isn't found: one [user@]host or address
+  in ~/.config/omarchy/agent-local/link."""
   value = _read(os.path.join(config_dir(), "link")).split()
-  return value[0] if value and re.match(r"^[A-Za-z0-9._:-]+$", value[0]) else None
+  return value[0] if value and PEER_RE.match(value[0]) else None
+
+
+def peer_user(peer):
+  return peer.split("@", 1)[0] if peer and "@" in peer else None
+
+
+def peer_address(peer):
+  """The address part of an SSH target, user@address or address."""
+  return peer.rsplit("@", 1)[-1]
 
 
 def fabric_candidates():
@@ -392,7 +405,7 @@ def fabric_candidates():
       for entry in json.loads(neighbors or "[]"):
         if entry.get("dst") and entry.get("state") != ["FAILED"]:
           candidates.append(entry["dst"])
-      hosts = [str(host) for host in (mine.network.hosts() if mine.network.prefixlen >= 30 else list(mine.network.hosts())[:2])]
+      hosts = [str(host) for host in itertools.islice(mine.network.hosts(), 2)]
       candidates += [host for host in hosts if host != str(mine.ip)]
   return list(dict.fromkeys(candidates))
 
@@ -412,22 +425,25 @@ def cached_pair(profile):
   return pair if isinstance(pair, dict) and pair.get("peer") else None
 
 
-def detect_pair(profile):
+def detect_pair(profile, user=None):
   """Finds a machine of this one's GPU family on a direct ConnectX-7 link, records it in
-  pair.json, and returns it, or None (and forgets the old one) when there is none."""
+  pair.json, and returns it, or None (and forgets the old one) when there is none. The peer is
+  reached as `user` when given, else as the user it was last reached as."""
   family = NVIDIA_UNIFIED_FAMILIES.get(profile["platform"])
   if family not in PAIR_FAMILIES:
     return None
   override = pair_override()
+  user = user or peer_user(override) or peer_user((cached_pair(profile) or {}).get("peer"))
+  candidates = [peer_address(override)] if override else fabric_candidates()
   found = None
-  for peer in ([override] if override else fabric_candidates()):
+  for peer in (f"{user}@{address}" if user else address for address in candidates):
     try:
       node = pair_python(peer, "node()", timeout=8)
     except (LocalError, ValueError):
       continue
     if "GB10" not in node.get("gpu", "") or ram_class(gib(node["ram_total"])) != profile["ram_class"]:
       continue
-    side = _fabric(peer)
+    side = _fabric(peer_address(peer))
     if not side or not side.get("hca"):
       continue
     found = {"peer": peer, "host": node["host"], "home": node["home"], "ram_gib": round(gib(node["ram_total"]), 2)}
@@ -442,7 +458,7 @@ def detect_pair(profile):
 def pair_link(pair):
   """Both sides of the cable as the ranks use them now: rank 0 here, rank 1 on the peer.
   Rails are used only when both sides have as many."""
-  here = _fabric(pair["peer"])
+  here = _fabric(peer_address(pair["peer"]))
   if not here or not here.get("hca") or here.get("gid") is None:
     raise LocalError(f"No RoCE v2 address on this machine's link to {pair['peer']}: is it the ConnectX-7 cable, with an IPv4 address on each end?", short="Pair link has no RoCE address")
   there = pair_python(pair["peer"], f"fabric_side({here['addr']!r})")
@@ -1346,9 +1362,18 @@ def prune_filesets(rid, keep):
   if not os.path.isdir(base) or not FILESET_RE.match(keep or ""):
     return
   for name in os.listdir(base):
-    # A paired recipe's per-rank inputs (<fileset>.rank<N>) go with their file set.
+    # A paired recipe's rank folders (<fileset>.rank<N>) go with their file set.
     if name != keep and not name.startswith(keep + "."):
       shutil.rmtree(os.path.join(base, name), ignore_errors=True)
+  # The peer's copies too, once the setup that replaced them is the current one.
+  setup = (load_model(rid) or {}).get("pair")
+  if setup:
+    peer_base = os.path.dirname(peer_fileset_dir(setup, rid, keep))
+    q = shlex.quote
+    try:
+      pair_ssh(setup["peer"], f"cd {q(peer_base)} && for d in *; do case $d in {q(keep)}|{q(keep)}.*) ;; *) rm -rf -- \"$d\" ;; esac; done", check=False)
+    except LocalError:
+      pass
 
 
 def materialize(rid, files, roles, seed_dir=None, progress=None):
@@ -1974,9 +1999,6 @@ def pair_setup(rid, manifest, runtime, pair):
           "-e", shlex.join(pair_ssh_argv() + ["-o", "Compression=no", "-c", "aes128-gcm@openssh.com"]),
           f"{models}/", f"{peer}:{target}/"], f"Copying the model files to {pair['host']}")
   pair_ssh(peer, f"mkdir -p {q(rank_dir(rid, fileset, 1, pair['home']))}")
-  # Older file sets of this recipe on the peer go once this one is in place.
-  base = os.path.dirname(target)
-  pair_ssh(peer, f"cd {q(base)} && for d in *; do case $d in {q(fileset)}|{q(fileset)}.*) ;; *) rm -rf -- \"$d\" ;; esac; done", check=False)
 
 
 def _placeholders(text, values):
@@ -2216,7 +2238,7 @@ def cmd_link_setup(argv):
   if NVIDIA_UNIFIED_FAMILIES.get(profile["platform"]) not in PAIR_FAMILIES:
     raise LocalError("Pairs are supported between DGX Sparks (GB10) only")
   peer = args.peer or (cached_pair(profile) or {}).get("peer") or pair_override()
-  if not peer or not re.match(r"^([A-Za-z0-9._-]+@)?[A-Za-z0-9._:%-]+$", peer):
+  if not peer or not PEER_RE.match(peer):
     raise LocalError("Name the other Spark as SSH reaches it, e.g.: omarchy agent local link setup spark-1234.local")
   ports = cabled_ports()
   if not ports:
@@ -2263,7 +2285,7 @@ def cmd_link_setup(argv):
   root_script(FIREWALL_SETUP, *ports)
   root_script(FIREWALL_SETUP, *pair_ssh(peer, PORTS_LISTING).stdout.split(), peer=peer)
 
-  pair = detect_pair(machine_profile())
+  pair = detect_pair(machine_profile(), user=peer_user(peer))
   if not pair:
     raise LocalError("The peer wasn't found on the cable after setup: check that both ends of the link are up (omarchy agent local link)")
   say(f"Linked to {pair['host']} at {pair['peer']}")

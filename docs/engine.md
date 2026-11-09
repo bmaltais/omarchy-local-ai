@@ -120,7 +120,7 @@ A DGX Spark cabled to another through their ConnectX-7 ports is a pair: `profile
 `list`, `refresh`, `use` and `link` look for a GB10 machine of the same RAM class at
 the other end of each RDMA-capable link with an IPv4 address (its neighbors, the
 other host of a two-host subnet, or .1/.2 of a larger one; `~/.config/omarchy/agent-local/link`
-names one instead), over key-based SSH, and record it in `pair.json`. Other commands
+names one, as `[user@]host`), over key-based SSH as the user `link setup` was given, and record it in `pair.json`. Other commands
 read that record without probing. A pair adds the GPU family `nvidia-gb10-pair`
 (`nodes = 2`, the smaller machine's memory per node), whose `best.toml` class is tried
 before the machine's own; single-node recipes keep running on the machine's own GPU.

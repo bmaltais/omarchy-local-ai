@@ -368,6 +368,15 @@ with patch.object(a, "platform_name", return_value="aarch64-gb10"), patch.object
   cached = a.machine_profile()
   check("a recorded pair adds the pair GPU without probing", [g["family"] for g in cached["gpus"]] == ["nvidia-gb10", "nvidia-gb10-pair"] and cached["gpus"][1]["peer"] == "10.99.0.2", json.dumps(cached))
   os.unlink(a.pair_path())
+  # A peer reached as another user stays reached as that user, and its route is the address alone.
+  routed = []
+  with patch.object(a, "fabric_candidates", return_value=["10.99.1.2"]), \
+       patch.object(a, "pair_python", return_value={"gpu": "NVIDIA GB10", "ram_total": 128 * 2**30, "home": "/home/bob", "host": "spark2"}), \
+       patch.object(a, "_fabric", side_effect=lambda address: routed.append(address) or {"hca": "rocep1s0f0"}):
+    first = a.detect_pair(a.machine_profile(), user="bob")
+    again = a.detect_pair(a.machine_profile())
+  check("a peer keeps the SSH user it was set up with", first["peer"] == again["peer"] == "bob@10.99.1.2" and routed == ["10.99.1.2", "10.99.1.2"], repr((first, again, routed)))
+  os.unlink(a.pair_path())
 
 for name, script in (("host", a.HOST_SETUP.replace("@CDI_COMPAT@", a.CDI_COMPAT)), ("link", a.LINK_SETUP), ("firewall", a.FIREWALL_SETUP)):
   result = subprocess.run(["bash", "-n", "-c", script], capture_output=True, text=True)
