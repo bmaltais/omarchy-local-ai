@@ -344,7 +344,7 @@ pair_port = a.port_for("paired")
 check("the pair unit shares the host network and publishes nothing", "Network=host" in pair_text and "PublishPort" not in pair_text)
 check("the pair unit binds its API to loopback on the model's port", f'"--host" "127.0.0.1" "--port" "{pair_port}"' in pair_text and f"127.0.0.1:{pair_port}/health" in pair_text)
 check("the pair unit mounts rank 0's inputs and reads the link from its environment file", f"models/paired/{'b' * 16}.rank0:/prepared:ro" in pair_text and "EnvironmentFile=%h/.local/state/omarchy/agent-local/pair/paired.env" in pair_text)
-check("the pair unit starts and stops rank 1 with itself", "ExecStartPre=/usr/bin/env omarchy-agent-local pair-worker start paired" in pair_text and "ExecStopPost=-/usr/bin/env omarchy-agent-local pair-worker stop paired" in pair_text)
+check("the pair unit starts and stops rank 1 with itself", "ExecStartPre=/usr/bin/env omarchy-agent-local link-worker start paired" in pair_text and "ExecStopPost=-/usr/bin/env omarchy-agent-local link-worker stop paired" in pair_text)
 check("a paired runtime may serve its prepared folder", '"--model" "/prepared/model"' in a.render_container("paired", paired, dict(pair_rt, pair=dict(pair_rt["pair"], model="/prepared/model")), paired["variant"][0], {"model": "model"}, pair_gpu, "b" * 16))
 same_rt = copy.deepcopy(pair_rt)
 for key in ("worker", "prepare"):
@@ -379,7 +379,7 @@ with patch.object(a, "platform_name", return_value="aarch64-gb10"), patch.object
 
 for name, script in (("host", a.HOST_SETUP.replace("@CDI_COMPAT@", a.CDI_COMPAT)), ("link", a.LINK_SETUP), ("firewall", a.FIREWALL_SETUP)):
   result = subprocess.run(["bash", "-n", "-c", script], capture_output=True, text=True)
-  check(f"pair setup's {name} script parses", result.returncode == 0, result.stderr)
+  check(f"link setup's {name} script parses", result.returncode == 0, result.stderr)
 compile(a.CDI_COMPAT, "nvidia-cdi-podman-compat", "exec")
 check("the CDI compatibility script compiles", True)
 

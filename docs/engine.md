@@ -117,9 +117,9 @@ line per update.
 ## Paired machines
 
 A DGX Spark cabled to another through their ConnectX-7 ports is a pair: `profile`,
-`list`, `refresh`, `use` and `pair` look for a GB10 machine of the same RAM class at
+`list`, `refresh`, `use` and `link` look for a GB10 machine of the same RAM class at
 the other end of each RDMA-capable link with an IPv4 address (its neighbors, the
-other host of a two-host subnet, or .1/.2 of a larger one; `~/.config/omarchy/agent-local/pair`
+other host of a two-host subnet, or .1/.2 of a larger one; `~/.config/omarchy/agent-local/link`
 names one instead), over key-based SSH, and record it in `pair.json`. Other commands
 read that record without probing. A pair adds the GPU family `nvidia-gb10-pair`
 (`nodes = 2`, the smaller machine's memory per node), whose `best.toml` class is tried
@@ -127,7 +127,7 @@ before the machine's own; single-node recipes keep running on the machine's own 
 
 The peer needs key-based SSH from this machine, rootless Podman that runs
 `nvidia.com/gpu=all`, unlimited locked memory for its user's systemd manager, and
-rsync. Nothing of the engine is installed there. `pair setup <peer>` makes all of
+rsync. Nothing of the engine is installed there. `link setup <peer>` makes all of
 that true, safe to run again: it creates and copies an SSH key (asking for the peer's
 password once), gives both machines unlimited locked memory (for logins in limits.d, for the
 user's systemd manager in user.conf.d, applied to a running manager at once), installs Podman and rsync where missing, keeps a CDI
@@ -144,7 +144,7 @@ ports (the ranks' rendezvous and NCCL sockets), ahead of Omarchy's SSH rate limi
    has it, and the file set with rsync over the cable;
 4. runs `prepare` for rank 1 there into `<fileset>.rank1`, and drops older file sets.
 
-The head unit runs rank 0. Its `ExecStartPre` (`pair-worker start`) reads the link as
+The head unit runs rank 0. Its `ExecStartPre` (`link-worker start`) reads the link as
 it is now (each side's netdev, address, RoCE devices and the RoCE v2 GID index of its
 IPv4 address), checks the peer's free memory, writes the unit's environment file and
 starts rank 1 on the peer as `omarchy-agent-local-model-<recipe>-rank1`; its

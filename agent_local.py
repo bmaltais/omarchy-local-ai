@@ -288,7 +288,7 @@ def pair_key():
 
 
 def pair_ssh_argv(tty=False):
-  """SSH to the peer with the key `pair setup` installed there, and only that key: an agent
+  """SSH to the peer with the key `link setup` installed there, and only that key: an agent
   offering several (1Password's does) would spend the server's MaxAuthTries before it."""
   argv = ["ssh", "-t" if tty else "-T", "-o", "ConnectTimeout=4", "-o", "StrictHostKeyChecking=accept-new", "-o", "ServerAliveInterval=15"]
   if not tty:
@@ -382,8 +382,8 @@ def pair_python(peer, expression, timeout=20):
 
 def pair_override():
   """An explicit peer, for when the cable's other end isn't found: one host or address in
-  ~/.config/omarchy/agent-local/pair."""
-  value = _read(os.path.join(config_dir(), "pair")).split()
+  ~/.config/omarchy/agent-local/link."""
+  value = _read(os.path.join(config_dir(), "link")).split()
   return value[0] if value and re.match(r"^[A-Za-z0-9._:-]+$", value[0]) else None
 
 
@@ -1601,8 +1601,8 @@ def render_container(rid, recipe, runtime, variant, roles, gpu, fileset):
     # Rank 1 starts on the peer first and stops with this unit, however it ends; the start also
     # writes this unit's environment file, the link as it is now.
     lines += [
-      f"ExecStartPre=/usr/bin/env omarchy-agent-local pair-worker start {rid}",
-      f"ExecStopPost=-/usr/bin/env omarchy-agent-local pair-worker stop {rid}",
+      f"ExecStartPre=/usr/bin/env omarchy-agent-local link-worker start {rid}",
+      f"ExecStopPost=-/usr/bin/env omarchy-agent-local link-worker stop {rid}",
     ]
   lines += [
     # The agents panel watches status.json; every start, stop and crash rewrites it.
@@ -1785,7 +1785,7 @@ def preflight(runtime, gpu):
     if not os.path.isdir("/dev/infiniband"):
       raise LocalError("/dev/infiniband is missing: the RDMA devices of the ConnectX-7 ports are needed (rdma-core)")
     if not shutil.which("rsync"):
-      raise LocalError("rsync is needed to copy the model files to the paired machine: omarchy agent local pair setup")
+      raise LocalError("rsync is needed to copy the model files to the paired machine: omarchy agent local link setup")
 
 
 # Whether this user's services may lock unlimited memory: the manager's default for its units and
@@ -1796,13 +1796,13 @@ MEMLOCK_CHECK = r'''[[ "$(systemctl --user show -p DefaultLimitMEMLOCK --value)"
 def pair_limits(peer):
   """RDMA registers the ranks' buffers as locked memory. A rootless container can't raise its
   limit past its user's, and systemd's user manager takes that from PAM at login, so a limit
-  `pair setup` just lifted applies after the next login. Checked at admission: a setup is
+  `link setup` just lifted applies after the next login. Checked at admission: a setup is
   prepared and kept even while it can't start yet."""
-  fix = "run: omarchy agent local pair setup"
+  fix = "run: omarchy agent local link setup"
   if subprocess.run(["bash", "-c", MEMLOCK_CHECK], capture_output=True).returncode != 0:
-    raise LocalError(f"Locked memory is limited for services here, which RDMA between the two machines needs unlimited; {fix}", short="Locked memory limited: run pair setup")
+    raise LocalError(f"Locked memory is limited for services here, which RDMA between the two machines needs unlimited; {fix}", short="Locked memory limited: run link setup")
   if pair_ssh(peer, MEMLOCK_CHECK, check=False).returncode != 0:
-    raise LocalError(f"Locked memory is limited for services on the peer {peer}, which RDMA between the two machines needs unlimited; {fix}", short="Locked memory limited on the peer: run pair setup")
+    raise LocalError(f"Locked memory is limited for services on the peer {peer}, which RDMA between the two machines needs unlimited; {fix}", short="Locked memory limited on the peer: run link setup")
 
 
 def http_status(url, key=None, timeout=10):
@@ -2129,8 +2129,8 @@ def pair_remove(manifest):
       os.unlink(path)
 
 
-def cmd_pair_worker(argv):
-  parser = argparse.ArgumentParser(prog="omarchy agent local pair-worker")
+def cmd_link_worker(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local link-worker")
   parser.add_argument("action", choices=("start", "stop"))
   parser.add_argument("recipe")
   args = parser.parse_args(argv)
@@ -2147,7 +2147,7 @@ def cmd_pair_worker(argv):
   return 0
 
 
-# What `pair setup` makes true on each machine, as one root shell script per machine: every step
+# What `link setup` makes true on each machine, as one root shell script per machine: every step
 # checks first, so it can run again at any time. RDMA needs unlimited locked memory (DGX OS ships
 # it in 99-nv-spark-limits.conf, Arch doesn't); the worker runs rootless Podman with the NVIDIA CDI
 # GPU and rsync; its user lingers, so rank 1 outlives the SSH session that started it.
@@ -2201,7 +2201,7 @@ if [[ "$(loginctl show-user "$user" -p Linger --value 2>/dev/null)" != yes ]]; t
 fi
 '''
 CDI_COMPAT = r'''#!/usr/bin/python3 -I
-# Written by omarchy-local-ai pair setup. Podman before 5 predates CDI spec 0.7.0 and rejects the additionalGids
+# Written by omarchy-local-ai link setup. Podman before 5 predates CDI spec 0.7.0 and rejects the additionalGids
 # field nvidia-ctk 1.18+ writes. This writes /etc/cdi/nvidia.yaml as the same spec without it, at 0.6.0, after every
 # nvidia-cdi-refresh (a drop-in runs it), so rootless Podman keeps the GPU across driver updates.
 import os, re
@@ -2284,8 +2284,8 @@ def root_script(script, *args, peer=None):
     raise LocalError(f"Setting up {'the peer ' + peer if peer else 'this machine'} failed (see above)")
 
 
-def cmd_pair_setup(argv):
-  parser = argparse.ArgumentParser(prog="omarchy agent local pair setup",
+def cmd_link_setup(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local link setup",
                                    description="Prepare this Spark and the one cabled to it to run models across both. Safe to run again.")
   parser.add_argument("peer", nargs="?", help="the other Spark as SSH reaches it now, e.g. user@spark-1234.local (default: the detected pair)")
   args = parser.parse_args(argv)
@@ -2294,7 +2294,7 @@ def cmd_pair_setup(argv):
     raise LocalError("Pairs are supported between DGX Sparks (GB10) only")
   peer = args.peer or (cached_pair(profile) or {}).get("peer") or pair_override()
   if not peer or not re.match(r"^([A-Za-z0-9._-]+@)?[A-Za-z0-9._:%-]+$", peer):
-    raise LocalError("Name the other Spark as SSH reaches it, e.g.: omarchy agent local pair setup spark-1234.local")
+    raise LocalError("Name the other Spark as SSH reaches it, e.g.: omarchy agent local link setup spark-1234.local")
   ports = cabled_ports()
   if not ports:
     raise LocalError("No ConnectX-7 port has a link: connect the two Sparks' QSFP ports with a direct cable")
@@ -2343,16 +2343,16 @@ def cmd_pair_setup(argv):
 
   pair = detect_pair(machine_profile())
   if not pair:
-    raise LocalError("The peer wasn't found on the cable after setup: check that both ends of the link are up (omarchy agent local pair)")
-  say(f"Paired with {pair['host']} at {pair['peer']}")
+    raise LocalError("The peer wasn't found on the cable after setup: check that both ends of the link are up (omarchy agent local link)")
+  say(f"Linked to {pair['host']} at {pair['peer']}")
   pair_limits(pair["peer"])
   return 0
 
 
-def cmd_pair(argv):
+def cmd_link(argv):
   if argv[:1] == ["setup"]:
-    return cmd_pair_setup(argv[1:])
-  parser = argparse.ArgumentParser(prog="omarchy agent local pair")
+    return cmd_link_setup(argv[1:])
+  parser = argparse.ArgumentParser(prog="omarchy agent local link")
   parser.add_argument("--json", action="store_true")
   args = parser.parse_args(argv)
   profile = machine_profile(probe_pair=True)
@@ -2361,10 +2361,10 @@ def cmd_pair(argv):
     print(json.dumps(pair, indent=2))
     return 0
   if not pair:
-    say("No paired machine found on a ConnectX-7 link (name one in ~/.config/omarchy/agent-local/pair)")
+    say("No paired machine found on a ConnectX-7 link (name one in ~/.config/omarchy/agent-local/link)")
     return 0
   here, there = pair_link(pair)
-  say(f"Paired with {pair['host']} at {pair['peer']} ({pair['ram_gib']:.0f} GiB)")
+  say(f"Linked to {pair['host']} at {pair['peer']} ({pair['ram_gib']:.0f} GiB)")
   say(f"  here  {here['addr']} on {here['dev']}, RoCE {','.join(here['hcas'])} (GID {here['gid']})")
   say(f"  there {there['addr']} on {there['dev']}, RoCE {','.join(there['hcas'])} (GID {there['gid']})")
   return 0
@@ -2704,7 +2704,7 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
   if runtime.get("pair"):
     if not profile.get("pair"):
       raise LocalError(f"{rid} runs across two machines, and no paired machine was found on a ConnectX-7 link")
-    say(f"Paired with {profile['pair']['host']} at {profile['pair']['peer']}")
+    say(f"Linked to {profile['pair']['host']} at {profile['pair']['peer']}")
   manifest = {
     "schema": SCHEMA,
     "recipe_id": rid,
@@ -2785,7 +2785,7 @@ def cmd_list(argv):
     print(json.dumps(rows, indent=2))
     return 0
   gpu = profile["gpus"][0]["family"] if profile["gpus"] else "no GPU"
-  paired = f" · paired with {profile['pair']['host']}" if profile.get("pair") else ""
+  paired = f" · linked to {profile['pair']['host']}" if profile.get("pair") else ""
   say(f"Catalog {catalog.version} · this machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}{paired}")
   for row in rows:
     marks = [mark for mark, on in (("best", row["best"]), ("running", row["active"]), ("installed", row["installed"])) if on]
@@ -3447,8 +3447,8 @@ COMMANDS = {
   "refresh": cmd_refresh,
   "validate": cmd_validate,
   "overlay": cmd_overlay,
-  "pair": cmd_pair,
-  "pair-worker": cmd_pair_worker,
+  "link": cmd_link,
+  "link-worker": cmd_link_worker,
 }
 
 SUMMARIES = {
@@ -3458,7 +3458,7 @@ SUMMARIES = {
   "start": "Start a model that's set up, the last one started by default",
   "stop": "Stop a model, or every running one",
   "remove": "Remove a model's weights, manifests and unused image",
-  "pair": "Show the Spark cabled to this one; 'pair setup <peer>' prepares both",
+  "link": "Show the Spark cabled to this one; 'link setup <peer>' prepares both",
 }
 
 
