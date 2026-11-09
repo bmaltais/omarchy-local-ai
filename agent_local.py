@@ -2312,6 +2312,9 @@ def shared_listing(record, catalog, profile, dns):
       "recipe": rid,
       "name": model["name"],
       "vendor": model["vendor"],
+      # Dense or mixture of experts, which a peer's panel shows beside the
+      # speeds instead of this machine's memory.
+      "architecture": recipe.get("architecture", ""),
       "ctx": model["ctx"],
       "input": model_inputs(manifest) if manifest else ["text"],
       "unit": model["unit"],
@@ -2487,6 +2490,7 @@ def clean_listing(listing, dns):
       "recipe": model["recipe"],
       "name": _clean(model.get("name") or model["recipe"]),
       "vendor": model.get("vendor") if ID_RE.match(str(model.get("vendor", ""))) else "",
+      "architecture": model.get("architecture") if model.get("architecture") in ARCHITECTURES else "",
       "ctx": int(ctx) if ctx and ctx > 0 else 0,
       "input": inputs or ["text"],
       "unit": model.get("unit") if model.get("unit") in REMOTE_UNITS else "inactive",

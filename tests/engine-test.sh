@@ -410,15 +410,16 @@ ts_status = {
   },
 }
 listing = {"schema": 1, "host": "box", "dns": "box.tail.ts.net", "ram_total_gib": 121.9, "models": [
-  {"recipe": "big-model", "name": "Big\x1b[31m Model", "vendor": "qwen", "ctx": 262144, "input": ["text", "image", "audio"], "unit": "active",
+  {"recipe": "big-model", "name": "Big\x1b[31m Model", "vendor": "qwen", "architecture": "moe", "ctx": 262144, "input": ["text", "image", "audio"], "unit": "active",
    "observed": {"ram_used_gib": 80, "evil": "x"}, "since_ms": None, "decode_tok_s": 40},
   {"recipe": "../escape", "name": "bad"},
-  {"recipe": "odd-state", "unit": "rebooting"},
+  {"recipe": "odd-state", "unit": "rebooting", "architecture": "<b>moe</b>"},
 ]}
 clean = a.clean_listing(listing, "box.tail.ts.net")
 check("a peer's listing keeps only recipe ids it can put in a path", [m["recipe"] for m in clean["models"]] == ["big-model", "odd-state"])
 check("a peer's listing loses control characters and unknown inputs", clean["models"][0]["name"] == "Big[31m Model" and clean["models"][0]["input"] == ["text", "image"])
 check("a peer's listing keeps only known states and measurements", clean["models"][1]["unit"] == "inactive" and "evil" not in clean["models"][0]["observed"])
+check("a peer's listing keeps a known architecture and drops any other", clean["models"][0]["architecture"] == "moe" and clean["models"][1]["architecture"] == "")
 raises("a listing of another schema is refused", lambda: a.clean_listing({"schema": 2, "models": []}, "box"), "Not an Omarchy")
 
 answers = {
