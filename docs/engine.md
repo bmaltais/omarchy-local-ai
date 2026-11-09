@@ -19,6 +19,14 @@ external egress, a read-only root and model mount, all capabilities dropped,
 published on loopback. The host downloads weights and pulls images before launch.
 The server receives no agent workspace or host home mount.
 
+Runtimes whose ranks span two machines (a `[pair]` table, `run.network = "fabric"`)
+are the one exception to the internal network: both ranks share their host's network
+namespace to reach each other over the direct ConnectX-7 cable (a TCP rendezvous on
+the runtime's `master_port`, NCCL and RoCE on the cable's RDMA devices), with the
+API bound to loopback by the engine through the runtime's reserved `listen` flags.
+Every other restriction holds on both machines: read-only root and model mounts, all
+capabilities dropped, `NoNewPrivileges`, and only the GPU and `/dev/infiniband`.
+
 The host key is mode 0600 and passed as a Podman secret, never embedded in a unit.
 Runtimes taking a key argument must explicitly opt in and use the engine's Bash
 substitution inside the container; installation warns that local process listings
@@ -38,7 +46,7 @@ The real records are the examples and source of values:
 | --- | --- |
 | [catalog.toml](../catalog.toml) | Schema 1 and the release version. |
 | [recipes/](../recipes/) | Name, summary, runtime, pinned artifacts, measured hardware, context variants, sampling and optional server arguments. Vendor names the panel logo; architecture is `dense` or `moe`; `input` is `["text"]` (the default) or `["text", "image"]`, which the agent overlays declare so agents can send screenshots. |
-| [runtimes/](../runtimes/) | Digest-pinned image, tier, port, command, standard input mappings, reserved options and nonempty `health.probe` argv. |
+| [runtimes/](../runtimes/) | Digest-pinned image, tier, port, command, standard input mappings, reserved options and nonempty `health.probe` argv. A paired runtime adds `listen` (its bind flags), `@PORT@` in its probe and a `[pair]` table: `nodes = 2`, `master_port`, the `prepare` and `worker` commands and `env`, `head_env` and `worker_env`, whose values may hold `@RANK@`, `@WORLD@`, `@MASTER_ADDR@`, `@MASTER_PORT@`, `@CTX@`, `@RDMA_DEVICES@`, `@GID_INDEX@` and `@SOCKET_IFNAME@`. |
 | [reviews/](../reviews/) | Third-party image digest, publisher, reviewer, date, license URL/hash and checked properties. |
 | [measurements/](../measurements/) | Hardware evidence, artifact identities, context, memory, load time and short, long and code-edit prompt timings. |
 | [best.toml](../best.toml) | Unique classes requiring both `gpu` and `ram_class`, with an ordered list of measured recipes. |
@@ -57,7 +65,8 @@ Runtime inputs map exactly one argument or environment variable per supported
 standard input; the model may instead be `{ positional = true }`, placed right after
 the command for servers that take it bare (`serve <dir>`). Run options support a `devices` list (`render`, `kfd`,
 `cdi-nvidia`), scalar `group_add = "keep-groups"`, scalar `memlock = "unlimited"`,
-and numeric `shm_size_gib` greater than zero and at most 16. Other run options are
+numeric `shm_size_gib` greater than zero and at most 16, `infiniband` among the
+devices and scalar `network = "fabric"` for paired runtimes. Other run options are
 rejected. `validate <catalog-dir>` checks the records and referenced evidence;
 `--online` also checks upstream artifacts and licenses.
 
@@ -105,6 +114,36 @@ cleared even when interrupted. Load/stop observations and seconds per GiB remove
 predict subsequent progress bars. Image pulls report aggregate progress on one
 line per update.
 
+## Paired machines
+
+A DGX Spark cabled to another through their ConnectX-7 ports is a pair: `profile`,
+`list`, `refresh`, `use` and `pair` look for a GB10 machine of the same RAM class at
+the other end of each RDMA-capable link with an IPv4 address (its neighbors, the
+other host of a two-host subnet, or .1/.2 of a larger one; `~/.config/omarchy/agent-local/pair`
+names one instead), over key-based SSH, and record it in `pair.json`. Other commands
+read that record without probing. A pair adds the GPU family `nvidia-gb10-pair`
+(`nodes = 2`, the smaller machine's memory per node), whose `best.toml` class is tried
+before the machine's own; single-node recipes keep running on the machine's own GPU.
+
+The peer needs key-based SSH from this machine, rootless Podman that runs
+`nvidia.com/gpu=all`, unlimited locked memory for its user's systemd manager, and
+rsync. Nothing of the engine is installed there. `use` of a paired recipe:
+
+1. materializes the file set here, as for any recipe;
+2. runs the runtime's `prepare` command for rank 0 in a container without network,
+   the file set read-only at `/models`, writing `models/<recipe>/<fileset>.rank0`;
+3. copies the image to the peer (`podman save | podman load`, by image ID) unless it
+   has it, and the file set with rsync over the cable;
+4. runs `prepare` for rank 1 there into `<fileset>.rank1`, and drops older file sets.
+
+The head unit runs rank 0. Its `ExecStartPre` (`pair-worker start`) reads the link as
+it is now (each side's netdev, address, RoCE devices and the RoCE v2 GID index of its
+IPv4 address), checks the peer's free memory, writes the unit's environment file and
+starts rank 1 on the peer as `omarchy-agent-local-model-<recipe>-rank1`; its
+`ExecStopPost` stops it. Start, stop and the panel treat the pair as one model.
+Admission checks free memory on both machines. `remove` also removes the peer's
+container, files and, when no other paired recipe uses it, its image.
+
 ## State and panel API
 
 Paths are relative to the user's home. JSON caches are atomically replaced.
@@ -118,6 +157,7 @@ Paths are relative to the user's home. JSON caches are atomically replaced.
 | `.local/state/omarchy/agent-local/loads/`, `stops/`, `removal_rate` | Measured progress timings. |
 | `.local/state/omarchy/agent-local/errors/`, `removing/` | Per-model error and removal prediction. |
 | `.local/state/omarchy/agent-local/installing/<recipe>.json` | A first setup in progress or failed: name, vendor, phase, bytes, speed, start, error and the `use` process id. |
+| `.local/state/omarchy/agent-local/pair.json`, `pair/<recipe>.env` | The detected peer (address, host name, home, RAM); a paired unit's link environment, written at each start. |
 | `.local/state/omarchy/agent-local/lock`, `status.lock` | Lifecycle admission and status snapshot locks. |
 | `.local/share/omarchy/agent-local/blobs/`, `models/` | Shared blob store and immutable file sets. |
 | `.config/containers/systemd/omarchy-agent-local-model-<recipe>.container` | Generated unit; shared `omarchy-agent-local.network` defines the internal network. |

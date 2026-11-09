@@ -297,6 +297,73 @@ if generator:
 else:
   skip("Quadlet parser unavailable: Podman generator is not installed")
 
+# Paired machines: a runtime spanning two runs on the host network only with a [pair] table,
+# binds its API to loopback through flags it reserves, and leaves NCCL settings to the engine.
+pair_rt = copy.deepcopy(runtime)
+pair_rt.update(command=["server", "serve"], listen={"host": "--host", "port": "--port"}, reserved=["--host", "--port", "API_KEY"],
+               run={"devices": ["cdi-nvidia", "infiniband"], "network": "fabric", "memlock": "unlimited"},
+               health={"probe": ["curl", "http://127.0.0.1:@PORT@/health"]},
+               pair={"nodes": 2, "master_port": 29620, "prepare": ["prep", "@RANK@", "@WORLD@"], "worker": ["lanes", "@RANK@", "@MASTER_ADDR@"],
+                     "env": {"TF_GID": "@GID_INDEX@"}, "head_env": {"TF_MASTER": "@MASTER_ADDR@"}})
+check("a paired runtime fixture is accepted", not a.validate_runtime("pair", pair_rt), "\n".join(a.validate_runtime("pair", pair_rt)))
+for name, mutate, fragment in (
+  ("host network without a pair", lambda r: r.pop("pair"), "only for runtimes with a [pair]"),
+  ("a pair on the internal network", lambda r: r["run"].pop("network"), "needs run.network"),
+  ("a pair without bind flags", lambda r: r.pop("listen"), ".listen"),
+  ("bind flags in the command", lambda r: r.update(command=["server", "--port", "1"]), "sets --host, --port itself"),
+  ("unreserved bind flags", lambda r: r.update(reserved=["API_KEY"]), "must reserve"),
+  ("NCCL settings in the runtime", lambda r: r["pair"]["env"].update(NCCL_IB_HCA="mlx5_0"), "NCCL_"),
+  ("three nodes", lambda r: r["pair"].update(nodes=3), "only 2"),
+):
+  changed = copy.deepcopy(pair_rt)
+  mutate(changed)
+  check(f"paired runtime rejects {name}", any(fragment in e for e in a.validate_runtime("pair", changed)), "\n".join(a.validate_runtime("pair", changed)))
+
+spark = {"vendor": "nvidia", "family": "nvidia-gb10", "memory_gib": 121.9, "unified": True, "sysfs": ""}
+pair_gpu = dict(spark, family="nvidia-gb10-pair", nodes=2, peer="10.99.0.2")
+pair_profile = {"platform": "aarch64-gb10", "ram_class": 128, "ram_gib": 121.9, "gpus": [spark, pair_gpu]}
+check("a pair outranks its own node", a.choose_gpu(pair_profile)["family"] == "nvidia-gb10-pair")
+single = dict(recipe, hardware=[{"gpu": "nvidia-gb10", "ram_class": 128, "measured": "m.toml"}], runtime="server")
+paired = dict(recipe, hardware=[{"gpu": "nvidia-gb10-pair", "ram_class": 128, "measured": "m.toml"}], runtime="pair",
+              variant=[{"ctx": 4096, "peak_ram_gib": 104, "peak_gpu_gib": 104}])
+check("a pair machine runs single-node recipes on its own GPU", a.recipe_gpu(pair_profile, single)["family"] == "nvidia-gb10" and a.recipe_gpu(pair_profile, paired)["family"] == "nvidia-gb10-pair")
+nv_rt = dict(runtime, run={"devices": ["cdi-nvidia"]})
+pair_catalog = SimpleNamespace(recipes={"single": single, "paired": paired}, runtimes={"server": nv_rt, "pair": pair_rt},
+                               best={"class": [{"gpu": "nvidia-gb10", "ram_class": 128, "recipes": ["single"]},
+                                               {"gpu": "nvidia-gb10-pair", "ram_class": 128, "recipes": ["paired"]}]})
+check("best on a pair is the pair's recipe", a.resolve_best(pair_catalog, pair_profile)[0] == "paired")
+check("best without the pair is the node's own", a.resolve_best(pair_catalog, dict(pair_profile, gpus=[spark]))[0] == "single")
+small = dict(pair_profile, gpus=[spark, dict(pair_gpu, memory_gib=100)])
+check("best falls back to the node's class when the pair recipe doesn't fit", a.resolve_best(pair_catalog, small)[0] == "single")
+check("a paired runtime never runs on one node, nor a single one on the pair", not a.runtime_supports(pair_rt, spark) and not a.runtime_supports(nv_rt, pair_gpu))
+pair_text = a.render_container("paired", paired, pair_rt, paired["variant"][0], {"model": "model"}, pair_gpu, "b" * 16)
+pair_port = a.port_for("paired")
+check("the pair unit shares the host network and publishes nothing", "Network=host" in pair_text and "PublishPort" not in pair_text)
+check("the pair unit binds its API to loopback on the model's port", f'"--host" "127.0.0.1" "--port" "{pair_port}"' in pair_text and f"127.0.0.1:{pair_port}/health" in pair_text)
+check("the pair unit mounts rank 0's inputs and reads the link from its environment file", f"models/paired/{'b' * 16}.rank0:/prepared:ro" in pair_text and "EnvironmentFile=%h/.local/state/omarchy/agent-local/pair/paired.env" in pair_text)
+check("the pair unit starts and stops rank 1 with itself", "ExecStartPre=/usr/bin/env omarchy-agent-local pair-worker start paired" in pair_text and "ExecStopPost=-/usr/bin/env omarchy-agent-local pair-worker stop paired" in pair_text)
+check("the pair unit keeps the container restrictions", all(line in pair_text for line in ("ReadOnly=true", "DropCapability=all", "NoNewPrivileges=true", "AddDevice=/dev/infiniband")))
+if generator:
+  quadlets = Path(a.quadlet_dir())
+  (quadlets / "omarchy-agent-local.container").write_text(pair_text)
+  result = subprocess.run([generator, "--user", "--dryrun"], env=dict(os.environ, QUADLET_UNIT_DIRS=str(quadlets)), capture_output=True, text=True)
+  check("Quadlet accepts the pair unit", result.returncode == 0 and "--network host" in result.stdout.replace("=", " "), result.stdout[-2000:] + result.stderr)
+scope = {}
+exec(a.FABRIC_SIDE, scope)
+check("the fabric probe runs on its own and finds no RoCE device on loopback", (scope["fabric_side"]("127.0.0.1") or {}).get("hca") is None)
+base = Path(a.data_dir(), "models", "keep")
+for name in ("c" * 16, "c" * 16 + ".rank0", "d" * 16, "d" * 16 + ".rank0"):
+  (base / name).mkdir(parents=True)
+a.prune_filesets("keep", "c" * 16)
+check("pruning keeps a file set's rank inputs and drops the others'", sorted(p.name for p in base.iterdir()) == ["c" * 16, "c" * 16 + ".rank0"])
+with patch.object(a, "platform_name", return_value="aarch64-gb10"), patch.object(a, "amd_gpus", side_effect=lambda: []):
+  check("no pair without a record of one", "pair" not in a.machine_profile())
+  Path(a.pair_path()).parent.mkdir(parents=True, exist_ok=True)
+  Path(a.pair_path()).write_text(json.dumps({"peer": "10.99.0.2", "host": "spark2", "home": "/home/u", "ram_gib": 121.9}))
+  cached = a.machine_profile()
+  check("a recorded pair adds the pair GPU without probing", [g["family"] for g in cached["gpus"]] == ["nvidia-gb10", "nvidia-gb10-pair"] and cached["gpus"][1]["peer"] == "10.99.0.2", json.dumps(cached))
+  os.unlink(a.pair_path())
+
 # The default root must work without an Omarchy checkout or a catalog override.
 check("installed catalog loads and validates from the engine directory", not a.load_catalog().errors() and a.load_catalog().root == os.environ["ENGINE_ROOT"])
 root = Path(os.environ["HOME"])
