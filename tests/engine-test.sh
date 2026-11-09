@@ -381,6 +381,15 @@ with patch.object(a, "platform_name", return_value="aarch64-gb10"), patch.object
 for name, script in (("host", a.HOST_SETUP.replace("@CDI_COMPAT@", a.CDI_COMPAT)), ("link", a.LINK_SETUP), ("firewall", a.FIREWALL_SETUP)):
   result = subprocess.run(["bash", "-n", "-c", script], capture_output=True, text=True)
   check(f"link setup's {name} script parses", result.returncode == 0, result.stderr)
+# Cable addressing finishes whatever an earlier setup left, and leaves ports that aren't shared alone.
+fresh = a.plan_link({"enp1": [], "enP2": []}, {"enp1": [], "enP2": []})
+check("a fresh cable gets a /24 per port, .1 here and .2 there", fresh == (["enP2=10.99.0.1/24", "enp1=10.99.1.1/24"], ["enP2=10.99.0.2/24", "enp1=10.99.1.2/24"]), repr(fresh))
+half = a.plan_link({"enp1": ["10.99.1.1/24"], "lan0": ["192.168.1.5/24"]}, {"enp1": []})
+check("an interrupted setup gives the peer the other end of this side's /24 and ignores unshared ports", half == ([], ["enp1=10.99.1.2/24"]), repr(half))
+check("a cable addressed on both ends is left alone", a.plan_link({"enp1": ["10.99.1.1/24"]}, {"enp1": ["10.99.1.2/24"]}) == ([], []))
+check("a new /24 avoids networks either end already uses", a.plan_link({"enp1": [], "enp2": ["10.99.0.1/24"]}, {"enp1": [], "enp2": ["10.99.0.2/24"]})[0] == ["enp1=10.99.1.1/24"])
+rules = a.link_rules({"enp1": ["10.99.1.1/24"], "lan0": ["192.168.1.5/24"]}, {"enp1": ["10.99.1.2/24"], "lan0": ["192.168.1.9/24"], "ib9": ["10.0.0.2/8"]})
+check("the firewall lets in only the other end's address on each shared port", rules == (["enp1=10.99.1.2", "lan0=192.168.1.9"], ["enp1=10.99.1.1", "lan0=192.168.1.5"]), repr(rules))
 compile(a.CDI_COMPAT, "nvidia-cdi-podman-compat", "exec")
 check("the CDI compatibility script compiles", True)
 
