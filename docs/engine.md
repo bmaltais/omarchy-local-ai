@@ -134,7 +134,8 @@ user's systemd manager in user.conf.d, applied to a running manager at once), in
 0.6 copy of NVIDIA's spec for Podman before 5 (Ubuntu's DGX OS) through a drop-in on
 nvidia-cdi-refresh, lets the peer's user linger, and gives cable ports without an
 address one /24 per PCIe link (10.99.N.1 here, .2 there, MTU 9000) through
-NetworkManager. `use` of a paired recipe:
+NetworkManager, and where ufw is active lets in everything arriving on the cable's
+ports (the ranks' rendezvous and NCCL sockets), ahead of Omarchy's SSH rate limit. `use` of a paired recipe:
 
 1. materializes the file set here, as for any recipe;
 2. runs the runtime's `prepare` command for rank 0 in a container without network,

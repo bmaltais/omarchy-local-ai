@@ -2245,6 +2245,22 @@ done
 '''
 
 
+# The cable is a private link between the two machines: the ranks' rendezvous, NCCL's sockets and
+# the engine's SSH all cross it. Where ufw guards a machine (Omarchy turns it on), everything
+# arriving on the cable's own ports is let in, ahead of the SSH rate limit.
+FIREWALL_SETUP = r'''
+set -euo pipefail
+command -v ufw >/dev/null || exit 0
+ufw status | grep -q '^Status: active' || exit 0
+for dev in "$@"; do
+  if ! ufw status | grep -qE "^Anywhere on $dev +ALLOW IN"; then
+    ufw insert 1 allow in on "$dev" comment "omarchy-local-ai pair link" >/dev/null
+    echo "  firewall: allowing the pair link on $dev"
+  fi
+done
+'''
+
+
 def cabled_ports():
   """This machine's RDMA-capable netdevs with a carrier, in name order."""
   ports = []
@@ -2319,6 +2335,11 @@ def cmd_pair_setup(argv):
     root_script(LINK_SETUP, "2", *specs, peer=peer)
   else:
     say(f"  {', '.join(ports)} already addressed")
+
+  say("Firewalls")
+  root_script(FIREWALL_SETUP, *ports)
+  there_ports = pair_ssh(peer, "for d in /sys/class/net/*; do [ -d $d/device/infiniband ] && [ \"$(cat $d/carrier 2>/dev/null)\" = 1 ] && basename $d; done; true").stdout.split()
+  root_script(FIREWALL_SETUP, *there_ports, peer=peer)
 
   pair = detect_pair(machine_profile())
   if not pair:
