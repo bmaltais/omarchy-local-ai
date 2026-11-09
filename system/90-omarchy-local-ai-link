@@ -1,0 +1,10 @@
+#!/bin/bash
+# NetworkManager dispatcher hook, installed to /etc/NetworkManager/dispatcher.d/ by the omarchy-local-ai package:
+# when a ConnectX-7 port comes up, each logged-in user's engine probes the cable, and the first time another DGX
+# Spark answers there waiting for setup, a desktop notification offers `omarchy-agent-local link setup`.
+dev=$1 action=$2
+[[ $action == up && -d /sys/class/net/$dev/device/infiniband ]] || exit 0
+command -v omarchy-agent-local >/dev/null || exit 0
+for user in $(loginctl list-sessions --no-legend | awk '$3 != "root" {print $3}' | sort -u); do
+  systemd-run --user -M "$user@" --quiet --collect -- omarchy-agent-local link notify || true
+done

@@ -174,7 +174,15 @@ Paths are relative to the user's home. JSON caches are atomically replaced.
 | `.config/omarchy/agent-local/key`, `overlays/` | Private API key and per-recipe client overlays. |
 
 `status.json` is `{models: {<recipe>: <model>}, last, ram_total_gib,
-catalog_version, best}`. `last` and `best` may be null. Each model contains:
+catalog_version, best, link}`. `last` and `best` may be null. `link` is what the
+ConnectX-7 cable shows: `{state: "none"}`, `{state: "linked", host}`, or, for another
+Spark answering on the cable's IPv6 link-local all-nodes address before `link setup`,
+`{state: "available", address, host}` (`host` from mDNS, may be null). `refresh` and
+`link` probe it; `link setup` with no peer named sets up the available one. The
+package installs [system/90-omarchy-local-ai-link](../system/90-omarchy-local-ai-link)
+to `/etc/NetworkManager/dispatcher.d/`: when a ConnectX-7 port comes up it runs
+`link notify` for each logged-in user, which announces a newly available Spark once,
+with a notification whose action opens `link setup` in a terminal. Each model contains:
 
 - Identity: `recipe`, `name`, `vendor`, `runtime`, `image`, `ctx`, `catalog_version`.
 - Connection: `port`, `endpoint` (including `/v1`).
