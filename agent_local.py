@@ -1818,6 +1818,8 @@ def model_record(rid, manifest, profile):
     # Whether play can start it now; the panel greys play out when it can't.
     "fits": fits,
     "fit_reason": fit_reason,
+    # Whether the other machines on the tailnet can use it.
+    "shared": rid in shared_recipes(),
     "recipe": rid,
     "name": recipe.get("name", rid),
     "vendor": vendor,
@@ -1844,6 +1846,8 @@ def status_record(catalog, profile):
   models = {rid: model_record(rid, load_model(rid), profile) for rid in known_models()}
   record = {
     "models": models,
+    # Why sharing on the tailnet isn't working, for the panel to show.
+    "share_error": _read(share_error_path()),
     "last": last_model_id(),
     "ram_total_gib": round(gib(meminfo().get("MemTotal", 0)), 1),
     "catalog_version": catalog.version,
@@ -1856,7 +1860,7 @@ def status_record(catalog, profile):
   return record
 
 
-def write_status(catalog, profile, transitions=None, pending=None):
+def write_status(catalog, profile, transitions=None, pending=None, publish=True):
   """Rewrite status.json, which the agents panel watches. `transitions` reports
   a start or stop before systemd reaches it, so a click shows at once;
   `pending` describes a model being set up before its manifest is saved.
@@ -1878,6 +1882,14 @@ def write_status(catalog, profile, transitions=None, pending=None):
         if unit == "active":
           record["models"][rid]["error"] = ""
     write_atomic(os.path.join(state_dir(), "status.json"), json.dumps(record, indent=2) + "\n")
+    # The tailnet sees the same transitions: a shared model's listing is
+    # republished with every status write that changes it.
+    if publish:
+      publish_shares(record, catalog, profile)
+      error = _read(share_error_path())
+      if error != record["share_error"]:
+        record["share_error"] = error
+        write_atomic(os.path.join(state_dir(), "status.json"), json.dumps(record, indent=2) + "\n")
     return record
 
 
@@ -2051,6 +2063,9 @@ def cmd_remove(argv):
       # model that status still lists and remove can finish.
       if os.path.exists(model_manifest_path(rid)):
         os.unlink(model_manifest_path(rid))
+      # A model set up again later starts out private.
+      if rid in shared_recipes():
+        save_shares(set(shared_recipes()) - {rid})
     finally:
       if os.path.exists(removing_path(rid)):
         os.unlink(removing_path(rid))
@@ -2161,40 +2176,615 @@ def cmd_validate(argv):
   return 0
 
 
+# ---------------------------------------------------------------- tailnet sharing
+#
+# A machine shares a model by putting its loopback endpoint behind
+# `tailscale serve` at /local-ai/<recipe>, reachable only on the tailnet with
+# Tailscale's own HTTPS certificate. The container, its loopback port and its
+# key check stay exactly as they are; the model still refuses a request
+# without the key. Beside the models, /local-ai/models.json lists what this
+# machine shares and whether each is running. It never contains the key, which
+# a client only gets by pairing over SSH.
+#
+# Every other machine finds those listings by asking its own tailscaled which
+# peers are online and fetching each one's models.json. Hosts it has seen stay
+# in network.json while they're away, marked offline, so a model that drops
+# off the tailnet keeps its line in the panel instead of vanishing.
+
+SHARE_ROOT = "/local-ai"
+LISTING_ROUTE = SHARE_ROOT + "/models.json"
+NETWORK_SCHEMA = 1
+# How long an unpaired host that stopped answering stays listed as offline.
+# A paired host stays until it's forgotten.
+FORGET_UNPAIRED_MS = 7 * 24 * 3600 * 1000
+LISTING_TIMEOUT = 4
+HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+DNS_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
+SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,252}$")
+REMOTE_UNITS = ("installing", "active", "activating", "inactive", "failed", "deactivating", "removing")
+OPERATOR_HINT = "Let this user change Tailscale Serve: sudo tailscale set --operator=$USER"
+
+
+def shares_path():
+  return os.path.join(config_dir(), "shares.json")
+
+
+def shared_recipes():
+  try:
+    with open(shares_path()) as handle:
+      recipes = json.load(handle).get("recipes", [])
+  except (OSError, ValueError, AttributeError):
+    return []
+  return sorted({rid for rid in recipes if isinstance(rid, str) and ID_RE.match(rid)})
+
+
+def save_shares(recipes):
+  write_atomic(shares_path(), json.dumps({"recipes": sorted(set(recipes))}, indent=2) + "\n")
+
+
+def share_error_path():
+  return os.path.join(state_dir(), "share_error")
+
+
+def published_path():
+  return os.path.join(state_dir(), "shared.json")
+
+
+def tailscale(*args, timeout=10):
+  if not shutil.which("tailscale"):
+    raise LocalError("Tailscale isn't installed")
+  try:
+    return subprocess.run(["tailscale", *args], capture_output=True, text=True, timeout=timeout)
+  except subprocess.TimeoutExpired:
+    raise LocalError(f"tailscale {args[0]} didn't answer")
+
+
+def tailscale_status():
+  """tailscaled's own view of the tailnet, or None without one."""
+  try:
+    result = tailscale("status", "--json", timeout=5)
+  except LocalError:
+    return None
+  if result.returncode != 0:
+    return None
+  try:
+    status = json.loads(result.stdout)
+  except ValueError:
+    return None
+  return status if isinstance(status, dict) and status.get("BackendState") == "Running" else None
+
+
+def node_dns(node):
+  dns = str((node or {}).get("DNSName") or "").rstrip(".").lower()
+  return dns if DNS_RE.match(dns) else ""
+
+
+def self_dns(status=None):
+  dns = node_dns((status or tailscale_status() or {}).get("Self"))
+  if not dns:
+    raise LocalError("This machine isn't on a tailnet with MagicDNS. Run: tailscale up")
+  return dns
+
+
+def serve_handlers(dns):
+  """Our routes in the current serve config: path -> handler."""
+  result = tailscale("serve", "status", "--json")
+  if result.returncode != 0:
+    raise LocalError(result.stderr.strip() or "Can't read the Tailscale Serve config")
+  try:
+    config = json.loads(result.stdout or "{}") or {}
+  except ValueError:
+    config = {}
+  handlers = ((config.get("Web") or {}).get(f"{dns}:443") or {}).get("Handlers") or {}
+  return {path: handler for path, handler in handlers.items() if path == SHARE_ROOT or path.startswith(SHARE_ROOT + "/")}
+
+
+def serve_set(path, target):
+  result = tailscale("serve", "--bg", "--yes", "--set-path", path, target)
+  if result.returncode != 0:
+    message = result.stderr.strip() or result.stdout.strip()
+    if "operator" in message or "Unauthorized" in message or "Access denied" in message:
+      raise LocalError(OPERATOR_HINT)
+    raise LocalError(f"tailscale serve {path}: {message}")
+
+
+def serve_off(path):
+  result = tailscale("serve", "--yes", "--set-path", path, "off")
+  if result.returncode != 0 and "not found" not in (result.stderr + result.stdout).lower():
+    raise LocalError(f"tailscale serve {path} off: {(result.stderr or result.stdout).strip()}")
+
+
+def shared_listing(record, catalog, profile, dns):
+  """What other machines on the tailnet see: the shared models and their state."""
+  try:
+    gpu = choose_gpu(profile)
+  except LocalError:
+    gpu = None
+  models = []
+  for rid in shared_recipes():
+    model = record["models"].get(rid)
+    if not model:
+      continue
+    recipe = catalog.recipes.get(rid) or (load_model(rid) or {}).get("recipe") or {}
+    measured = load_measurement(catalog, recipe, profile, gpu).get("long", {}) if gpu and recipe else {}
+    manifest = load_model(rid) or {}
+    models.append({
+      "recipe": rid,
+      "name": model["name"],
+      "vendor": model["vendor"],
+      "ctx": model["ctx"],
+      "input": model_inputs(manifest) if manifest else ["text"],
+      "unit": model["unit"],
+      "error": model["error"],
+      "fits": model["fits"],
+      "since_ms": model["since_ms"],
+      "expected_load_seconds": model["expected_load_seconds"],
+      "expected_stop_seconds": model["expected_stop_seconds"],
+      "observed": model["observed"],
+      "decode_tok_s": measured.get("decode_tok_s"),
+      "prefill_tok_s": measured.get("prefill_tok_s"),
+    })
+  return {
+    "schema": NETWORK_SCHEMA,
+    "host": dns.split(".")[0],
+    "dns": dns,
+    "ram_total_gib": record["ram_total_gib"],
+    "catalog_version": record["catalog_version"],
+    "models": models,
+  }
+
+
+def publish_shares(record, catalog, profile, force=False):
+  """Bring the serve routes in line with shares.json and republish the
+  listing when it changed. Errors land in share_error for the panel."""
+  shares = shared_recipes()
+  published = _read(published_path())
+  if not shares and not published and not force:
+    return
+  try:
+    dns = self_dns()
+    have = serve_handlers(dns)
+    want = {f"{SHARE_ROOT}/{rid}": f"http://127.0.0.1:{port_for(rid)}" for rid in shares if rid in record["models"]}
+    for path, target in want.items():
+      if (have.get(path) or {}).get("Proxy") != target:
+        serve_set(path, target)
+    for path in have:
+      if path != LISTING_ROUTE and path not in want:
+        serve_off(path)
+    if want:
+      text = json.dumps(shared_listing(record, catalog, profile, dns), sort_keys=True, separators=(",", ":"))
+      if (have.get(LISTING_ROUTE) or {}).get("Text") != text:
+        serve_set(LISTING_ROUTE, "text:" + text)
+      write_atomic(published_path(), text + "\n")
+    else:
+      if LISTING_ROUTE in have:
+        serve_off(LISTING_ROUTE)
+      if os.path.exists(published_path()):
+        os.unlink(published_path())
+    if os.path.exists(share_error_path()):
+      os.unlink(share_error_path())
+  except LocalError as error:
+    write_atomic(share_error_path(), str(error) + "\n")
+    if force:
+      raise
+
+
+def cmd_share(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local share", description="Share a model with the other machines on your tailnet")
+  parser.add_argument("recipe", nargs="?")
+  parser.add_argument("--off", action="store_true", help="stop sharing it")
+  parser.add_argument("--export", action="store_true", help=argparse.SUPPRESS)
+  args = parser.parse_args(argv)
+  if args.export:
+    # Read by `pair` on the other end of an SSH connection: the only way the
+    # key leaves this machine.
+    status = tailscale_status()
+    dns = self_dns(status)
+    print(json.dumps({"schema": NETWORK_SCHEMA, "host": dns.split(".")[0], "dns": dns, "key": ensure_key(), "shared": shared_recipes()}))
+    return 0
+  catalog = load_catalog()
+  profile = machine_profile()
+  if not args.recipe:
+    shares = shared_recipes()
+    if not shares:
+      say("Nothing is shared. Share a model with: omarchy agent local share <recipe>")
+    for rid in shares:
+      say(f"{rid}: https://{self_dns()}{SHARE_ROOT}/{rid}/v1")
+    return 0
+  rid = args.recipe
+  if not ID_RE.match(rid):
+    raise LocalError("Not a recipe id")
+  shares = set(shared_recipes())
+  if args.off:
+    shares.discard(rid)
+  else:
+    if not load_model(rid):
+      raise LocalError(f"{rid} isn't set up. Run: omarchy agent local use {rid}")
+    self_dns()
+    shares.add(rid)
+  save_shares(shares)
+  try:
+    record = write_status(catalog, profile, publish=False)
+    publish_shares(record, catalog, profile, force=True)
+  finally:
+    write_status(catalog, profile, publish=False)
+  if args.off:
+    say(f"{rid} is no longer shared")
+  else:
+    say(f"Sharing {rid} on your tailnet at https://{self_dns()}{SHARE_ROOT}/{rid}/v1")
+  return 0
+
+
+# ---------------------------------------------------------------- tailnet clients
+
+
+def remotes_dir():
+  return os.path.join(config_dir(), "remotes")
+
+
+def remote_key_path(host):
+  return os.path.join(remotes_dir(), f"{host}.key")
+
+
+def load_remotes():
+  """Paired hosts: short host name -> {host, dns, ssh, paired_ms}."""
+  remotes = {}
+  if not os.path.isdir(remotes_dir()):
+    return remotes
+  for name in sorted(os.listdir(remotes_dir())):
+    if not name.endswith(".json") or not HOST_RE.match(name[:-5]):
+      continue
+    try:
+      with open(os.path.join(remotes_dir(), name)) as handle:
+        remote = json.load(handle)
+    except (OSError, ValueError):
+      continue
+    if isinstance(remote, dict) and remote.get("host") == name[:-5] and DNS_RE.match(str(remote.get("dns", ""))) and os.path.isfile(remote_key_path(name[:-5])):
+      remotes[name[:-5]] = remote
+  return remotes
+
+
+def network_path():
+  return os.path.join(state_dir(), "network.json")
+
+
+def load_network():
+  try:
+    with open(network_path()) as handle:
+      network = json.load(handle)
+  except (OSError, ValueError):
+    return {"hosts": {}, "models": {}}
+  if not isinstance(network, dict) or not isinstance(network.get("hosts"), dict) or not isinstance(network.get("models"), dict):
+    return {"hosts": {}, "models": {}}
+  return network
+
+
+def _clean(value, limit=120):
+  return CONTROL_RE.sub("", str(value or ""))[:limit]
+
+
+def _number(value):
+  try:
+    number = float(value)
+  except (TypeError, ValueError):
+    return None
+  return number if number == number and abs(number) < 1e15 else None
+
+
+def clean_listing(listing, dns):
+  """A peer's models.json as this machine will trust it: known shapes only,
+  IDs it can put in a path, and text without control characters."""
+  if not isinstance(listing, dict) or listing.get("schema") != NETWORK_SCHEMA or not isinstance(listing.get("models"), list):
+    raise LocalError("Not an Omarchy model listing")
+  models = []
+  for model in listing["models"][:64]:
+    if not isinstance(model, dict) or not ID_RE.match(str(model.get("recipe", ""))):
+      continue
+    observed = model.get("observed") if isinstance(model.get("observed"), dict) else {}
+    inputs = [value for value in model.get("input") or ["text"] if value in INPUTS] if isinstance(model.get("input"), list) else ["text"]
+    ctx = _number(model.get("ctx"))
+    models.append({
+      "recipe": model["recipe"],
+      "name": _clean(model.get("name") or model["recipe"]),
+      "vendor": model.get("vendor") if ID_RE.match(str(model.get("vendor", ""))) else "",
+      "ctx": int(ctx) if ctx and ctx > 0 else 0,
+      "input": inputs or ["text"],
+      "unit": model.get("unit") if model.get("unit") in REMOTE_UNITS else "inactive",
+      "error": _clean(model.get("error"), 300),
+      "fits": model.get("fits") is not False,
+      "since_ms": _number(model.get("since_ms")),
+      "expected_load_seconds": _number(model.get("expected_load_seconds")),
+      "expected_stop_seconds": _number(model.get("expected_stop_seconds")),
+      "observed": {key: _number(observed.get(key)) for key in ("load_seconds", "ram_used_gib", "gpu_used_gib")} if observed else None,
+      "decode_tok_s": _number(model.get("decode_tok_s")),
+      "prefill_tok_s": _number(model.get("prefill_tok_s")),
+    })
+  return {"ram_total_gib": _number(listing.get("ram_total_gib")), "models": models}
+
+
+def fetch_listing(dns):
+  """(state, listing, error): online with its models, not_sharing, or unreachable."""
+  status, body = http_status(f"https://{dns}{LISTING_ROUTE}", timeout=LISTING_TIMEOUT)
+  # Tailscale stops listening on 443 once a host's last serve route goes, so
+  # an online host refusing the connection simply shares nothing.
+  if status == 404 or (status == 0 and b"Connection refused" in body):
+    return "not_sharing", None, ""
+  if status != 200:
+    return "unreachable", None, f"HTTP {status}" if status else body.decode(errors="replace")[:200]
+  try:
+    return "online", clean_listing(json.loads(body), dns), ""
+  except (ValueError, LocalError) as error:
+    return "unreachable", None, str(error)[:200]
+
+
+def remote_record(host, dns, model, paired, ram_total_gib, last_seen_ms):
+  rid = model["recipe"]
+  return {
+    **model,
+    "id": f"{host}/{rid}",
+    "host": host,
+    "dns": dns,
+    "paired": paired,
+    "endpoint": f"https://{dns}{SHARE_ROOT}/{rid}/v1",
+    "ram_total_gib": ram_total_gib,
+    "last_seen_ms": last_seen_ms,
+    # Set while the host can't be reached: why, for the line that says so.
+    "offline": "",
+  }
+
+
+def survey_network(previous, now=None):
+  """Every model shared on the tailnet, plus the ones seen before whose host
+  is away now. `previous` is the last network.json."""
+  now = now or int(time.time() * 1000)
+  status = tailscale_status()
+  remotes = load_remotes()
+  hosts, models = {}, {}
+  me = node_dns((status or {}).get("Self"))
+  peers = {}
+  for node in ((status or {}).get("Peer") or {}).values():
+    dns = node_dns(node)
+    if dns and dns != me and node.get("OS") == "linux":
+      peers[dns.split(".")[0]] = (dns, node.get("Online") is True)
+  for host, remote in remotes.items():
+    peers.setdefault(host, (remote["dns"], False))
+  online = {host: dns for host, (dns, up) in peers.items() if up}
+  with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+    answers = dict(zip(online, pool.map(fetch_listing, online.values())))
+  for host, (dns, up) in sorted(peers.items()):
+    paired = host in remotes
+    before = previous.get("hosts", {}).get(host) or {}
+    state, listing, error = answers.get(host, ("offline", None, ""))
+    if state == "online":
+      hosts[host] = {"host": host, "dns": dns, "paired": paired, "state": "online", "error": "", "last_seen_ms": now, "ram_total_gib": listing["ram_total_gib"]}
+      for model in listing["models"]:
+        record = remote_record(host, dns, model, paired, listing["ram_total_gib"], now)
+        models[record["id"]] = record
+      continue
+    if state == "not_sharing" and not paired:
+      continue
+    last_seen = before.get("last_seen_ms")
+    if not paired and not (isinstance(last_seen, (int, float)) and now - last_seen < FORGET_UNPAIRED_MS):
+      continue
+    hosts[host] = {"host": host, "dns": dns, "paired": paired, "state": "not_sharing" if state == "not_sharing" else "offline" if state == "offline" else "unreachable",
+                   "error": error, "last_seen_ms": last_seen, "ram_total_gib": before.get("ram_total_gib")}
+    if state == "not_sharing":
+      continue
+    # Away: its models keep their lines, marked offline, as last seen.
+    reason = "offline" if state == "offline" else "unreachable"
+    for mid, model in previous.get("models", {}).items():
+      if isinstance(model, dict) and model.get("host") == host and isinstance(model.get("recipe"), str) and ID_RE.match(model["recipe"]):
+        models[mid] = {**model, "paired": paired, "offline": reason, "unit": "inactive", "since_ms": None}
+  return {"schema": NETWORK_SCHEMA, "updated_ms": now, "tailnet": status is not None, "self": me.split(".")[0] if me else "", "hosts": hosts, "models": models}
+
+
+def write_network(transitions=None, forget=None):
+  """Survey the tailnet and rewrite network.json, which the panel watches.
+  `transitions` marks a remote start or stop at once, before the host's
+  listing says so."""
+  ensure_dir(state_dir())
+  with open(os.path.join(state_dir(), "network.lock"), "w") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    previous = load_network()
+    if forget:
+      previous["hosts"].pop(forget, None)
+      previous["models"] = {mid: m for mid, m in previous["models"].items() if not (isinstance(m, dict) and m.get("host") == forget)}
+    network = survey_network(previous)
+    now = int(time.time() * 1000)
+    for mid, unit in (transitions or {}).items():
+      model = network["models"].get(mid)
+      if model and not model["offline"]:
+        model["unit"] = unit
+        model["since_ms"] = now
+        model["error"] = ""
+    write_atomic(network_path(), json.dumps(network, indent=2) + "\n")
+    return network
+
+
+def split_remote_id(value):
+  host, _, rid = str(value or "").partition("/")
+  if not HOST_RE.match(host) or not ID_RE.match(rid):
+    raise LocalError("A network model is named host/recipe")
+  return host, rid
+
+
+def resolve_remote(mid, running_only=True):
+  """A paired host's model, as its host lists it right now."""
+  host, rid = split_remote_id(mid)
+  remote = load_remotes().get(host)
+  if not remote:
+    raise LocalError(f"{host} isn't paired. Run: omarchy agent local pair {host}")
+  state, listing, error = fetch_listing(remote["dns"])
+  if state != "online":
+    raise LocalError(f"{host} doesn't share models right now" if state == "not_sharing" else f"{host} isn't reachable{': ' + error if error else ''}")
+  for model in listing["models"]:
+    if model["recipe"] == rid:
+      if running_only and model["unit"] != "active":
+        raise LocalError(f"{rid} isn't running on {host}")
+      return remote_record(host, remote["dns"], model, True, listing["ram_total_gib"], int(time.time() * 1000))
+  raise LocalError(f"{host} doesn't share {rid}")
+
+
+def ssh_command(remote, *argv, interactive=False):
+  target = remote.get("ssh") or remote["dns"]
+  if not SSH_TARGET_RE.match(target):
+    raise LocalError("Not an SSH target")
+  options = ["-o", "ConnectTimeout=10"] + ([] if interactive else ["-o", "BatchMode=yes"])
+  return ["ssh", *options, "--", target, shlex.join(["omarchy-agent-local", *argv])]
+
+
+def cmd_pair(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local pair", description="Use the models another machine on your tailnet shares")
+  parser.add_argument("host", help="its tailnet name, or an SSH host that reaches it")
+  args = parser.parse_args(argv)
+  target = args.host
+  if not SSH_TARGET_RE.match(target):
+    raise LocalError("Not a host name")
+  say(f"Pairing with {target} over SSH")
+  result = subprocess.run(ssh_command({"ssh": target, "dns": ""}, "share", "--export", interactive=True), stdout=subprocess.PIPE, text=True)
+  if result.returncode != 0:
+    raise LocalError(f"Can't reach omarchy-agent-local on {target} over SSH")
+  try:
+    export = json.loads(result.stdout.strip().splitlines()[-1])
+    host, dns, key = export["host"], export["dns"], export["key"]
+  except (ValueError, KeyError, IndexError, TypeError):
+    raise LocalError(f"{target} answered with something other than its sharing details")
+  if not HOST_RE.match(str(host)) or not DNS_RE.match(str(dns)) or not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key):
+    raise LocalError(f"{target} answered with an invalid host name or key")
+  ensure_dir(remotes_dir(), 0o700)
+  write_atomic(remote_key_path(host), key, mode=0o600)
+  write_atomic(os.path.join(remotes_dir(), f"{host}.json"), json.dumps({"host": host, "dns": dns, "ssh": target, "paired_ms": int(time.time() * 1000)}, indent=2) + "\n", mode=0o600)
+  network = write_network()
+  shared = [m for m in network["models"].values() if m["host"] == host]
+  if shared:
+    say(f"Paired with {host}: " + ", ".join(m["recipe"] + ("" if m["offline"] else f" ({m['unit']})") for m in shared))
+  else:
+    say(f"Paired with {host}. It shares no models yet; on {host}, run: omarchy agent local share <recipe>")
+  return 0
+
+
+def cmd_forget(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local forget", description="Unpair a host and drop its models from the panel")
+  parser.add_argument("host")
+  args = parser.parse_args(argv)
+  host = args.host
+  if not HOST_RE.match(host):
+    raise LocalError("Not a host name")
+  for path in (os.path.join(remotes_dir(), f"{host}.json"), remote_key_path(host)):
+    if os.path.exists(path):
+      os.unlink(path)
+  write_network(forget=host)
+  say(f"Forgot {host}")
+  return 0
+
+
+def cmd_remote(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local remote", description="Start or stop a model on a paired host")
+  parser.add_argument("action", choices=("start", "stop"))
+  parser.add_argument("model", help="host/recipe")
+  args = parser.parse_args(argv)
+  host, rid = split_remote_id(args.model)
+  remote = load_remotes().get(host)
+  if not remote:
+    raise LocalError(f"{host} isn't paired. Run: omarchy agent local pair {host}")
+  write_network({args.model: "activating" if args.action == "start" else "deactivating"})
+  try:
+    result = subprocess.run(ssh_command(remote, args.action, rid), capture_output=True, text=True)
+  finally:
+    write_network()
+  if result.returncode != 0:
+    raise LocalError((result.stderr.strip().splitlines() or [f"{args.action} failed on {host}"])[-1].removeprefix("Error: "))
+  say(f"{rid} {'started' if args.action == 'start' else 'stopped'} on {host}")
+  return 0
+
+
+def cmd_network(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local network", description="List the models shared on your tailnet")
+  parser.add_argument("--json", action="store_true")
+  parser.add_argument("--write", action="store_true", help=argparse.SUPPRESS)
+  args = parser.parse_args(argv)
+  network = write_network()
+  if args.write:
+    return 0
+  if args.json:
+    print(json.dumps(network, indent=2))
+    return 0
+  if not network["tailnet"]:
+    say("This machine isn't on a tailnet. Run: tailscale up")
+    return 0
+  if not network["models"]:
+    say("No machine on your tailnet shares a model. On one that runs a model: omarchy agent local share <recipe>")
+  for mid, model in sorted(network["models"].items()):
+    state = model["offline"] or {"active": "running", "activating": "loading", "deactivating": "stopping"}.get(model["unit"], model["unit"])
+    pairing = "" if model["paired"] else f" · pair with: omarchy agent local pair {model['host']}"
+    say(f"{mid} ({model['name']}): {state} · context {model['ctx']}{pairing}")
+  return 0
+
+
 OVERLAY_PROVIDER = "llamacpp"
+
+
+def overlay_target(rid=None):
+  """The running model an overlay points at: a local recipe, or host/recipe
+  on a paired machine of the tailnet."""
+  if rid and "/" in rid:
+    model = resolve_remote(rid)
+    return {
+      "provider": f"{OVERLAY_PROVIDER}-{model['host']}",
+      "provider_name": f"Omarchy model on {model['host']}",
+      "base_url": model["endpoint"],
+      "key_path": remote_key_path(model["host"]),
+      "model": model["recipe"],
+      "name": model["name"],
+      "ctx": model["ctx"],
+      "input": model["input"],
+      "file": f"{model['host']}--{model['recipe']}",
+    }
+  manifest = resolve_model(rid, running_only=True)
+  rid = manifest["recipe_id"]
+  return {
+    "provider": OVERLAY_PROVIDER,
+    "provider_name": "Omarchy local model",
+    "base_url": endpoint(rid),
+    "key_path": key_path(),
+    "model": rid,
+    "name": manifest["recipe"].get("name", rid),
+    "ctx": manifest["variant"]["ctx"],
+    "input": model_inputs(manifest),
+    "file": rid,
+  }
 
 
 def pi_overlay(rid=None):
   """A pi extension registering a running model, loaded only by local launches."""
-  manifest = resolve_model(rid, running_only=True)
-  rid = manifest["recipe_id"]
+  target = overlay_target(rid)
   provider = {
-    "name": "Omarchy local model",
-    "baseUrl": endpoint(rid),
-    "apiKey": "!cat -- " + shlex.quote(key_path()),
+    "name": target["provider_name"],
+    "baseUrl": target["base_url"],
+    "apiKey": "!cat -- " + shlex.quote(target["key_path"]),
     "api": "openai-completions",
     "models": [{
       "type": "chat",
-      "id": rid,
-      "name": manifest["recipe"].get("name", rid),
+      "id": target["model"],
+      "name": target["name"],
       "reasoning": True,
-      "input": model_inputs(manifest),
+      "input": target["input"],
       "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-      "contextWindow": manifest["variant"]["ctx"],
+      "contextWindow": target["ctx"],
       "maxTokens": 16384,
     }],
   }
   source = (
     "// Generated by omarchy-agent-local overlay for `omarchy agent --local`; rewritten on every launch.\n"
     "export default function (pi) {\n"
-    f"  pi.registerProvider({json.dumps(OVERLAY_PROVIDER)}, {json.dumps(provider, indent=2)});\n"
+    f"  pi.registerProvider({json.dumps(target['provider'])}, {json.dumps(provider, indent=2)});\n"
     "}\n"
   )
-  # One file per recipe: launches of two models close together must not
+  # One file per model: launches of two models close together must not
   # swap each other's overlay before their agents read it.
-  path = os.path.join(config_dir(), "overlays", f"pi-{rid}.ts")
+  path = os.path.join(config_dir(), "overlays", f"pi-{target['file']}.ts")
   write_atomic(path, source)
-  return path, OVERLAY_PROVIDER, rid
+  return path, target["provider"], target["model"]
 
 
 def model_inputs(manifest):
@@ -2202,33 +2792,32 @@ def model_inputs(manifest):
 
 
 def opencode_overlay(rid=None):
-  manifest = resolve_model(rid, running_only=True)
-  rid = manifest["recipe_id"]
+  target = overlay_target(rid)
   overlay = {
     "$schema": "https://opencode.ai/config.json",
     "provider": {
-      OVERLAY_PROVIDER: {
+      target["provider"]: {
         "npm": "@ai-sdk/openai-compatible",
-        "name": "Omarchy local model",
-        "options": {"baseURL": endpoint(rid), "apiKey": "{file:" + key_path() + "}"},
-        "models": {rid: {
-          "name": manifest["recipe"].get("name", rid),
-          "limit": {"context": manifest["variant"]["ctx"], "output": 16384},
-          "attachment": "image" in model_inputs(manifest),
-          "modalities": {"input": model_inputs(manifest), "output": ["text"]},
+        "name": target["provider_name"],
+        "options": {"baseURL": target["base_url"], "apiKey": "{file:" + target["key_path"] + "}"},
+        "models": {target["model"]: {
+          "name": target["name"],
+          "limit": {"context": target["ctx"], "output": 16384},
+          "attachment": "image" in target["input"],
+          "modalities": {"input": target["input"], "output": ["text"]},
         }},
       }
     },
   }
-  path = os.path.join(config_dir(), "overlays", f"opencode-{rid}.json")
+  path = os.path.join(config_dir(), "overlays", f"opencode-{target['file']}.json")
   write_atomic(path, json.dumps(overlay, indent=2) + "\n")
-  return path, OVERLAY_PROVIDER, rid
+  return path, target["provider"], target["model"]
 
 
 def cmd_overlay(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local overlay")
   parser.add_argument("agent", choices=("opencode", "pi"))
-  parser.add_argument("recipe", nargs="?", help="the running model (default: the last one started)")
+  parser.add_argument("recipe", nargs="?", help="the running model, or host/recipe on a paired machine (default: the last one started here)")
   args = parser.parse_args(argv)
   for line in (pi_overlay if args.agent == "pi" else opencode_overlay)(args.recipe):
     print(line)
@@ -2242,6 +2831,11 @@ COMMANDS = {
   "start": cmd_start,
   "stop": cmd_stop,
   "remove": cmd_remove,
+  "share": cmd_share,
+  "network": cmd_network,
+  "pair": cmd_pair,
+  "forget": cmd_forget,
+  "remote": cmd_remote,
   # Plumbing for the panel, omarchy agent, omarchy update and catalog
   # maintainers; they run but aren't listed.
   "profile": cmd_profile,
@@ -2257,6 +2851,11 @@ SUMMARIES = {
   "start": "Start a model that's set up, the last one started by default",
   "stop": "Stop a model, or every running one",
   "remove": "Remove a model's weights, manifests and unused image",
+  "share": "Share a model with the other machines on your tailnet, or stop with --off",
+  "network": "List the models shared on your tailnet, including hosts that are offline",
+  "pair": "Pair with a machine over SSH to use the models it shares",
+  "forget": "Unpair a machine and drop its models",
+  "remote": "Start or stop a model on a paired machine: remote start host/recipe",
 }
 
 
