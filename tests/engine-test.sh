@@ -807,7 +807,8 @@ bolt = "nemotron-3.5-bolt-tensorfold"
 with patch.object(a, "load_remotes", return_value={"me@dgx": dgx}):
   rows = {row["id"]: row for row in a.recipe_listing(cat, here)}
   check("a recipe only the remote runs is listed as available there", rows[bolt]["available"] and rows[bolt]["remote"] == "me@dgx" and "me@dgx" in rows[bolt]["summary"])
-  check("what the remote can't run either stays unavailable", not rows["qwen3.8-27b-gufo"]["available"] and "remote" not in rows["qwen3.8-27b-gufo"])
+  check("what the remote can't run either stays unavailable", not rows["qwen3.8-27b-gufo"]["available"] and "remote" not in rows["qwen3.8-27b-gufo"]
+      and rows["qwen3.8-27b-gufo"]["reason"].endswith("; on me@dgx: runtime gufo can't run on nvidia-gb10"))
   check("use places a recipe this machine can't run on the remote", a.remote_placement(cat, bolt, here) == "me@dgx" and a.remote_placement(cat, "best", here) == "me@dgx")
   check("use keeps what this machine runs here", a.remote_placement(cat, bolt, dgx) is None)
   raises("use --on names a remote that's set up", lambda: a.remote_placement(cat, bolt, here, on="other"), "isn't set up as a remote")

@@ -1030,6 +1030,8 @@ def recipe_listing(catalog, profile, running=(), remotes=True):
     for row, far in zip(rows, recipe_listing(catalog, there, running, remotes=False)):
       if not row["available"] and far["available"]:
         row.update(far, summary=f"{far['summary']} Runs on {host}.", remote=host, best=far["best"] and best_id is None)
+      elif not row["available"] and not row.get("remote"):
+        row["reason"] += f"; on {host}: {far['reason']}"
   return rows
 
 
