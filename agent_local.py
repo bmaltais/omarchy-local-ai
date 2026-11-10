@@ -2253,7 +2253,8 @@ def cmd_link_setup(argv):
   profile = machine_profile()
   if NVIDIA_UNIFIED_FAMILIES.get(profile["platform"]) not in PAIR_FAMILIES:
     raise LocalError("Pairs are supported between DGX Sparks (GB10) only")
-  peer = args.peer or (cached_pair(profile) or {}).get("peer")
+  available = link_probe(profile) if not args.peer and not cached_pair(profile) else {}
+  peer = args.peer or (cached_pair(profile) or {}).get("peer") or available.get("address")
   if not peer or not PEER_RE.match(peer):
     raise LocalError("Name the other Spark as SSH reaches it, e.g.: omarchy agent local link setup spark-1234.local")
   if not local_ports():
@@ -2303,13 +2304,20 @@ def cmd_link_setup(argv):
 def cmd_link(argv):
   if argv[:1] == ["setup"]:
     return cmd_link_setup(argv[1:])
+  if argv[:1] == ["notify"]:
+    link_notify(machine_profile())
+    return 0
   parser = argparse.ArgumentParser(prog="omarchy agent local link")
   parser.add_argument("--json", action="store_true")
   args = parser.parse_args(argv)
   profile = machine_profile()
   pair = profile.get("pair")
+  state = link_probe(profile)
   if args.json:
-    print(json.dumps(pair, indent=2))
+    print(json.dumps(pair or state, indent=2))
+    return 0
+  if state["state"] == "available":
+    say(f"Another Spark is on the cable: {state['host'] or state['address']}. Set both up with: omarchy agent local link setup")
     return 0
   if not pair:
     say("No Spark is linked to this one yet: cable them, then run omarchy agent local link setup <the other Spark>")
@@ -2319,6 +2327,116 @@ def cmd_link(argv):
   say(f"  here  {here['addr']} on {here['dev']}, RoCE {','.join(here['hcas'])} (GID {here['gid']})")
   say(f"  there {there['addr']} on {there['dev']}, RoCE {','.join(there['hcas'])} (GID {there['gid']})")
   return 0
+
+
+# ---------------------------------------------------------------- noticing a newly cabled Spark
+#
+# Before link setup there is no IPv4 on the cable and no key, but IPv6 link-local always works:
+# every host on a cable port answers the all-nodes address. Answers from addresses that aren't
+# this machine's are the other end. The agents panel offers setup when status.json's `link`
+# says one is available.
+
+def link_path():
+  return os.path.join(state_dir(), "link.json")
+
+
+def _output(argv):
+  try:
+    return subprocess.run(argv, capture_output=True, text=True, timeout=5).stdout
+  except (OSError, subprocess.SubprocessError):
+    return ""
+
+
+def own_link_local(ip_json):
+  """This machine's own link-local addresses, from `ip -6 -j addr`."""
+  try:
+    return {a["local"] for link in json.loads(ip_json or "[]") for a in link.get("addr_info", []) if a.get("scope") == "link"}
+  except (ValueError, TypeError, KeyError, AttributeError):
+    return set()
+
+
+def ping_answers(ping_output, own):
+  """The link-local addresses answering an all-nodes ping, other than this machine's own."""
+  return [address for address in dict.fromkeys(re.findall(r"from (fe80:[0-9a-f:]+)%", ping_output)) if address not in own]
+
+
+def mdns_ssh_hosts(avahi_output):
+  """Host names by link-local address, from `avahi-browse -rpt _ssh._tcp`."""
+  names = {}
+  for line in avahi_output.splitlines():
+    fields = line.split(";")
+    if len(fields) > 7 and fields[0] == "=" and fields[2] == "IPv6" and fields[7].startswith("fe80:"):
+      names[fields[7]] = fields[6].removesuffix(".local")
+  return names
+
+
+def cable_neighbors():
+  """Link-local addresses answering on this machine's cable ports, other than its own, as
+  address%port, in the order they answered."""
+  own = own_link_local(_output(["ip", "-6", "-j", "addr"]))
+  if not own:
+    return []
+  return [f"{address}%{dev}" for dev in local_ports() for address in ping_answers(_output(["ping", "-6", "-n", "-w", "1", f"ff02::1%{dev}"]), own)]
+
+
+def mdns_names():
+  return mdns_ssh_hosts(_output(["avahi-browse", "-rpt", "_ssh._tcp"]))
+
+
+def link_probe(profile):
+  """What the cable shows now: a linked peer, another Spark waiting to be set up, or none.
+  Recorded in link.json for status.json."""
+  if NVIDIA_UNIFIED_FAMILIES.get(profile["platform"]) not in PAIR_FAMILIES:
+    state = {"state": "none"}
+  elif profile.get("pair"):
+    state = {"state": "linked", "host": profile["pair"]["host"]}
+  else:
+    neighbors = cable_neighbors()
+    if neighbors:
+      names = mdns_names()
+      # One machine answers from each of its cable addresses; the one mDNS names reads best.
+      address = next((n for n in neighbors if n.split("%")[0] in names), neighbors[0])
+      state = {"state": "available", "address": address, "host": names.get(address.split("%")[0])}
+    else:
+      state = {"state": "none"}
+  write_atomic(link_path(), json.dumps(state, indent=2) + "\n")
+  return state
+
+
+def link_notify(profile):
+  """Probes the cable and, the first time another Spark shows up waiting for setup, says so on
+  the desktop with an action that opens link setup in a terminal. From the NetworkManager
+  dispatcher hook (system/90-omarchy-local-ai-link) when a cable port comes up."""
+  ensure_dir(state_dir())
+  # Both cable ports come up together, each running this: one at a time, against its own record
+  # of what it announced, whichever probe found the Spark first.
+  with open(os.path.join(state_dir(), "link-notified"), "a+") as record:
+    fcntl.flock(record, fcntl.LOCK_EX)
+    record.seek(0)
+    announced = record.read().strip()
+    state = link_probe(profile)
+    if state["state"] != "available" or announced == state["address"]:
+      return state
+    name = state["host"] or "another DGX Spark"
+    sent = subprocess.run(["omarchy-notification-send", "-g", "󰌘", "--app-name", "Local AI", f"{name} is connected to this Spark",
+                           "Set both up to run models across them",
+                           "--exec", "omarchy-launch-floating-terminal-with-presentation", "omarchy-agent-local link setup"],
+                          capture_output=True)
+    # Only what reached the desktop counts as announced; a failed send is tried again next time.
+    if sent.returncode != 0:
+      return state
+    record.seek(0)
+    record.truncate()
+    record.write(state["address"] + "\n")
+  return state
+
+
+def link_state():
+  try:
+    with open(link_path()) as handle:
+      return json.load(handle)
+  except (OSError, ValueError):
+    return {"state": "none"}
 
 
 # ---------------------------------------------------------------- current manifests
@@ -2826,6 +2944,8 @@ def status_record(catalog, profile):
     "ram_total_gib": round(gib(meminfo().get("MemTotal", 0)), 1),
     "catalog_version": catalog.version,
     "best": None,
+    # A Spark on the cable: none, available (not set up yet: address, host) or linked (host).
+    "link": {"state": "linked", "host": profile["pair"]["host"]} if profile.get("pair") else link_state(),
   }
   try:
     record["best"] = resolve_best(catalog, profile)[0]
@@ -3280,6 +3400,7 @@ def cmd_refresh(argv):
   args = parser.parse_args(argv)
   catalog = load_catalog()
   profile = machine_profile()
+  link_probe(profile)
   refresh_list_cache(catalog, profile)
   write_status(catalog, profile)
   if not args.quiet:
