@@ -1,0 +1,69 @@
+name = "Qwen3.8 27B Abliterated"
+summary = "Qwen3.8 27B with its refusal direction removed (huihui-ai's abliteration), 4-bit, with DFlash2 drafting. Answers what the original declines. Community weights, not Qwen's."
+runtime = "tensorfold"
+vendor = "qwen"
+architecture = "dense"
+# Screenshots and photos through the checkpoint's Qwen-VL tower, which --vision loads.
+input = ["text", "image"]
+
+# Not measured itself: the same 2180 tensors at the same 4-bit size as qwen3.8-27b-tensorfold's
+# weights, whose measurements stand in. Drafting may accept fewer tokens: DFlash2 was trained on
+# the original model.
+[[hardware]]
+gpu = "nvidia-gb10"
+ram_class = 128
+measured = "measurements/qwen3.8-27b-tensorfold-gb10-128.toml"
+
+[[hardware]]
+gpu = "nvidia-n1x"
+ram_class = 64
+measured = "measurements/qwen3.8-27b-tensorfold-n1x-64.toml"
+
+# daguoagi's MLX affine 4-bit, group-64 export of huihui-ai/Huihui-Qwen3.8-27B-abliterated: the
+# layout TensorFold's own export has, vision tower included. The server loads the directory.
+[[artifacts]]
+repo = "daguoagi/Huihui-Qwen3.8-27B-abliterated-MLX-4bit"
+revision = "04e51e1be8e1388f38fff8ec567a6e3277769e76"
+license = "apache-2.0"
+files = ["*.safetensors", "*.json", "chat_template.jinja", "vocab.json"]
+dest = "target"
+model = "."
+
+# z-lab's DFlash2 block drafter: a tree of draft tokens a round, checked by the target.
+[[artifacts]]
+repo = "z-lab/Qwen3.8-27B-DFlash2"
+revision = "50307d4c4cde6860d4eee73e2547cd786fe8e8a4"
+license = "apache-2.0"
+files = ["*.safetensors", "config.json"]
+dest = "drafter"
+draft = "."
+
+# Measured on a DGX Spark with a 194K-token conversation and its follow-up turn: 70 GiB at load (three
+# streams' bf16 attention caches, 16.9 GiB each at the full window, are reserved up front), about
+# 94 GiB at peak once the 24 GiB prompt cache in host memory has filled.
+# Three streams and a 24 GiB prompt cache rather than four streams and 8 GiB: the cache keeps
+# conversations where their last turn ended (64 KiB a token), so a follow-up after 194K tokens starts
+# in 3.4 s instead of 241 s, for two or three long agent sessions at once.
+[[variant]]
+ctx = 262144
+peak_ram_gib = 95
+peak_gpu_gib = 86
+args = ["--parallel", "3", "--prompt-cache-gib", "24"]
+
+# For 64 GB: one stream at a 131K window and a 12 GiB prompt cache, which holds more than a full
+# window, so an agent's follow-up resumes (1.7 s against 133 s after 95K tokens). The full 262K
+# window would leave 4 GiB for the cache and resume nothing past about 65K tokens. Measured on an
+# N1x laptop with two long conversations filling the cache: 27.6 GiB at load, 38.5 GiB at peak.
+[[variant]]
+ctx = 131072
+peak_ram_gib = 40
+peak_gpu_gib = 30
+args = ["--parallel", "1", "--prompt-cache-gib", "12"]
+
+[sampling]
+temperature = 1.0
+top_p = 0.95
+top_k = 20
+
+[server]
+args = ["--max-tokens", "32768", "--vision"]
