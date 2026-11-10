@@ -2340,38 +2340,47 @@ def link_path():
   return os.path.join(state_dir(), "link.json")
 
 
-def cable_neighbors():
-  """Link-local addresses answering on this machine's cable ports, other than its own, as
-  address%port, in the order they answered."""
+def _output(argv):
   try:
-    own = {a["local"] for link in json.loads(subprocess.run(["ip", "-6", "-j", "addr"], capture_output=True, text=True, timeout=5).stdout or "[]")
-           for a in link.get("addr_info", []) if a.get("scope") == "link"}
-  except (OSError, subprocess.SubprocessError, ValueError):
-    return []
-  found = []
-  for dev in local_ports():
-    try:
-      out = subprocess.run(["ping", "-6", "-n", "-w", "1", f"ff02::1%{dev}"], capture_output=True, text=True, timeout=5).stdout
-    except (OSError, subprocess.SubprocessError):
-      continue
-    for address in dict.fromkeys(re.findall(r"from (fe80:[0-9a-f:]+)%", out)):
-      if address not in own:
-        found.append(f"{address}%{dev}")
-  return found
-
-
-def mdns_names():
-  """Host names mDNS announces SSH for, by link-local address."""
-  try:
-    out = subprocess.run(["avahi-browse", "-rpt", "_ssh._tcp"], capture_output=True, text=True, timeout=5).stdout
+    return subprocess.run(argv, capture_output=True, text=True, timeout=5).stdout
   except (OSError, subprocess.SubprocessError):
-    return {}
+    return ""
+
+
+def own_link_local(ip_json):
+  """This machine's own link-local addresses, from `ip -6 -j addr`."""
+  try:
+    return {a["local"] for link in json.loads(ip_json or "[]") for a in link.get("addr_info", []) if a.get("scope") == "link"}
+  except (ValueError, TypeError, KeyError, AttributeError):
+    return set()
+
+
+def ping_answers(ping_output, own):
+  """The link-local addresses answering an all-nodes ping, other than this machine's own."""
+  return [address for address in dict.fromkeys(re.findall(r"from (fe80:[0-9a-f:]+)%", ping_output)) if address not in own]
+
+
+def mdns_ssh_hosts(avahi_output):
+  """Host names by link-local address, from `avahi-browse -rpt _ssh._tcp`."""
   names = {}
-  for line in out.splitlines():
+  for line in avahi_output.splitlines():
     fields = line.split(";")
     if len(fields) > 7 and fields[0] == "=" and fields[2] == "IPv6" and fields[7].startswith("fe80:"):
       names[fields[7]] = fields[6].removesuffix(".local")
   return names
+
+
+def cable_neighbors():
+  """Link-local addresses answering on this machine's cable ports, other than its own, as
+  address%port, in the order they answered."""
+  own = own_link_local(_output(["ip", "-6", "-j", "addr"]))
+  if not own:
+    return []
+  return [f"{address}%{dev}" for dev in local_ports() for address in ping_answers(_output(["ping", "-6", "-n", "-w", "1", f"ff02::1%{dev}"]), own)]
+
+
+def mdns_names():
+  return mdns_ssh_hosts(_output(["avahi-browse", "-rpt", "_ssh._tcp"]))
 
 
 def link_probe(profile):
@@ -2398,15 +2407,24 @@ def link_notify(profile):
   """Probes the cable and, the first time another Spark shows up waiting for setup, says so on
   the desktop with an action that opens link setup in a terminal. From the NetworkManager
   dispatcher hook (system/90-omarchy-local-ai-link) when a cable port comes up."""
-  previous = link_state()
-  state = link_probe(profile)
-  if state["state"] != "available" or previous.get("address") == state["address"]:
-    return state
-  name = state["host"] or "another DGX Spark"
-  subprocess.run(["omarchy-notification-send", "-g", "󰌘", "--app-name", "Local AI", f"{name} is connected to this Spark",
-                  "Set both up to run models across them",
-                  "--exec", "omarchy-launch-floating-terminal-with-presentation", "omarchy-agent-local link setup"],
-                 capture_output=True)
+  ensure_dir(state_dir())
+  # Both cable ports come up together, each running this: one at a time, against its own record
+  # of what it announced, whichever probe found the Spark first.
+  with open(os.path.join(state_dir(), "link-notified"), "a+") as record:
+    fcntl.flock(record, fcntl.LOCK_EX)
+    record.seek(0)
+    announced = record.read().strip()
+    state = link_probe(profile)
+    if state["state"] != "available" or announced == state["address"]:
+      return state
+    name = state["host"] or "another DGX Spark"
+    subprocess.run(["omarchy-notification-send", "-g", "󰌘", "--app-name", "Local AI", f"{name} is connected to this Spark",
+                    "Set both up to run models across them",
+                    "--exec", "omarchy-launch-floating-terminal-with-presentation", "omarchy-agent-local link setup"],
+                   capture_output=True)
+    record.seek(0)
+    record.truncate()
+    record.write(state["address"] + "\n")
   return state
 
 
@@ -2924,7 +2942,7 @@ def status_record(catalog, profile):
     "catalog_version": catalog.version,
     "best": None,
     # A Spark on the cable: none, available (not set up yet: address, host) or linked (host).
-    "link": link_state(),
+    "link": {"state": "linked", "host": profile["pair"]["host"]} if profile.get("pair") else link_state(),
   }
   try:
     record["best"] = resolve_best(catalog, profile)[0]
