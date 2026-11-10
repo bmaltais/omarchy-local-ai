@@ -626,6 +626,8 @@ check("agents default to a 16k reply cap", a.max_output_tokens({"recipe": recipe
 capped = {**copy.deepcopy(recipe), "server": {"args": ["--max-tokens", "32768", "--vision"]}}
 check("agents get the server's reply cap", a.max_output_tokens({"recipe": capped, "variant": {"ctx": 131072}}) == 32768)
 check("a variant's reply cap counts too", a.max_output_tokens({"recipe": recipe, "variant": {"ctx": 131072, "args": ["--max-tokens=65536"]}}) == 65536)
+shipped = tomllib.load(open(os.path.join(os.environ["ENGINE_ROOT"], "recipes", "qwen3.8-27b-tensorfold.toml"), "rb"))
+check("shipped recipes give agents a 64k reply cap", all(a.max_output_tokens({"recipe": shipped, "variant": v}) == 65536 for v in shipped["variant"]))
 check("the reply cap never exceeds the context", a.max_output_tokens({"recipe": capped, "variant": {"ctx": 8192}}) == 8192)
 with patch.object(a, "resolve_model", return_value={"recipe_id": "model", "recipe": capped, "variant": {"ctx": 131072}}):
   check("the pi overlay carries the server's reply cap", '"maxTokens": 32768' in open(a.pi_overlay("model")[0]).read())
