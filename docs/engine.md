@@ -162,7 +162,8 @@ given `--local-only` for a peer that's gone for good.
 
 `remote add <host>` prepares a machine reached over SSH to run models for this one: the
 SSH key and host setup of `link setup` (`HOST_SETUP`, as root through sudo there), a copy of
-this engine and catalog in `~/.local/share/omarchy-local-ai` (rsync, `.git` left out) and this
+this engine and catalog in `~/.local/share/omarchy-local-ai` (rsync, `.git` left out, sent again
+before each `use` there) and this
 machine's API key, written to the remote's key file and Podman secret. It records the host and
 its machine profile in `remotes.json`.
 
@@ -170,7 +171,8 @@ its machine profile in `remotes.json`.
 remote's variant, measurements and `remote` host. `use` places a recipe on the remote named by
 `--on`, else on the remote it was set up on, else, when this machine can't run it, on the first
 remote that can. The remote's engine sets it up, admits it and starts it as on any machine,
-through `use` over SSH. Here its manifest is the remote's, plus `remote: {host, port}`, and its
+through `use --as-remote` over SSH, whose progress the panel's row mirrors. A setup there that
+can't start yet records the remote's reason here. Here its manifest is the remote's, plus `remote: {host, port}`, and its
 unit (`~/.config/systemd/user/omarchy-agent-local-model-<recipe>.service`, not Quadlet) runs
 `start <recipe>` there as `ExecStartPre`, then forwards the model's port here to the remote's
 loopback port with `ssh -N -L`, ready once the port accepts connections. Its `ExecStopPost`

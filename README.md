@@ -52,7 +52,7 @@ omarchy agent local list                               # what only the remote ru
 omarchy agent local use nemotron-3.5-bolt-tensorfold   # set up there, reached here
 ```
 
-`remote add` gives the remote this machine's SSH key, the same host setup `link setup` gives a peer, a copy of this engine and catalog (in `~/.local/share/omarchy-local-ai`, run again after updating) and this machine's API key. `use` sends what this machine can't run to the remote (`--on <host>` sends anything), whose engine sets it up and starts it on its own loopback. Here the model is a unit that starts it there, forwards its usual port here to the remote's over SSH, and stops it there when stopped. A dropped connection reconnects without stopping the model.
+`remote add` gives the remote this machine's SSH key, the same host setup `link setup` gives a peer, a copy of this engine and catalog (in `~/.local/share/omarchy-local-ai`, refreshed before each setup there) and this machine's API key. `use` sends what this machine can't run to the remote (`--on <host>` sends anything), whose engine sets it up and starts it on its own loopback. Here the model is a unit that starts it there, forwards its usual port here to the remote's over SSH, and stops it there when stopped. A dropped connection reconnects without stopping the model.
 
 ## Catalog layout
 

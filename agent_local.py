@@ -2764,6 +2764,7 @@ def cmd_use(argv):
   parser.add_argument("--unqualified", action="store_true", help="run a recipe not measured on this machine class")
   parser.add_argument("--detach", action="store_true", help="set it up in the background; the agents panel shows its progress")
   parser.add_argument("--on", metavar="HOST", help="run it on this remote (default: a remote only for what this machine can't run)")
+  parser.add_argument("--as-remote", action="store_true", help=argparse.SUPPRESS)
   args = parser.parse_args(argv)
   catalog = load_catalog()
   profile = machine_profile()
@@ -2934,6 +2935,9 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
       refresh_list_cache(catalog, profile)
       write_status(catalog, profile)
       say("")
+      if args.as_remote:
+        say(f"Installed, but it can't start now: {error}")
+        return 0
       say(f"Installed {rid}, but it can't start now: {error}")
       first = "Stop another model, then press" if error.short.startswith(NOT_ENOUGH_MEMORY) else "Then press"
       say(f"{first} play in the agents panel or run: omarchy agent local start {rid}")
@@ -2946,6 +2950,9 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
   refresh_list_cache(catalog, profile)
   write_status(catalog, profile)
   say("")
+  if args.as_remote:
+    say(f"Loaded in {manifest['observed']['load_seconds']:.0f}s, using about {manifest['observed']['ram_used_gib']:.0f} GiB")
+    return 0
   say(f"Running {rid} at {endpoint(rid)} (model id {rid}, key in {key_path()})")
   say(f"Loaded in {manifest['observed']['load_seconds']:.0f}s, using about {manifest['observed']['ram_used_gib']:.0f} GiB")
   say(f"Manifest: {path}")
@@ -2976,7 +2983,9 @@ def cmd_list(argv):
     return 0
   gpu = profile["gpus"][0]["family"] if profile["gpus"] else "no GPU"
   paired = f" · linked to {profile['pair']['host']}" if profile.get("pair") else ""
-  say(f"Catalog {catalog.version} · this machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}{paired}")
+  remotes = "".join(f" · remote {host}: {', '.join(g['family'] for g in there.get('gpus', [])) or 'no GPU'}, {there.get('ram_class')} GB"
+                    for host, there in load_remotes().items())
+  say(f"Catalog {catalog.version} · this machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}{paired}{remotes}")
   for row in rows:
     marks = [mark for mark, on in (("best", row["best"]), ("running", row["active"]), ("installed", row["installed"])) if on]
     tier = f" · third-party ({row['publisher']})" if row["tier"] == "third-party" else ""
@@ -3736,6 +3745,36 @@ def remote_placement(catalog, target, profile, on=None):
   return next((host for host, there in remotes.items() if runs_on(catalog, target, there)), None)
 
 
+def sync_engine(host):
+  """The remote runs this engine and catalog, copied again before each setup there (rsync sends
+  only what changed), so both machines agree on recipes and on how the remote is driven."""
+  engine = os.path.dirname(os.path.realpath(__file__))
+  pair_ssh(host, "mkdir -p ~/.local/share/omarchy-local-ai")
+  copy = subprocess.run(["rsync", "-a", "--delete", "--exclude=.git", "--exclude=__pycache__", "-e", shlex.join(pair_ssh_argv()),
+                         engine + "/", f"{host}:.local/share/omarchy-local-ai/"], capture_output=True, text=True)
+  if copy.returncode != 0:
+    raise LocalError(f"Copying the engine to {host} failed: {copy.stderr.strip()[-400:]}", short=f"Can't reach {host}")
+
+
+def remote_error(host, rid):
+  """Why the remote last failed to start a model, as it recorded it, or empty."""
+  try:
+    return pair_ssh(host, f"cat ~/.local/state/omarchy/agent-local/errors/{shlex.quote(rid)}", check=False, timeout=10).stdout.strip()
+  except LocalError:
+    return ""
+
+
+def mirror_installing(host, rid, done):
+  """Copies the remote's setup progress into this machine's record, for the panel's bar."""
+  while not done.wait(2):
+    try:
+      there = json.loads(pair_ssh(host, f"cat ~/.local/state/omarchy/agent-local/installing/{shlex.quote(rid)}.json", check=False, timeout=10).stdout)
+    except (LocalError, ValueError):
+      continue
+    if isinstance(there, dict) and there.get("phase") in ("waiting", "downloading"):
+      update_installing(rid, **{key: there[key] for key in ("phase", "done_bytes", "total_bytes", "rate_bytes_s") if key in there})
+
+
 def remote_unit_path(rid):
   return os.path.join(home(), ".config", "systemd", "user", unit_name(rid))
 
@@ -3780,8 +3819,19 @@ def remote_use(host, args, catalog):
   try:
     with Lock():
       say(f"Setting up {rid} on {host}")
+      sync_engine(host)
       flags = (["--ctx", str(args.ctx)] if args.ctx else []) + (["--unqualified"] if args.unqualified else [])
-      if subprocess.run(pair_ssh_argv(tty=sys.stdin.isatty()) + [host, f"{REMOTE_ENGINE} {shlex.join(['use', rid, *flags])}"]).returncode != 0:
+      done = threading.Event()
+      mirror = threading.Thread(target=mirror_installing, args=(host, rid, done), daemon=True)
+      if fresh:
+        mirror.start()
+      try:
+        setup = subprocess.run(pair_ssh_argv(tty=sys.stdin.isatty()) + [host, f"{REMOTE_ENGINE} {shlex.join(['use', rid, *flags, '--as-remote'])}"])
+      finally:
+        done.set()
+        if fresh:
+          mirror.join()
+      if setup.returncode != 0:
         raise LocalError(f"Setting up {rid} on {host} failed (see above)", short=f"Setup failed on {host}")
       manifest = json.loads(pair_ssh(host, f"cat ~/.local/state/omarchy/agent-local/models/{shlex.quote(rid)}.json").stdout)
       model = json.loads(remote_engine(host, "status", "--json").stdout)["models"][rid]
@@ -3792,6 +3842,8 @@ def remote_use(host, args, catalog):
       systemctl("daemon-reload", check=True)
       save_model(manifest, started=running)
       clear_installing(rid)
+      if not running:
+        record_error(rid, f"On {host}: {remote_error(host, rid) or model.get('fit_reason') or 'not started'}")
       profile = machine_profile()
       if running:
         systemctl("reset-failed", unit_name(rid))
@@ -3810,7 +3862,10 @@ def remote_use(host, args, catalog):
     say(f"Running {rid} on {host}, here at {endpoint(rid)} (model id {rid}, key in {key_path()})")
     say(f"Launch an agent against it with: omarchy agent --local-model {rid}")
   else:
-    say(f"Installed {rid} on {host}, which can't start it now; press play in the agents panel later, or run: omarchy agent local start {rid}")
+    smaller = [variant["ctx"] for variant in recipe.get("variant", []) if variant["ctx"] < manifest["variant"]["ctx"]]
+    say(f"Installed {rid} on {host}, which can't start it now. Press play in the agents panel once it has room, or run: omarchy agent local start {rid}")
+    if smaller:
+      say(f"A smaller context needs less memory: omarchy agent local use {rid} --ctx {max(smaller)}")
   return 0
 
 
@@ -3825,10 +3880,7 @@ def remote_start(manifest, catalog, profile):
   if result.returncode != 0:
     # The remote's own reason, such as its memory being taken. Prefixed, a memory refusal still
     # shows: play stays enabled, since only the remote knows when it has room again.
-    try:
-      reason = pair_ssh(host, f"cat ~/.local/state/omarchy/agent-local/errors/{shlex.quote(rid)}", check=False, timeout=10).stdout.strip()
-    except LocalError:
-      reason = ""
+    reason = remote_error(host, rid)
     record_error(rid, f"On {host}: {reason}" if reason else f"Didn't start on {host}: omarchy agent local logs {rid} shows why")
     write_status(catalog, profile)
     raise LocalError(f"{rid} didn't start on {host}: {result.stderr.strip()}\n{journal_tail(rid)}")
@@ -3883,12 +3935,7 @@ def cmd_remote_add(argv):
   say(f"Preparing {host} (sudo there asks for its password)")
   root_script(HOST_SETUP.replace("@CDI_COMPAT@", CDI_COMPAT), pair_ssh(host, "id -un").stdout.strip(), peer=host)
   say("Copying this engine and catalog there")
-  pair_ssh(host, "mkdir -p ~/.local/share/omarchy-local-ai")
-  engine = os.path.dirname(os.path.realpath(__file__))
-  copy = subprocess.run(["rsync", "-a", "--delete", "--exclude=.git", "--exclude=__pycache__", "-e", shlex.join(pair_ssh_argv()),
-                         engine + "/", f"{host}:.local/share/omarchy-local-ai/"], capture_output=True, text=True)
-  if copy.returncode != 0:
-    raise LocalError(f"Copying the engine to {host} failed: {copy.stderr.strip()[-400:]}")
+  sync_engine(host)
   # One key for both: this machine's overlays read its key file, the remote's servers check it.
   pair_ssh(host, "umask 077 && mkdir -p ~/.config/omarchy/agent-local && cat > ~/.config/omarchy/agent-local/key", input=read_key())
   pair_ssh(host, "cd ~/.local/share/omarchy-local-ai && python3 -c 'import agent_local; agent_local.ensure_key()'")
