@@ -3869,9 +3869,11 @@ def fetch_listing(dns):
     return "not_sharing", None, ""
   if status != 200:
     return "unreachable", None, f"HTTP {status}" if status else body.decode(errors="replace")[:200]
+  # A peer's listing is untrusted: whatever it makes parsing or cleaning raise (nesting deep
+  # enough to recurse out, say) leaves that one peer unreachable, never the whole survey.
   try:
     return "online", clean_listing(json.loads(body), dns), ""
-  except (ValueError, LocalError) as error:
+  except Exception as error:
     return "unreachable", None, str(error)[:200]
 
 

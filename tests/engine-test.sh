@@ -832,6 +832,9 @@ class Huge:
 with patch.object(a.urllib.request, "urlopen", return_value=Huge()):
   state, huge, _ = a.fetch_listing("big.tail.ts.net")
 check("a peer's oversized listing is read only up to the cap and left unreachable", state == "unreachable" and huge is None)
+with patch.object(a, "http_status", return_value=(200, b"[" * 100000 + b"]" * 100000)):
+  state, deep, _ = a.fetch_listing("deep.tail.ts.net")
+check("a peer's deeply nested listing leaves only that peer unreachable", state == "unreachable" and deep is None)
 
 answers = {
   "box.tail.ts.net": ("online", clean, ""),
