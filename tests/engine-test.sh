@@ -772,6 +772,7 @@ check("a peer's listing loses control characters and unknown inputs", clean["mod
 check("a peer's listing keeps only known states and measurements", clean["models"][1]["unit"] == "inactive" and "evil" not in clean["models"][0]["observed"])
 check("a peer's listing keeps a known architecture and drops any other", clean["models"][0]["architecture"] == "moe" and clean["models"][1]["architecture"] == "")
 raises("a listing of another schema is refused", lambda: a.clean_listing({"schema": 2, "models": []}, "box"), "Not an Omarchy")
+check("a number too big for a float is no number", a._number(10 ** 400) is None)
 
 answers = {
   "box.tail.ts.net": ("online", clean, ""),
@@ -781,7 +782,7 @@ answers = {
 previous = {"hosts": {
   "away": {"host": "away", "dns": "away.tail.ts.net", "last_seen_ms": 1_000_000, "ram_total_gib": 64},
   "flaky": {"host": "flaky", "dns": "flaky.tail.ts.net", "last_seen_ms": 900_000},
-  "gone": {"host": "gone", "dns": "gone.tail.ts.net", "last_seen_ms": 1},
+  "gone": {"host": "gone", "dns": "gone.tail.ts.net", "last_seen_ms": 2_000_000 - a.FORGET_UNPAIRED_MS},
 }, "models": {
   "away/small-model": {"id": "away/small-model", "host": "away", "recipe": "small-model", "name": "Small", "unit": "active", "since_ms": 5},
   "flaky/mid-model": {"id": "flaky/mid-model", "host": "flaky", "recipe": "mid-model", "name": "Mid", "unit": "active"},
@@ -813,6 +814,9 @@ check("a paired offline host keeps its models however long it's away", later["mo
 with patch.object(a, "tailscale_status", return_value=None), patch.object(a, "fetch_listing") as fetch:
   alone = a.survey_network(net, now=now)
 check("without tailscaled, paired hosts show offline and nothing is fetched", not fetch.called and alone["models"]["away/small-model"]["offline"] == "offline" and not alone["tailnet"])
+with patch.object(a, "tailscale_status", return_value=None), patch.object(a, "fetch_listing") as fetch:
+  blind = a.survey_network(previous, now=now)
+check("without tailscaled, an unpaired host seen this week stays, offline", blind["models"].get("flaky/mid-model", {}).get("offline") == "offline" and "gone/old-model" not in blind["models"], repr(sorted(blind["models"])))
 a.write_atomic(a.network_path(), json.dumps(later))
 with patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
   a.cmd_forget(["away"])

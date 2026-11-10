@@ -9,6 +9,7 @@ server answers only with the key. See docs/engine.md.
 
 import argparse
 import concurrent.futures
+import contextlib
 import fcntl
 import fnmatch
 import hashlib
@@ -3529,6 +3530,16 @@ def shared_recipes():
   return sorted({rid for rid in recipes if isinstance(rid, str) and ID_RE.match(rid)})
 
 
+@contextlib.contextmanager
+def share_lock():
+  """Held while shares.json changes and while it's published, so overlapping commands can't
+  lose each other's changes, and an older publisher can't bring back an unshared route."""
+  ensure_dir(state_dir())
+  with open(os.path.join(state_dir(), "shares.lock"), "w") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    yield
+
+
 def save_shares(recipes):
   write_atomic(shares_path(), json.dumps({"recipes": sorted(set(recipes))}, indent=2) + "\n")
 
@@ -3651,6 +3662,11 @@ def shared_listing(record, catalog, profile, dns):
 def publish_shares(record, catalog, profile, force=False):
   """Bring the serve routes in line with shares.json and republish the
   listing when it changed. Errors land in share_error for the panel."""
+  with share_lock():
+    _publish_shares(record, catalog, profile, force)
+
+
+def _publish_shares(record, catalog, profile, force):
   shares = shared_recipes()
   published = _read(published_path())
   if not shares and not published and not force:
@@ -3708,15 +3724,17 @@ def cmd_share(argv):
   rid = args.recipe
   if not ID_RE.match(rid):
     raise LocalError("Not a recipe id")
-  shares = set(shared_recipes())
-  if args.off:
-    shares.discard(rid)
-  else:
+  if not args.off:
     if not load_model(rid):
       raise LocalError(f"{rid} isn't set up. Run: omarchy agent local use {rid}")
     self_dns()
-    shares.add(rid)
-  save_shares(shares)
+  with share_lock():
+    shares = set(shared_recipes())
+    if args.off:
+      shares.discard(rid)
+    else:
+      shares.add(rid)
+    save_shares(shares)
   try:
     record = write_status(catalog, profile, publish=False)
     publish_shares(record, catalog, profile, force=True)
@@ -3780,7 +3798,7 @@ def _clean(value, limit=120):
 def _number(value):
   try:
     number = float(value)
-  except (TypeError, ValueError):
+  except (TypeError, ValueError, OverflowError):
     return None
   return number if number == number and abs(number) < 1e15 else None
 
@@ -3863,6 +3881,9 @@ def survey_network(previous, now=None):
       peers[dns.split(".")[0]] = (dns, node.get("Online") is True)
   for host, remote in remotes.items():
     peers.setdefault(host, (remote["dns"], False))
+  for host, before in (previous.get("hosts") or {}).items():
+    if isinstance(before, dict) and isinstance(before.get("dns"), str) and before["dns"].split(".")[0] == host:
+      peers.setdefault(host, (before["dns"], False))
   online = {host: dns for host, (dns, up) in peers.items() if up}
   with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
     answers = dict(zip(online, pool.map(fetch_listing, online.values())))
