@@ -2418,10 +2418,13 @@ def link_notify(profile):
     if state["state"] != "available" or announced == state["address"]:
       return state
     name = state["host"] or "another DGX Spark"
-    subprocess.run(["omarchy-notification-send", "-g", "󰌘", "--app-name", "Local AI", f"{name} is connected to this Spark",
-                    "Set both up to run models across them",
-                    "--exec", "omarchy-launch-floating-terminal-with-presentation", "omarchy-agent-local link setup"],
-                   capture_output=True)
+    sent = subprocess.run(["omarchy-notification-send", "-g", "󰌘", "--app-name", "Local AI", f"{name} is connected to this Spark",
+                           "Set both up to run models across them",
+                           "--exec", "omarchy-launch-floating-terminal-with-presentation", "omarchy-agent-local link setup"],
+                          capture_output=True)
+    # Only what reached the desktop counts as announced; a failed send is tried again next time.
+    if sent.returncode != 0:
+      return state
     record.seek(0)
     record.truncate()
     record.write(state["address"] + "\n")

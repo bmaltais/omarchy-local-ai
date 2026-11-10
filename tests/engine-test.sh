@@ -456,6 +456,14 @@ with patch.object(a, "cable_neighbors", return_value=["fe80::3%enp1"]), patch.ob
     a.link_notify(pair_profile)
 check("a Spark a refresh found first is still announced", any(c.args and c.args[0][:1] == ["omarchy-notification-send"] for c in sent.call_args_list))
 os.unlink(os.path.join(a.state_dir(), "link-notified"))
+# A send that failed (no notification daemon yet, say) is tried again next time.
+with patch.object(a, "cable_neighbors", return_value=["fe80::4%enp1"]), patch.object(a, "mdns_names", return_value={}):
+  with patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=1, stdout="", stderr="")):
+    a.link_notify(pair_profile)
+  with patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as sent:
+    a.link_notify(pair_profile)
+check("a failed announcement is tried again", any(c.args and c.args[0][:1] == ["omarchy-notification-send"] for c in sent.call_args_list))
+os.unlink(os.path.join(a.state_dir(), "link-notified"))
 os.unlink(a.link_path())
 # The parsers read what the tools print.
 ping = """PING ff02::1%enp1 (ff02::1%enp1) 56 data bytes
