@@ -181,7 +181,9 @@ catalog_version, best}`. `last` and `best` may be null. Each model contains:
 - State: `unit`, `sub_state`, `result`, `error`, `fits`, `fit_reason`.
 - Progress: `since_ms`, `expected_load_seconds`, `expected_stop_seconds`,
   `expected_remove_seconds`, and nullable `observed` (`load_seconds`,
-  `ram_used_gib`, `gpu_used_gib`). Unavailable timings are null.
+  `ram_used_gib`, `gpu_used_gib`) and `ram_total_gib`, the memory of the
+  machines the model runs on. A paired model's `ram_used_gib` and
+  `ram_total_gib` cover both machines. Unavailable timings are null.
 - Setup, on `installing` models only: `install` with `phase` (`waiting` for
   another setup to finish, `downloading`, or `failed`), `done_bytes` and
   `total_bytes` over the weights still to fetch and the runtime image, and

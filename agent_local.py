@@ -1979,6 +1979,35 @@ def peer_headroom(peer, variant):
   return available
 
 
+def peer_free_gib(manifest):
+  """Free memory on a paired setup's other machine; None when the setup isn't paired or the
+  peer doesn't answer."""
+  setup = manifest.get("pair")
+  if not setup:
+    return None
+  try:
+    return gib(pair_python(setup["peer"], "node()", timeout=10)["ram_available"])
+  except (LocalError, ValueError, KeyError):
+    return None
+
+
+def ram_used_gib(manifest, before, after, peer_before, peer_after):
+  """What a start took, on every machine the model runs on: a pair's figure is both ranks'.
+  A peer that didn't answer counts as holding what this rank holds."""
+  used = before - after
+  if manifest.get("pair"):
+    used += peer_before - peer_after if None not in (peer_before, peer_after) else used
+  return round(used, 1)
+
+
+def nodes_ram_gib(manifest, profile):
+  """Total memory of the machines a model runs on, which its memory use is shown against."""
+  total = profile.get("ram_gib") or gib(meminfo().get("MemTotal", 0))
+  if manifest.get("pair"):
+    total += (profile.get("pair") or (manifest.get("profile") or {}).get("pair") or {}).get("ram_gib") or total
+  return round(total, 1)
+
+
 def image_id(image):
   result = subprocess.run(["podman", "image", "inspect", "--format", "{{.Id}}", image], capture_output=True, text=True)
   if result.returncode != 0 or not re.match(r"^[0-9a-f]{64}$", result.stdout.strip()):
@@ -2544,6 +2573,7 @@ def activate(manifest, recipe, runtime, gpu, key, catalog, profile):
   try:
     evict_idle_weights(keep=[rid])
     before_ram, before_gpu = check_headroom(manifest["variant"], gpu)
+    before_peer = peer_free_gib(manifest)
     write_unit_files(rid, container_text)
     write_pair_setup(manifest)
     systemctl("reset-failed", unit_name(rid))
@@ -2566,7 +2596,7 @@ def activate(manifest, recipe, runtime, gpu, key, catalog, profile):
   after_ram, after_gpu = free_memory(gpu)
   manifest["observed"] = {
     "load_seconds": round(load_seconds, 1),
-    "ram_used_gib": round(before_ram - after_ram, 1),
+    "ram_used_gib": ram_used_gib(manifest, before_ram, after_ram, before_peer, peer_free_gib(manifest)),
     "gpu_used_gib": round(before_gpu - after_gpu, 1),
   }
 
@@ -2862,6 +2892,8 @@ def model_record(rid, manifest, profile):
     "endpoint": endpoint(rid),
     "catalog_version": manifest.get("catalog", {}).get("version"),
     "observed": observed or None,
+    # What the panel's memory bar is a share of: a paired model's machines together.
+    "ram_total_gib": nodes_ram_gib(manifest, profile),
     # When the current start or stop began, and how long the last load took:
     # the panel's progress bar measures the one against the other.
     "since_ms": int(os.path.getmtime(removing_path(rid)) * 1000) if removing else _unix_ms(props.get("InactiveExitTimestamp") if unit == "activating" else props.get("ActiveExitTimestamp") if unit == "deactivating" else ""),
@@ -3019,6 +3051,7 @@ def _start(args, catalog, profile):
     record_error(rid, error.short)
     write_status(catalog, profile)
     raise
+  before_peer = peer_free_gib(manifest)
   systemctl("reset-failed", unit_name(rid))
   result = systemctl("start", unit_name(rid))
   write_atomic(os.path.join(state_dir(), "last"), rid + "\n")
@@ -3045,7 +3078,7 @@ def _start(args, catalog, profile):
   after_ram, after_gpu = free_memory(gpu)
   manifest["observed"] = {
     "load_seconds": round(time.time() - started, 1),
-    "ram_used_gib": round(before_ram - after_ram, 1),
+    "ram_used_gib": ram_used_gib(manifest, before_ram, after_ram, before_peer, peer_free_gib(manifest)),
     "gpu_used_gib": round(before_gpu - after_gpu, 1),
   }
   write_atomic(model_manifest_path(rid), json.dumps(manifest, indent=2) + "\n")
