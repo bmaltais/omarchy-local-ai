@@ -256,6 +256,8 @@ compat_rt = copy.deepcopy(rt)
 compat_rt["run"] = dict(compat_rt.get("run", {}), group_add="keep-groups")
 compat_text = a.render_container("model", changed, compat_rt, variant, roles, gpu, "a" * 16)
 check("group_add renders for Podman 4's Quadlet", "PodmanArgs=--group-add=keep-groups" in compat_text and "GroupAdd=" not in compat_text)
+with patch.object(a.shutil, "which", return_value=None), patch.object(a.os.path, "realpath", return_value="/home/u/AI projects/engine/agent_local.py"):
+  check("without Omarchy's wrapper, hooks quote the checkout's entry script", a.hook_command() == '"/home/u/AI projects/engine/omarchy-local-ai"')
 def fake_platform_run(argv, **kwargs):
   if argv[0] == "omarchy-hw-platform":
     raise FileNotFoundError(argv[0])
@@ -296,17 +298,32 @@ if generator:
   (quadlets / "omarchy-agent-local.container").write_text(text)
   (quadlets / "omarchy-agent-local.network").write_text(a.render_network())
   env = dict(os.environ, QUADLET_UNIT_DIRS=str(quadlets))
-  result = subprocess.run([generator, "--user", "--dryrun"], env=env, capture_output=True, text=True)
+  def quadlet_run(unit_text):
+    """What Quadlet makes of a unit: its result, and the podman run command as argv."""
+    (quadlets / "omarchy-agent-local.container").write_text(unit_text)
+    result = subprocess.run([generator, "--user", "--dryrun"], env=env, capture_output=True, text=True)
+    exec_line = next((line.split("=", 1)[1] for line in result.stdout.splitlines() if line.startswith("ExecStart=") and " run " in line), "")
+    # systemd doubles literal percent and dollars; shlex handles its emitted quoting here.
+    return result, exec_line, [re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m[1], 16)), arg)
+                               for arg in shlex.split(exec_line.replace("%%", "%").replace("$$", "$"))]
+  result, exec_line, argv = quadlet_run(text)
   check("Quadlet accepts generated units", result.returncode == 0, result.stdout + result.stderr)
-  exec_line = next((line.split("=", 1)[1] for line in result.stdout.splitlines() if line.startswith("ExecStart=") and " run " in line), "")
-  # systemd doubles literal percent and dollars; shlex handles its emitted quoting here.
-  argv = [re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m[1], 16)), arg)
-          for arg in shlex.split(exec_line.replace("%%", "%").replace("$$", "$"))]
   def option(flag, value):
     return f"{flag}={value}" in argv or any(argv[i:i+2] == [flag, value] for i in range(len(argv)))
   check("Quadlet keeps internal network and container restrictions", option("--network", "omarchy-agent-local") and "--read-only" in argv and option("--cap-drop", "all") and option("--security-opt", "no-new-privileges"), exec_line)
   check("Quadlet publishes only the loopback endpoint", option("--publish", f"127.0.0.1:{a.port_for('model')}:8080"), exec_line)
   check("hostile server argument survives Quadlet as one argument", hostile in argv, repr(argv))
+  # Podman 4.9's Quadlet has no GroupAdd= or Entrypoint= and reads Notify=healthy as false: what
+  # PodmanArgs carries must reach podman run, and readiness must end up healthy, on 4 and 5 alike.
+  flags_rt = copy.deepcopy(rt)
+  flags_rt["inputs"]["key"] = {"arg": "--api-key"}
+  flags_rt["shell"] = "/bin/bash"
+  flags_rt["run"] = {"group_add": "keep-groups"}
+  result, exec_line, argv = quadlet_run(a.render_container("model", changed, flags_rt, variant, roles, gpu, "a" * 16))
+  readiness = [arg for arg in argv if arg.startswith("--sdnotify")]
+  check("Quadlet passes group_add, the shell entrypoint and health readiness to podman run",
+        result.returncode == 0 and "--group-add=keep-groups" in argv and "--entrypoint=/bin/bash" in argv and readiness[-1:] == ["--sdnotify=healthy"],
+        exec_line + result.stderr)
 else:
   skip("Quadlet parser unavailable: Podman generator is not installed")
 

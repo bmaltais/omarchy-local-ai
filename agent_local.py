@@ -1486,7 +1486,7 @@ def hook_command():
   """How a unit calls back into the engine: Omarchy's wrapper, else (DGX OS) this checkout's entry script."""
   if shutil.which("omarchy-agent-local"):
     return "/usr/bin/env omarchy-agent-local"
-  return _systemd_escape(os.path.join(os.path.dirname(os.path.realpath(__file__)), "omarchy-local-ai"))
+  return _quote(os.path.join(os.path.dirname(os.path.realpath(__file__)), "omarchy-local-ai"))
 
 
 def render_network():
