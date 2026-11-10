@@ -406,13 +406,13 @@ with patch.object(a, "platform_name", return_value="aarch64-gb10"), patch.object
   routed = []
   with patch.object(a, "pair_python", return_value={"gpu": "NVIDIA GB10", "ram_total": 128 * 2**30, "home": "/home/bob", "host": "spark2"}), \
        patch.object(a, "_fabric", side_effect=lambda address: routed.append(address) or {"hca": "rocep1s0f0"}):
-    a.record_pair(a.machine_profile(), "bob@10.99.1.2")
-  check("a recorded peer keeps the SSH user it was set up with", a.machine_profile()["pair"]["peer"] == "bob@10.99.1.2" and routed == ["10.99.1.2"], repr(routed))
+    a.record_pair(pair_profile, "bob@10.99.1.2")
+  check("a recorded peer keeps the SSH user it was set up with", a.cached_pair(pair_profile)["peer"] == "bob@10.99.1.2" and routed == ["10.99.1.2"], repr(routed))
   with patch.object(a, "local_ports", return_value={"enp1": ["10.99.1.1/24"], "lan0": ["192.168.1.5/24"]}), \
        patch.object(a, "pair_python", return_value={"enp1": ["10.99.1.2/24"]}):
     check("link setup reaches the peer at its own cable address, as the same user", a.cable_peer("bob@spark-760a.local") == "bob@10.99.1.2")
   with patch.object(a, "pair_python", return_value={"gpu": "", "ram_total": 128 * 2**30, "home": "/", "host": "x"}):
-    raises("only a GB10 is recorded as a peer", lambda: a.record_pair(a.machine_profile(), "10.99.1.9"), "isn't a DGX Spark")
+    raises("only a GB10 is recorded as a peer", lambda: a.record_pair(pair_profile, "10.99.1.9"), "isn't a DGX Spark")
   os.unlink(a.pair_path())
 
 for name, script in (("host", a.HOST_SETUP.replace("@CDI_COMPAT@", a.CDI_COMPAT)), ("link", a.LINK_SETUP), ("firewall", a.FIREWALL_SETUP)):
