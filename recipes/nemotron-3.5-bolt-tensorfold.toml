@@ -57,4 +57,4 @@ temperature = 1.0
 top_p = 0.95
 
 [server]
-args = ["--max-tokens", "32768", "--thinking", "--vision"]
+args = ["--max-tokens", "65536", "--thinking", "--vision"]

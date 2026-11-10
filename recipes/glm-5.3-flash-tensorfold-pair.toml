@@ -39,4 +39,4 @@ top_k = 20
 
 # Four streams; the checkpoint's own MTP head drafts (MiaAI's default DFlash2 drafter is non-commercial).
 [server]
-args = ["--parallel", "4", "--max-tokens", "32768", "--kv-cache", "fp8", "--no-thinking", "--reasoning-effort", "xhigh", "--vision", "--vision-max-images", "50"]
+args = ["--parallel", "4", "--max-tokens", "65536", "--kv-cache", "fp8", "--no-thinking", "--reasoning-effort", "xhigh", "--vision", "--vision-max-images", "50"]
