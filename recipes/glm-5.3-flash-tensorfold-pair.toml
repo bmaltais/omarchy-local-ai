@@ -23,10 +23,10 @@ files = ["*.safetensors", "*.json", "*.jinja"]
 dest = "model"
 model = "."
 
-# The engine loads 84 GiB of weights, keeps its 12 GiB reserve free, and gives the rest to one shared FP8 KV pool of
-# whole windows and the prompt cache. Measured on a pair whose head runs the Omarchy desktop: 90.4 GiB at load, a
-# 3.4 GiB pool (one full 256K window, shared by the four streams), at least 12.2 GiB left free while benchmarked.
-# Headless Sparks get a larger pool from the same setup.
+# The engine loads 84 GiB of weights, keeps its 9.5 GiB reserve free, and gives the rest to one shared FP8 KV pool of
+# whole windows and the prompt cache; it refuses to start without room for one window, which takes about 99 GiB
+# free: the 91 here plus the 8 admission keeps for the desktop. Measured on a pair whose head runs the Omarchy
+# desktop. Headless Sparks get a larger pool from the same setup.
 [[variant]]
 ctx = 262144
 peak_ram_gib = 91

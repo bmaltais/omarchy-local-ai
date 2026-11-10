@@ -1982,6 +1982,8 @@ def pair_worker_start(rid):
     raise LocalError(f"{rid} isn't a paired setup")
   pair = {"peer": setup["peer"], "host": setup["host"], "home": setup["home"]}
   here, there = pair_link(pair)
+  # Also here: systemd's restarts after a failure don't pass admission.
+  peer_headroom(pair["peer"], variant)
   spec = runtime["pair"]
   def environment(rank, side):
     values = {"@RANK@": str(rank), "@WORLD@": str(spec["nodes"]), "@MASTER_ADDR@": here["addr"],
