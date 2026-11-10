@@ -1650,6 +1650,24 @@ def unit_active(rid):
   return unit_props(rid, "ActiveState").get("ActiveState") in ("active", "activating", "reloading")
 
 
+SERVER_ERROR_RE = re.compile(r"^(error|tensorfold|fatal):\s*(.+)", re.IGNORECASE)
+
+
+def failure_reason(rid, result):
+  """Why a model stopped unexpectedly, for the panel's line: a reason this start already recorded
+  (the start hook's, say), else the server's own last error line, else systemd's result."""
+  started = _unix_ms(unit_props(rid, "InactiveExitTimestamp").get("InactiveExitTimestamp"))
+  path = error_path(rid)
+  if started and os.path.exists(path) and os.path.getmtime(path) * 1000 >= started:
+    return _read(path)
+  for line in reversed(journal_tail(rid, 60).splitlines()):
+    match = SERVER_ERROR_RE.match(line.strip())
+    if match:
+      reason = match.group(2).strip()
+      return reason if len(reason) <= 160 else reason[:157] + "..."
+  return f"Stopped unexpectedly ({result})"
+
+
 def journal_tail(rid, lines=15):
   result = subprocess.run(["journalctl", "--user", "-u", unit_name(rid), "-n", str(lines), "-o", "cat", "--no-pager"], capture_output=True, text=True)
   return result.stdout.strip()
@@ -2016,6 +2034,7 @@ def pair_worker_start(rid):
   pair = {"peer": setup["peer"], "host": setup["host"], "home": setup["home"]}
   here, there = pair_link(pair)
   # Also here: systemd's restarts after a failure don't pass admission.
+  pair_limits(pair["peer"])
   peer_headroom(pair["peer"], variant)
   spec = runtime["pair"]
   def environment(rank, side):
@@ -3036,7 +3055,7 @@ def cmd_status(argv):
       if result == "success":
         transitions[args.stopped] = "inactive"
       else:
-        record_error(args.stopped, f"Stopped unexpectedly ({result})")
+        record_error(args.stopped, failure_reason(args.stopped, result))
         transitions[args.stopped] = "failed"
     write_status(catalog, profile, transitions)
     return 0
@@ -3546,6 +3565,36 @@ def cmd_overlay(argv):
   return 0
 
 
+def cmd_logs(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local logs")
+  parser.add_argument("recipe", nargs="?", help="the model (default: the last one started)")
+  parser.add_argument("-n", "--lines", type=int, default=200)
+  args = parser.parse_args(argv)
+  rid = args.recipe or last_model_id()
+  if not rid or not ID_RE.match(rid):
+    raise LocalError("Name the model: omarchy agent local logs <recipe>")
+  error = _read(error_path(rid))
+  if error:
+    say(f"Last error: {error}")
+    say("")
+  # Its setup's log while it's being set up or failed to be, then the model's own.
+  for unit, what in ((install_unit(rid), "setup"), (unit_name(rid), "model")):
+    out = subprocess.run(["journalctl", "--user", "-u", unit, "-n", str(args.lines), "-o", "short", "--no-pager"], capture_output=True, text=True).stdout.strip()
+    if out and not out.startswith("-- No entries --"):
+      say(f"== {rid}: {what} log on this machine ({unit})")
+      say(out)
+      say("")
+  manifest = load_model(rid) or load_installing(rid) or {}
+  if os.path.exists(pair_setup_path(rid)):
+    manifest = pair_manifest(rid)
+  setup = manifest.get("pair")
+  if setup:
+    say(f"== {rid}: rank 1 on {setup['host']}")
+    result = pair_ssh(setup["peer"], f"podman logs --tail {int(args.lines)} {shlex.quote(worker_name(rid))} 2>&1", check=False, timeout=30)
+    say((result.stdout or result.stderr).strip() or "(no log there)")
+  return 0
+
+
 COMMANDS = {
   "use": cmd_use,
   "list": cmd_list,
@@ -3553,6 +3602,7 @@ COMMANDS = {
   "start": cmd_start,
   "stop": cmd_stop,
   "remove": cmd_remove,
+  "logs": cmd_logs,
   # Plumbing for the panel, omarchy agent, omarchy update and catalog
   # maintainers; they run but aren't listed.
   "profile": cmd_profile,
@@ -3570,6 +3620,7 @@ SUMMARIES = {
   "start": "Start a model that's set up, the last one started by default",
   "stop": "Stop a model, or every running one",
   "remove": "Remove a model's weights, manifests and unused image",
+  "logs": "Show a model's logs, and its other half's on a paired Spark",
   "link": "Show the Spark cabled to this one; 'link setup <peer>' prepares both",
 }
 

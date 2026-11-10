@@ -353,7 +353,7 @@ setup = {"schema": 1, "recipe_id": "paired", "runtime": pair_rt, "recipe": paire
 a.write_pair_setup(setup)
 here = {"addr": "10.99.1.1", "dev": "enp1", "hcas": ["rocep1", "roceP2"], "gid": "5"}
 there = {"addr": "10.99.1.2", "dev": "enp1", "hcas": ["rocep1", "roceP2"], "gid": "3"}
-with patch.object(a, "pair_link", return_value=(here, there)), patch.object(a, "peer_headroom") as headroom, patch.object(a, "pair_ssh") as ssh:
+with patch.object(a, "pair_link", return_value=(here, there)), patch.object(a, "peer_headroom") as headroom, patch.object(a, "pair_ssh") as ssh, patch.object(a, "pair_limits") as limits:
   a.pair_worker_start("paired")
 head_env = dict(line.split("=", 1) for line in Path(a.pair_env_path("paired")).read_text().splitlines())
 worker = shlex.split(ssh.call_args.args[1])
@@ -362,7 +362,7 @@ check("rank 0's environment is rank 0's side of the link", head_env == {"NCCL_CO
 check("rank 1's environment is rank 1's side, same rendezvous", worker_env["TF_RANK"] == "1" and worker_env["NCCL_COMM_ID"] == "10.99.1.1:29620" and worker_env["NCCL_IB_GID_INDEX"] == "3" and "API_KEY" not in worker_env, repr(worker_env))
 check("rank 1 starts on the peer as its user, with the head's command and the same restrictions",
       ssh.call_args.args[0] == "bob@10.99.1.2" and headroom.called
-      and all(flag in worker for flag in ("--read-only", "no-new-privileges", "/dev/infiniband", "f" * 64))
+      and limits.called and all(flag in worker for flag in ("--read-only", "no-new-privileges", "/dev/infiniband", "f" * 64))
       and worker[worker.index("--cap-drop") + 1] == "all"
       and f"/home/bob/.local/share/omarchy/agent-local/models/paired/{'e' * 16}:/models:ro" in worker
       and f"/home/bob/.local/share/omarchy/agent-local/models/paired/{'e' * 16}.rank1:/state" in worker
@@ -487,6 +487,31 @@ with patch.object(a, "known_models", return_value=[]), patch.object(a, "installi
 check("status shows a recorded pair as linked, not a stale offer", linked == {"state": "linked", "host": "spark2"}, repr(linked))
 os.unlink(a.link_path())
 check("the cable hook parses", subprocess.run(["bash", "-n", os.path.join(os.environ["ENGINE_ROOT"], "system/90-omarchy-local-ai-link")]).returncode == 0)
+
+# A model that stopped unexpectedly says why: this start's own recorded reason, else the
+# server's last error line, else systemd's result.
+journal = "info: weights read\nerror: ncclCommInitRank: unhandled system error (run with NCCL_DEBUG=INFO for details) (2)\nsome trailing line"
+with patch.object(a, "unit_props", return_value={"InactiveExitTimestamp": "@%d" % int(__import__("time").time() - 60)}), patch.object(a, "journal_tail", return_value=journal):
+  a.clear_error("crashy")
+  check("a crash shows the server's own last error", a.failure_reason("crashy", "exit-code").startswith("ncclCommInitRank: unhandled system error"))
+  a.record_error("crashy", "Locked memory limited: run link setup")
+  check("a reason the start already recorded isn't overwritten", a.failure_reason("crashy", "exit-code") == "Locked memory limited: run link setup")
+with patch.object(a, "unit_props", return_value={"InactiveExitTimestamp": "@%d" % int(__import__("time").time() + 60)}), patch.object(a, "journal_tail", return_value="nothing useful"):
+  check("an older reason gives way, and with no server error systemd's result is shown", a.failure_reason("crashy", "exit-code") == "Stopped unexpectedly (exit-code)")
+a.clear_error("crashy")
+# logs prints the last error, the model's journal and, for a pair, rank 1's log from the peer.
+a.record_error("crashy", "Locked memory limited: run link setup")
+a.write_atomic(a.model_manifest_path("crashy"), json.dumps({"recipe_id": "crashy", "pair": {"peer": "10.99.1.2", "host": "spark2", "home": "/home/u"}}))
+printed = []
+with patch.object(a, "say", side_effect=printed.append), \
+     patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="Nov 10 rank0 line", stderr="")), \
+     patch.object(a, "pair_ssh", return_value=SimpleNamespace(returncode=0, stdout="rank1 line", stderr="")) as peer_logs:
+  a.cmd_logs(["crashy", "-n", "50"])
+check("logs shows the last error, this machine's log and rank 1's from the peer",
+      printed[0] == "Last error: Locked memory limited: run link setup" and "Nov 10 rank0 line" in printed and "rank1 line" in printed
+      and "podman logs --tail 50" in peer_logs.call_args.args[1], repr(printed))
+os.unlink(a.model_manifest_path("crashy"))
+a.clear_error("crashy")
 
 # The default root must work without an Omarchy checkout or a catalog override.
 check("installed catalog loads and validates from the engine directory", not a.load_catalog().errors() and a.load_catalog().root == os.environ["ENGINE_ROOT"])
