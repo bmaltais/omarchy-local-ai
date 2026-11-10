@@ -632,6 +632,9 @@ def validate_pair_runtime(where, runtime, run):
   if state is not None and not (isinstance(state, str) and re.match(r"^/[a-z][a-z0-9_-]*$", state) and state not in ("/models", "/prepared", "/tmp")):
     errors.append(f"{where}.pair.state: must be one top-level path such as /state, not /models, /prepared or /tmp")
   # Without a worker command rank 1 runs the head's own invocation: its server compares the two.
+  prepared = pair.get("prepared_gib")
+  if prepared is not None and not (isinstance(prepared, (int, float)) and prepared > 0):
+    errors.append(f"{where}.pair.prepared_gib: must be a positive number of GiB")
   for name in ("prepare", "worker"):
     command = pair.get(name)
     if command is None:
@@ -2012,6 +2015,16 @@ def stream(argv, what):
     raise LocalError(f"{what} failed", short=f"{what} failed")
 
 
+def prepare_name(rid, rank):
+  """A prepare container's name, so remove can stop one a cancelled setup left running."""
+  return f"{UNIT_PREFIX}{rid}-prepare{rank}"
+
+
+def need_disk(where, free, need):
+  if free < need:
+    raise LocalError(f"{where} has {gib(free):.0f} GiB free, and this setup needs {gib(need):.0f} GiB more there", short=f"Not enough disk on {where}")
+
+
 def pair_setup(rid, manifest, runtime, pair):
   """Everything both ranks read before the first start: rank 0's prepared inputs here, then the
   image, the file set and rank 1's prepared inputs on the peer."""
@@ -2027,13 +2040,20 @@ def pair_setup(rid, manifest, runtime, pair):
     update_installing(rid, pair=manifest["pair"])
   local_rank = rank_dir(rid, fileset, 0, runtime=runtime)
   ensure_dir(local_rank)
-  if runtime["pair"].get("prepare"):
-    say("Preparing rank 0's inputs here (minutes the first time)")
-    stream(["podman", "run", "--rm", "--network", "none", *RANK_CONTAINER,
-            "-v", f"{models}:/models:ro", "-v", f"{local_rank}:/prepared", runtime["image"], *prepare_command(runtime, 0)],
-           "Preparing rank 0")
   peer = pair["peer"]
   q = shlex.quote
+  # Before writing anything: the prepared files on each Spark, and the file set on the peer.
+  prepared = runtime["pair"].get("prepared_gib", 0) * 2**30
+  have = sum(os.path.getsize(os.path.join(d, f)) for d, _, names in os.walk(local_rank) for f in names)
+  need_disk("this machine", shutil.disk_usage(local_rank).free, prepared - have)
+  base = os.path.dirname(peer_fileset_dir(pair, rid, fileset))
+  free, present = (pair_ssh(peer, f"mkdir -p {q(base)} && df -B1 --output=avail {q(base)} | tail -1 && du -sb {q(base)} | cut -f1").stdout.split() + ["0", "0"])[:2]
+  need_disk(pair["host"], int(free), sum(record["size"] for record in manifest.get("files", [])) + prepared - int(present))
+  if runtime["pair"].get("prepare"):
+    say("Preparing rank 0's inputs here (minutes the first time)")
+    stream(["podman", "run", "--rm", "--name", prepare_name(rid, 0), "--network", "none", *RANK_CONTAINER,
+            "-v", f"{models}:/models:ro", "-v", f"{local_rank}:/prepared", runtime["image"], *prepare_command(runtime, 0)],
+           "Preparing rank 0")
   if pair_ssh(peer, f"podman image exists {q(ident)}", check=False).returncode != 0:
     say(f"Copying the runtime image to {pair['host']} over the link")
     save = subprocess.Popen(["podman", "save", runtime["image"]], stdout=subprocess.PIPE)
@@ -2052,7 +2072,7 @@ def pair_setup(rid, manifest, runtime, pair):
   pair_ssh(peer, f"mkdir -p {q(peer_rank)}")
   if runtime["pair"].get("prepare"):
     say(f"Preparing rank 1's inputs on {pair['host']}")
-    command = shlex.join(["podman", "run", "--rm", "--network", "none", *RANK_CONTAINER,
+    command = shlex.join(["podman", "run", "--rm", "--name", prepare_name(rid, 1), "--network", "none", *RANK_CONTAINER,
                           "-v", f"{target}:/models:ro", "-v", f"{peer_rank}:/prepared", ident, *prepare_command(runtime, 1)])
     stream(pair_ssh_argv() + [peer, command], f"Preparing rank 1 on {pair['host']}")
 
@@ -2127,7 +2147,9 @@ def pair_remove(manifest, local_only=False):
   q = shlex.quote
   base = os.path.join(setup["home"], ".local", "share", "omarchy", "agent-local", "models", rid)
   others = {(load_model(other) or {}).get("pair", {}).get("image_id") for other in known_models() if other != rid}
-  command = f"podman rm -f {q(worker_name(rid))} >/dev/null 2>&1; rm -rf -- {q(base)}"
+  # A prepare a cancelled setup left running goes first, here and there, then its files.
+  subprocess.run(["podman", "rm", "-f", prepare_name(rid, 0)], capture_output=True)
+  command = f"podman rm -f {q(worker_name(rid))} {q(prepare_name(rid, 1))} >/dev/null 2>&1; rm -rf -- {q(base)}"
   if setup["image_id"] not in others:
     command += f"; podman rmi {q(setup['image_id'])} >/dev/null 2>&1"
   try:

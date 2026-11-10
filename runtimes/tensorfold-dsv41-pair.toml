@@ -29,6 +29,8 @@ master_port = 29620
 # Each rank's inputs, from the checkpoint alone: the kit with this checkpoint's RoPE tables, Engram's token map and
 # the rank's weight file (/opt/omarchy/prepare in the image).
 prepare = ["/opt/omarchy/prepare", "@RANK@", "@WORLD@"]
+# What prepare writes on each Spark: the rank's weight file (99 GiB) and the kit and token map.
+prepared_gib = 100
 # Rank 0 serves the checkpoint linked beside MiaAI-Lab's chat template (the release ships its chat format as Python),
 # a folder prepare makes.
 model = "/prepared/model"
