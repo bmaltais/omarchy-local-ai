@@ -3862,6 +3862,9 @@ def remote_use(host, args, catalog):
   except Exception as error:
     if fresh and load_model(rid) is None and owns_installing(rid):
       fail_installing(rid, getattr(error, "short", None) or (str(error).splitlines() or ["Setup failed"])[0])
+    elif not fresh:
+      record_error(rid, getattr(error, "short", None) or (str(error).splitlines() or ["Setup failed"])[0])
+      write_status(catalog, machine_profile())
     raise
   say("")
   if running:
