@@ -183,7 +183,17 @@ def platform_name():
   try:
     return subprocess.run(["omarchy-hw-platform"], capture_output=True, text=True, timeout=10).stdout.strip() or "x86"
   except (OSError, subprocess.SubprocessError):
-    return "x86"
+    pass
+  # Without Omarchy (e.g. DGX OS on a Spark), name the NVIDIA unified-memory chip ourselves.
+  if os.uname().machine == "aarch64":
+    try:
+      gpu = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True, timeout=10).stdout.upper()
+    except (OSError, subprocess.SubprocessError):
+      gpu = ""
+    for chip in ("GB10", "N1X"):
+      if chip in gpu:
+        return f"aarch64-{chip.lower()}"
+  return "x86"
 
 
 def gfx_name(version):
@@ -1472,6 +1482,13 @@ def device_lines(runtime, gpu):
 QUADLET_SECTION = ["[Quadlet]", "DefaultDependencies=false"]
 
 
+def hook_command():
+  """How a unit calls back into the engine: Omarchy's wrapper, else (DGX OS) this checkout's entry script."""
+  if shutil.which("omarchy-agent-local"):
+    return "/usr/bin/env omarchy-agent-local"
+  return _systemd_escape(os.path.join(os.path.dirname(os.path.realpath(__file__)), "omarchy-local-ai"))
+
+
 def render_network():
   return "\n".join(QUADLET_SECTION + ["", "[Network]", f"NetworkName={NETWORK_NAME}", "Internal=true"]) + "\n"
 
@@ -1526,7 +1543,8 @@ def render_container(rid, recipe, runtime, variant, roles, gpu, fileset):
     lines.append(f"Secret={SECRET},type=env,target={key_mapping['env']}")
   lines += device_lines(runtime, gpu)
   if run.get("group_add") == "keep-groups":
-    lines.append("GroupAdd=keep-groups")
+    # PodmanArgs, not GroupAdd= or Entrypoint=, which Quadlet reads only from Podman 5 (DGX OS ships 4.9).
+    lines.append("PodmanArgs=--group-add=keep-groups")
   if run.get("memlock") == "unlimited":
     lines.append("Ulimit=memlock=-1:-1")
   if run.get("shm_size_gib"):
@@ -1535,7 +1553,7 @@ def render_container(rid, recipe, runtime, variant, roles, gpu, fileset):
     lines.append(f"Environment={_quote(f'{name}={value}')}")
   lines += ["ReadOnly=true", "DropCapability=all", "NoNewPrivileges=true"]
   if entrypoint:
-    lines.append(f"Entrypoint={_systemd_escape(entrypoint)}")
+    lines.append(f"PodmanArgs={_quote('--entrypoint=' + entrypoint)}")
   if argv:
     lines.append("Exec=" + " ".join(_quote(arg) for arg in argv))
   probe = [part.replace("@PORT@", str(port)) for part in runtime["health"]["probe"]]
@@ -1556,6 +1574,9 @@ def render_container(rid, recipe, runtime, variant, roles, gpu, fileset):
     "HealthStartPeriod=10m",
     "HealthOnFailure=kill",
     "Notify=healthy",
+    # Podman 4 (DGX OS) reads Notify= only as a boolean and would report the unit up before the
+    # model loads; its run takes the flag, and PodmanArgs come after Quadlet's own.
+    "PodmanArgs=--sdnotify=healthy",
     "",
     "[Service]",
     f"TimeoutStartSec={20 if pair else 12}m",
@@ -1566,17 +1587,17 @@ def render_container(rid, recipe, runtime, variant, roles, gpu, fileset):
     # Rank 1 starts on the peer first and stops with this unit, however it ends; the start also
     # writes this unit's environment file, the link as it is now.
     lines += [
-      f"ExecStartPre=/usr/bin/env omarchy-agent-local link-worker start {rid}",
-      f"ExecStopPost=-/usr/bin/env omarchy-agent-local link-worker stop {rid}",
+      f"ExecStartPre={hook_command()} link-worker start {rid}",
+      f"ExecStopPost=-{hook_command()} link-worker stop {rid}",
     ]
   lines += [
     # The agents panel watches status.json; every start, stop and crash rewrites it.
     # systemd resolves a bare name in its own search path, not PATH; env uses the
-    # unit's PATH, which holds Omarchy's bin.
+    # unit's PATH, which holds Omarchy's bin. Without Omarchy, hook_command() names the entry script.
     # Each hook says how the transition ended: systemd still reports it as
     # activating or deactivating while its Post commands run.
-    f"ExecStartPost=-/usr/bin/env omarchy-agent-local status --write --started {rid}",
-    f"ExecStopPost=-/usr/bin/env omarchy-agent-local status --write --stopped {rid}",
+    f"ExecStartPost=-{hook_command()} status --write --started {rid}",
+    f"ExecStopPost=-{hook_command()} status --write --stopped {rid}",
   ]
   return "\n".join(lines) + "\n"
 
@@ -1687,7 +1708,9 @@ def ensure_key():
     key = handle.read().strip()
   # The secret is the bare key: a trailing newline from the file would reach the
   # server through --api-key or its key variable and never match a Bearer header.
-  result = subprocess.run(["podman", "secret", "create", "--replace", SECRET, "-"], input=key, capture_output=True, text=True)
+  # Podman 4 (DGX OS) refuses --replace for a secret that doesn't exist yet.
+  replace = ["--replace"] if subprocess.run(["podman", "secret", "inspect", SECRET], capture_output=True).returncode == 0 else []
+  result = subprocess.run(["podman", "secret", "create", *replace, SECRET, "-"], input=key, capture_output=True, text=True)
   if result.returncode != 0:
     raise LocalError(f"Can't store the API key as a Podman secret: {result.stderr.strip()}")
   return key
@@ -2305,6 +2328,25 @@ def root_script(script, *args, peer=None):
     raise LocalError(f"Setting up {'the peer ' + peer if peer else 'this machine'} failed (see above)")
 
 
+def host_ready():
+  """Whether this machine already runs NVIDIA models: Omarchy ships rootless Podman, DGX OS
+  ships Docker, and Podman before 5 needs HOST_SETUP's 0.6 copy of the CDI spec."""
+  if not shutil.which("podman"):
+    return False
+  major = subprocess.run(["podman", "version", "--format", "{{.Client.Version}}"], capture_output=True, text=True).stdout.split(".")[0]
+  stale = "additionalGids" in _read("/var/run/cdi/nvidia.yaml", "") and not os.path.exists("/etc/cdi/nvidia.yaml")
+  return not (major.isdigit() and int(major) < 5 and stale)
+
+
+def prepare_host(gpu):
+  if gpu["vendor"] == "nvidia" and not host_ready():
+    if not sys.stdin.isatty() and subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
+      raise LocalError("This machine needs Podman set up as root first: run this same command once in a terminal, where sudo can ask for your password",
+                       short="Run setup once in a terminal")
+    say("Preparing this machine for rootless Podman (sudo asks for your password)")
+    root_script(HOST_SETUP.replace("@CDI_COMPAT@", CDI_COMPAT), os.environ.get("USER") or os.path.basename(home()))
+
+
 def cmd_link_setup(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local link setup",
                                    description="Prepare this Spark and the one cabled to it to run models across both. Safe to run again.")
@@ -2733,6 +2775,8 @@ def cmd_use(argv):
         raise LocalError(f"{rid} doesn't fit: {fit_reason}")
       say(f"Warning: {reason}")
   measured_load = load_measurement(catalog, catalog.recipes[rid], profile, gpu).get("load_seconds")
+  # Before detaching: sudo needs this terminal.
+  prepare_host(gpu)
   if args.detach:
     return detach_use(rid, args, catalog.recipes[rid], measured_load)
   # A first setup shows in the panel from now on: waiting for the lock, then

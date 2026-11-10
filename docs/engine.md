@@ -82,6 +82,12 @@ also checks current free RAM and GPU memory and reserves 8 GiB for the desktop.
 Use, start and removal are serialized. Several models can run at once on distinct,
 stable loopback ports, beginning at 11435.
 
+Without Omarchy (a DGX Spark on DGX OS, run from a checkout), the platform is read from
+`nvidia-smi`, and the first `use` on an NVIDIA machine runs `link setup`'s host script here
+through sudo when Podman is missing or can't read the CDI spec. Units are written for
+Podman 4.9 too: `GroupAdd`, `Entrypoint` and `Notify=healthy` also go through `PodmanArgs`,
+and their hooks call the checkout's entry script when `omarchy-agent-local` isn't installed.
+
 Downloads share verified blobs. Each setup materializes an immutable
 `models/<recipe>/<fileset>` directory, always mounted read-only at `/models`.
 A new file set leaves the previous unit's files intact until activation succeeds.
