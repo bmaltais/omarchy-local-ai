@@ -251,6 +251,19 @@ env_rt = copy.deepcopy(rt)
 env_rt["inputs"]["model"] = {"env": "MODEL_PATH"}
 env_text = a.render_container("model", changed, env_rt, variant, roles, gpu, "a" * 16)
 check("environment values are quoted and escaped", 'Environment="MODEL_PATH=/models/50%% $$HOME \\"quoted space\\" \\\\tail"' in env_text)
+check("units wait for health on Podman 4 too", "Notify=healthy" in text and "PodmanArgs=--sdnotify=healthy" in text)
+compat_rt = copy.deepcopy(rt)
+compat_rt["run"] = dict(compat_rt.get("run", {}), group_add="keep-groups")
+compat_text = a.render_container("model", changed, compat_rt, variant, roles, gpu, "a" * 16)
+check("group_add renders for Podman 4's Quadlet", "PodmanArgs=--group-add=keep-groups" in compat_text and "GroupAdd=" not in compat_text)
+def fake_platform_run(argv, **kwargs):
+  if argv[0] == "omarchy-hw-platform":
+    raise FileNotFoundError(argv[0])
+  return subprocess.CompletedProcess(argv, 0, "NVIDIA GB10\n", "")
+with patch.object(a.subprocess, "run", side_effect=fake_platform_run), patch.object(a.os, "uname", return_value=SimpleNamespace(machine="aarch64")):
+  check("without Omarchy a Spark is named from nvidia-smi", a.platform_name() == "aarch64-gb10")
+with patch.object(a.subprocess, "run", side_effect=FileNotFoundError), patch.object(a.os, "uname", return_value=SimpleNamespace(machine="x86_64")):
+  check("without Omarchy or a Spark the platform stays x86", a.platform_name() == "x86")
 positional_rt = copy.deepcopy(runtime)
 positional_rt["command"] = ["server", "serve"]
 positional_rt["inputs"]["model"] = {"positional": True}
@@ -344,7 +357,7 @@ pair_port = a.port_for("paired")
 check("the pair unit shares the host network and publishes nothing", "Network=host" in pair_text and "PublishPort" not in pair_text)
 check("the pair unit binds its API to loopback on the model's port", f'"--host" "127.0.0.1" "--port" "{pair_port}"' in pair_text and f"127.0.0.1:{pair_port}/health" in pair_text)
 check("the pair unit mounts rank 0's state folder writable and reads the link from its environment file", f"models/paired/{'b' * 16}.rank0:/state\n" in pair_text and "EnvironmentFile=%h/.local/state/omarchy/agent-local/pair/paired.env" in pair_text)
-check("the pair unit starts and stops rank 1 with itself", "ExecStartPre=/usr/bin/env omarchy-agent-local link-worker start paired" in pair_text and "ExecStopPost=-/usr/bin/env omarchy-agent-local link-worker stop paired" in pair_text)
+check("the pair unit starts and stops rank 1 with itself", f"ExecStartPre={a.hook_command()} link-worker start paired" in pair_text and f"ExecStopPost=-{a.hook_command()} link-worker stop paired" in pair_text)
 _, rank_argv, _, _ = a.head_argv(pair_rt, paired, paired["variant"][0], {"model": "model"}, "paired")
 check("both ranks run the runtime's command, bound to loopback", rank_argv[-4:] == ["--host", "127.0.0.1", "--port", str(a.port_for("paired"))] and rank_argv[:2] == ["server", "serve"])
 # Each rank gets its own link settings, and rank 1 the head's command inside the same restrictions.

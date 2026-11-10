@@ -19,6 +19,29 @@ Running models also requires Podman, crun and the Omarchy hardware helpers. Test
 
 The engine reads the catalog beside `agent_local.py`, following the installed entry script's symlink. Set `OMARCHY_LOCAL_AI_CATALOG` to another catalog directory for development. State and model data live in `~/.local/state/omarchy/agent-local` and `~/.local/share/omarchy/agent-local`.
 
+## DGX Spark without Omarchy
+
+A DGX Spark on NVIDIA's DGX OS (Ubuntu 24.04) runs the engine from a checkout, with nothing of Omarchy installed. The GB10 is detected through `nvidia-smi`. The first `use` asks for sudo once, in a terminal, to install Podman, keep a copy of NVIDIA's CDI spec that Podman 4.9 reads, and let your user linger, the same host setup `link setup` gives a paired Spark:
+
+```bash
+git clone https://github.com/omacom/omarchy-local-ai && cd omarchy-local-ai
+./omarchy-local-ai list
+./omarchy-local-ai use best
+./omarchy-local-ai status
+```
+
+The model serves an OpenAI-compatible API on loopback (`status` shows the endpoint, from port 11435), authenticated by the key in `~/.config/omarchy/agent-local/key`. Units call back into the checkout, so run `use` again after moving it.
+
+To use the model from another machine, forward its port over SSH and copy the key:
+
+```bash
+ssh -N -L 11435:127.0.0.1:11435 spark.local &
+scp spark.local:.config/omarchy/agent-local/key ~/spark-key
+curl -H "Authorization: Bearer $(cat ~/spark-key)" http://127.0.0.1:11435/v1/models
+```
+
+Point any OpenAI-compatible client at `http://127.0.0.1:11435/v1` with that key; `./omarchy-local-ai overlay opencode` on the Spark writes an OpenCode provider configuration to start from (change its key path to the copied key). The endpoint stays on loopback at both ends and only SSH crosses the network.
+
 ## Catalog layout
 
 - `catalog.toml` — schema and release version (the single version source).
