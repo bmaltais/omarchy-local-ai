@@ -798,4 +798,24 @@ with patch.object(a, "load_catalog", return_value=cat) as load, patch.object(a, 
   a.cmd_refresh(["--quiet"])
   check("refresh loads catalog and machine profile once", load.call_count == machine.call_count == 1)
 
+
+# A remote runs what this machine can't: listed, placed and tunnelled to here.
+cat = a.load_catalog_dir(os.environ["ENGINE_ROOT"])
+here = {"platform": "x86", "ram_class": 64, "ram_gib": 62.0, "gpus": []}
+dgx = {"platform": "aarch64-gb10", "ram_class": 128, "ram_gib": 121.6, "gpus": [spark]}
+bolt = "nemotron-3.5-bolt-tensorfold"
+with patch.object(a, "load_remotes", return_value={"me@dgx": dgx}):
+  rows = {row["id"]: row for row in a.recipe_listing(cat, here)}
+  check("a recipe only the remote runs is listed as available there", rows[bolt]["available"] and rows[bolt]["remote"] == "me@dgx" and "me@dgx" in rows[bolt]["summary"])
+  check("what the remote can't run either stays unavailable", not rows["qwen3.8-27b-gufo"]["available"] and "remote" not in rows["qwen3.8-27b-gufo"])
+  check("use places a recipe this machine can't run on the remote", a.remote_placement(cat, bolt, here) == "me@dgx" and a.remote_placement(cat, "best", here) == "me@dgx")
+  check("use keeps what this machine runs here", a.remote_placement(cat, bolt, dgx) is None)
+  raises("use --on names a remote that's set up", lambda: a.remote_placement(cat, bolt, here, on="other"), "isn't set up as a remote")
+remote_text = a.render_remote_unit(bolt, "me@dgx", 11435)
+check("the tunnel unit starts the model there before forwarding this machine's port to it",
+      f"me@dgx\" \"~/.local/share/omarchy-local-ai/omarchy-local-ai start {bolt}\"" in remote_text and f"-L 127.0.0.1:{a.port_for(bolt)}:127.0.0.1:11435 me@dgx; exit 1" in remote_text)
+check("only a stop, not a dropped connection, stops the model there", '[ \\"$$SERVICE_RESULT\\" = success ] && exec' in remote_text and f"omarchy-local-ai stop {bolt}" in remote_text)
+remote_manifest = {"recipe_id": bolt, "remote": {"host": "me@dgx", "port": 11435}, "profile": dgx, "variant": {"peak_ram_gib": 999, "peak_gpu_gib": 999}}
+check("a remote model is admitted by the remote, against its memory", a.start_fit(remote_manifest, here) == (True, "") and a.nodes_ram_gib(remote_manifest, here) == 121.6)
+
 PY

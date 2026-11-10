@@ -158,6 +158,28 @@ container, files and, when no other paired recipe uses it, its image; while the 
 can't be reached it fails before deleting anything, so it can run again, unless
 given `--local-only` for a peer that's gone for good.
 
+## Remote machines
+
+`remote add <host>` prepares a machine reached over SSH to run models for this one: the
+SSH key and host setup of `link setup` (`HOST_SETUP`, as root through sudo there), a copy of
+this engine and catalog in `~/.local/share/omarchy-local-ai` (rsync, `.git` left out) and this
+machine's API key, written to the remote's key file and Podman secret. It records the host and
+its machine profile in `remotes.json`.
+
+`recipe_listing` marks what this machine can't run but a remote can as available, with that
+remote's variant, measurements and `remote` host. `use` places a recipe on the remote named by
+`--on`, else on the remote it was set up on, else, when this machine can't run it, on the first
+remote that can. The remote's engine sets it up, admits it and starts it as on any machine,
+through `use` over SSH. Here its manifest is the remote's, plus `remote: {host, port}`, and its
+unit (`~/.config/systemd/user/omarchy-agent-local-model-<recipe>.service`, not Quadlet) runs
+`start <recipe>` there as `ExecStartPre`, then forwards the model's port here to the remote's
+loopback port with `ssh -N -L`, ready once the port accepts connections. Its `ExecStopPost`
+runs `stop <recipe>` there only when the unit stopped cleanly; ssh exiting on its own (a dropped
+connection) fails the unit, which restarts and leaves the model running there. The API stays on
+loopback on both machines and only SSH crosses the network. Start admission, memory figures and
+fit are the remote's; `logs` adds the remote's logs; `remove` removes the model there first and,
+while the remote can't be reached, fails before deleting anything here unless `--local-only`.
+
 ## State and panel API
 
 Paths are relative to the user's home. JSON caches are atomically replaced.
@@ -171,6 +193,7 @@ Paths are relative to the user's home. JSON caches are atomically replaced.
 | `.local/state/omarchy/agent-local/loads/`, `stops/`, `removal_rate` | Measured progress timings. |
 | `.local/state/omarchy/agent-local/errors/`, `removing/` | Per-model error and removal prediction. |
 | `.local/state/omarchy/agent-local/installing/<recipe>.json` | A first setup in progress or failed: name, vendor, phase, bytes, speed, start, error and the `use` process id. |
+| `.local/state/omarchy/agent-local/remotes.json` | Remotes by SSH name, with the machine profile each reported. |
 | `.local/state/omarchy/agent-local/pair.json`, `pair/<recipe>.env` | The detected peer (address, host name, home, RAM); a paired unit's link environment, written at each start. |
 | `.local/state/omarchy/agent-local/lock`, `status.lock` | Lifecycle admission and status snapshot locks. |
 | `.local/share/omarchy/agent-local/blobs/`, `models/` | Shared blob store and immutable file sets. |

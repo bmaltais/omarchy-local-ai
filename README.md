@@ -42,6 +42,18 @@ curl -H "Authorization: Bearer $(cat ~/spark-key)" http://127.0.0.1:11435/v1/mod
 
 Point any OpenAI-compatible client at `http://127.0.0.1:11435/v1` with that key; `./omarchy-local-ai overlay opencode` on the Spark writes an OpenCode provider configuration to start from (change its key path to the copied key). The endpoint stays on loopback at both ends and only SSH crosses the network.
 
+## Run models on another machine
+
+An Omarchy machine can run models on another one over SSH, a DGX Spark on DGX OS for example, as if they ran on it: the agents panel lists, starts, stops and removes them, and `omarchy agent --local-model` launches agents against them.
+
+```bash
+omarchy agent local remote add user@spark-1234.local   # once: asks for its password and sudo once
+omarchy agent local list                               # what only the remote runs is listed, "Runs on user@spark-1234.local"
+omarchy agent local use nemotron-3.5-bolt-tensorfold   # set up there, reached here
+```
+
+`remote add` gives the remote this machine's SSH key, the same host setup `link setup` gives a peer, a copy of this engine and catalog (in `~/.local/share/omarchy-local-ai`, run again after updating) and this machine's API key. `use` sends what this machine can't run to the remote (`--on <host>` sends anything), whose engine sets it up and starts it on its own loopback. Here the model is a unit that starts it there, forwards its usual port here to the remote's over SSH, and stops it there when stopped. A dropped connection reconnects without stopping the model.
+
 ## Catalog layout
 
 - `catalog.toml` — schema and release version (the single version source).
