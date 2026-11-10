@@ -1,9 +1,9 @@
 recipe = "glm-5.3-flash-tensorfold-pair"
-measured_at = "2026-11-09"
-catalog_version = "0.4.0"
+measured_at = "2026-11-10"
+catalog_version = "0.5.0"
 image = "ghcr.io/omacom/tensorfold-glm53@sha256:9dc2390963742a04d43196692ed80529e9ecca919fbc5160fd85f62597845b8b"
 ctx = 262144
-load_seconds = 124.0
+load_seconds = 100.0
 fileset = "20d67758e044198f"
 method = "tools/bench: 1 warmup, then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
 
@@ -17,33 +17,33 @@ cpu = "Cortex-X925 + Cortex-A725"
 gpu_driver = "615.78.08"
 
 [memory]
-observed_at_load_gib = 90.4
-min_available_during_bench_gib = 12.2
+observed_at_load_gib = 90.2
+min_available_during_bench_gib = 10.8
 total_gib = 121.9
 
 [short]
 prompt_tokens = 34
 completion_tokens = 50
 ttft_s = 0.19
-prefill_tok_s = 183.6
-decode_tok_s = 50.6
-total_s = 1.15
+prefill_tok_s = 174.7
+decode_tok_s = 48.0
+total_s = 1.22
 
 [long]
 prompt_tokens = 30225
 completion_tokens = 512
-ttft_s = 17.29
-prefill_tok_s = 1748.5
-decode_tok_s = 37.1
-total_s = 31.07
+ttft_s = 18.12
+prefill_tok_s = 1668.4
+decode_tok_s = 35.1
+total_s = 32.65
 
 [edit]
 prompt_tokens = 2109
 completion_tokens = 512
-ttft_s = 1.32
-prefill_tok_s = 1596.5
-decode_tok_s = 127.9
-total_s = 5.32
+ttft_s = 1.4
+prefill_tok_s = 1507.5
+decode_tok_s = 120.4
+total_s = 5.64
 
 [[artifacts]]
 repo = "Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold"

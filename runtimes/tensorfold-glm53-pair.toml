@@ -33,7 +33,9 @@ state = "/state"
 HOME = "/state"
 HF_HUB_OFFLINE = "1"
 TENSORFOLD_NO_LIVE = "1"
-TENSORFOLD_MEMORY_RESERVE_GIB = "12"
+# What the engine leaves free once loaded: MiaAI-Lab's served pair runs 9.5 (its default is 12, which a head running
+# the Omarchy desktop can't spare beside the weights and one window).
+TENSORFOLD_MEMORY_RESERVE_GIB = "9.5"
 TENSORFOLD_PREFILL_SHARE = "0.68"
 TF_CUDA_DEVICE = "0"
 TF_GLM_RANK = "@RANK@"
