@@ -12,6 +12,8 @@ import concurrent.futures
 import fcntl
 import fnmatch
 import hashlib
+import ipaddress
+import itertools
 import json
 import os
 import pty
@@ -64,14 +66,23 @@ ENV_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 ARG_RE = re.compile(r"^-{1,2}[A-Za-z0-9][A-Za-z0-9-]*$")
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
-# Run options a runtime may ask for, each mapped to exactly one Quadlet line. Network mode,
-# read-only root, capabilities and privileges are not options: every container gets the same.
+# Run options a runtime may ask for, each mapped to exactly one Quadlet line. Read-only root,
+# capabilities and privileges are not options: every container gets the same. The network is
+# the internal one, except for runtimes whose ranks span two machines (network = "fabric"):
+# they share the host's network namespace to reach each other over the ConnectX-7 link, and
+# their API is bound to loopback by the engine.
 RUN_OPTIONS = {
-  "devices": ("render", "kfd", "cdi-nvidia"),
+  "devices": ("render", "kfd", "cdi-nvidia", "infiniband"),
   "group_add": ("keep-groups",),
   "memlock": ("unlimited",),
+  "network": ("fabric",),
 }
 MAX_SHM_GIB = 16
+# A machine joined to another of its kind by a direct ConnectX-7 cable runs recipes across both
+# as one GPU family of its own, with each machine's memory as the per-node figure.
+PAIR_FAMILIES = {"nvidia-gb10": "nvidia-gb10-pair"}
+# The link's NCCL settings, which the engine finds on each machine at every start.
+PAIR_NCCL = ("NCCL_SOCKET_IFNAME", "NCCL_IB_HCA", "NCCL_IB_GID_INDEX")
 
 
 class LocalError(Exception):
@@ -218,13 +229,22 @@ def ram_class(ram_gib):
 
 
 def machine_profile():
+  """This machine's GPUs and memory. The machine `link setup` joined to this one (pair.json)
+  adds a pair GPU."""
   mem = meminfo()
   ram = gib(mem.get("MemTotal", 0))
   platform = platform_name()
   gpus = amd_gpus()
   if platform in NVIDIA_UNIFIED_FAMILIES:
     gpus.append({"vendor": "nvidia", "family": NVIDIA_UNIFIED_FAMILIES[platform], "render_node": "", "vram_gib": 0, "gtt_gib": 0, "unified": True, "memory_gib": round(ram, 2), "sysfs": ""})
-  return {"platform": platform, "ram_gib": round(ram, 2), "ram_class": ram_class(ram), "gpus": gpus}
+  profile = {"platform": platform, "ram_gib": round(ram, 2), "ram_class": ram_class(ram), "gpus": gpus}
+  pair = cached_pair(profile)
+  if pair:
+    local = next(gpu for gpu in gpus if gpu["family"] in PAIR_FAMILIES)
+    # Memory figures are per node: the smaller machine bounds what each rank may hold.
+    gpus.append(dict(local, family=PAIR_FAMILIES[local["family"]], nodes=2, memory_gib=round(min(ram, pair["ram_gib"]), 2), peer=pair["peer"]))
+    profile["pair"] = pair
+  return profile
 
 
 def choose_gpu(profile, family=None):
@@ -236,11 +256,192 @@ def choose_gpu(profile, family=None):
     return max(matches, key=lambda gpu: gpu["memory_gib"])
   if not gpus:
     raise LocalError("No supported GPU found on this machine")
-  best = max(gpus, key=lambda gpu: gpu["memory_gib"])
-  rivals = {gpu["family"] for gpu in gpus if gpu["memory_gib"] == best["memory_gib"]}
+  # A pair outranks its own single node, whose memory per node it shares.
+  rank = lambda gpu: (gpu.get("nodes", 1), gpu["memory_gib"])
+  best = max(gpus, key=rank)
+  rivals = {gpu["family"] for gpu in gpus if rank(gpu) == rank(best)}
   if len(rivals) > 1:
     raise LocalError(f"Several GPU families tie for the most memory ({', '.join(sorted(rivals))}); choose one with --gpu")
   return best
+
+
+def recipe_gpu(profile, recipe, family=None):
+  """The GPU a recipe runs on here: the one named, else the best of this machine's GPUs the
+  recipe was measured on (a pair machine still runs single-node recipes on its own GPU)."""
+  if family:
+    return choose_gpu(profile, family)
+  measured = {hw.get("gpu") for hw in recipe.get("hardware", [])}
+  matches = [gpu for gpu in profile["gpus"] if gpu["family"] in measured]
+  if matches:
+    return max(matches, key=lambda gpu: (gpu.get("nodes", 1), gpu["memory_gib"]))
+  return choose_gpu(profile)
+
+
+# ---------------------------------------------------------------- paired machines
+#
+# Two DGX Sparks cabled through their ConnectX-7 ports run one model as two ranks: this machine
+# serves rank 0 and the API, the peer runs rank 1. The peer is found on the cable, reached by
+# key-based SSH (no password prompts: BatchMode), and needs rootless Podman with the NVIDIA CDI
+# GPU and its RDMA devices. Nothing of the engine is installed there; this machine drives it.
+
+def pair_key():
+  return os.path.join(home(), ".ssh", "id_ed25519")
+
+
+def pair_ssh_argv(tty=False):
+  """SSH to the peer with the key `link setup` installed there, and only that key: an agent
+  offering several (1Password's does) would spend the server's MaxAuthTries before it."""
+  argv = ["ssh", "-t" if tty else "-T", "-o", "ConnectTimeout=4", "-o", "StrictHostKeyChecking=accept-new", "-o", "ServerAliveInterval=15"]
+  if not tty:
+    argv += ["-o", "BatchMode=yes"]
+  if os.path.exists(pair_key()):
+    argv += ["-o", "IdentitiesOnly=yes", "-i", pair_key()]
+  return argv
+
+# This machine's (or, sent over SSH, the peer's) side of the cable to an address: the netdev and
+# source address the route takes, its RoCE device, the RoCE v2 GID index holding that IPv4
+# address (an all-zero or v1 entry makes NCCL fail a minute in), and every RoCE device with an
+# IPv4 RoCE v2 GID at the same index, the link's own first: a Spark's QSFP port is two PCIe
+# links, each its own netdev and rail. Standard library only, so it runs unchanged on the peer.
+FABRIC_SIDE = r'''
+import ipaddress, json, os, subprocess
+def fabric_side(peer):
+  route = subprocess.run(["ip", "-o", "-4", "route", "get", peer], capture_output=True, text=True).stdout.split()
+  if "dev" not in route or "src" not in route:
+    return None
+  dev, src = route[route.index("dev") + 1], route[route.index("src") + 1]
+  base = "/sys/class/infiniband"
+  def hca_of(netdev):
+    try:
+      return sorted(os.listdir(f"/sys/class/net/{netdev}/device/infiniband"))[0]
+    except (OSError, IndexError):
+      return None
+  hca = hca_of(dev)
+  if not hca:
+    return {"addr": src, "dev": dev, "hca": None, "gid": None, "hcas": []}
+  def v2_ipv4(device, index):
+    try:
+      gid = open(f"{base}/{device}/ports/1/gids/{index}").read().strip()
+      kind = open(f"{base}/{device}/ports/1/gid_attrs/types/{index}").read().strip()
+    except OSError:
+      return None
+    return gid if gid.startswith("0000:0000:0000:0000:0000:ffff:") and "v2" in kind else None
+  want = "0000:0000:0000:0000:0000:ffff:" + "{:02x}{:02x}:{:02x}{:02x}".format(*ipaddress.IPv4Address(src).packed)
+  gid = next((index for index in sorted(os.listdir(f"{base}/{hca}/ports/1/gids"), key=int) if v2_ipv4(hca, index) == want), None)
+  hcas = [hca]
+  if gid is not None:
+    for other in sorted(os.listdir(base)):
+      if other != hca and v2_ipv4(other, gid):
+        hcas.append(other)
+  def netdevs(device):
+    try:
+      return sorted(os.listdir(f"{base}/{device}/device/net"))
+    except OSError:
+      return []
+  return {"addr": src, "dev": dev, "hca": hca, "gid": gid, "hcas": hcas, "devs": [d for h in hcas for d in netdevs(h)]}
+def ports():
+  """Each RDMA-capable netdev with a carrier, and its IPv4 addresses as address/prefix."""
+  links = json.loads(subprocess.run(["ip", "-j", "-4", "addr"], capture_output=True, text=True).stdout or "[]")
+  found = {}
+  for link in links:
+    dev = link.get("ifname", "")
+    try:
+      carrier = open(f"/sys/class/net/{dev}/carrier").read().strip() == "1"
+    except OSError:
+      carrier = False
+    if carrier and os.path.isdir(f"/sys/class/net/{dev}/device/infiniband"):
+      found[dev] = [f"{a['local']}/{a['prefixlen']}" for a in link.get("addr_info", []) if a.get("family") == "inet"]
+  return found
+def node():
+  name = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True).stdout.strip()
+  mem = {line.split(":")[0]: int(line.split()[1]) * 1024 for line in open("/proc/meminfo") if line.split()[1:2]}
+  return {"gpu": name, "ram_total": mem.get("MemTotal", 0), "ram_available": mem.get("MemAvailable", 0), "home": os.path.expanduser("~"), "host": os.uname().nodename}
+'''
+
+
+def _fabric(peer):
+  scope = {}
+  exec(FABRIC_SIDE, scope)
+  return scope["fabric_side"](peer)
+
+
+def pair_ssh(peer, command, input=None, timeout=60, check=True):
+  """Runs a shell command on the peer. Every value interpolated into it is shlex-quoted by the caller."""
+  try:
+    result = subprocess.run(pair_ssh_argv() + [peer, command], input=input, capture_output=True, text=True, timeout=timeout)
+  except subprocess.TimeoutExpired:
+    raise LocalError(f"The peer {peer} didn't answer within {timeout}s", short="Peer machine not answering")
+  if check and result.returncode != 0:
+    raise LocalError(f"On {peer}: {command.split()[0]} failed: {result.stderr.strip()[-800:]}", short="Failed on the peer machine")
+  return result
+
+
+def pair_python(peer, expression, timeout=20):
+  """Evaluates FABRIC_SIDE's functions on the peer and returns the JSON result."""
+  program = FABRIC_SIDE + f"\nprint(json.dumps({expression}))\n"
+  result = pair_ssh(peer, "python3 -I -", input=program, timeout=timeout)
+  return json.loads(result.stdout)
+
+
+PEER_RE = re.compile(r"^([A-Za-z0-9._-]+@)?[A-Za-z0-9._:%-]+$")
+
+
+def peer_address(peer):
+  """The address part of an SSH target, user@address or address."""
+  return peer.rsplit("@", 1)[-1]
+
+
+def pair_path():
+  return os.path.join(state_dir(), "pair.json")
+
+
+def cached_pair(profile):
+  if profile["platform"] not in NVIDIA_UNIFIED_FAMILIES or NVIDIA_UNIFIED_FAMILIES[profile["platform"]] not in PAIR_FAMILIES:
+    return None
+  try:
+    with open(pair_path()) as handle:
+      pair = json.load(handle)
+  except (OSError, ValueError):
+    return None
+  return pair if isinstance(pair, dict) and pair.get("peer") else None
+
+
+def cable_peer(peer):
+  """The peer as SSH reaches it over the cable from now on: its address on a port both machines
+  share, with the user it was given."""
+  theirs, _ = link_rules(local_ports(), pair_python(peer, "ports()"), set(local_ports()))
+  if not theirs:
+    raise LocalError("The cable has no address on both ends: check that both ends of the link are up")
+  user = peer.rsplit("@", 1)[0] + "@" if "@" in peer else ""
+  return user + theirs[0].split("=", 1)[1]
+
+
+def record_pair(profile, peer):
+  """Records the machine link setup joined to this one, as SSH reaches it over the cable, once it
+  shows a GB10 of this machine's RAM class with a RoCE device on the route to it."""
+  node = pair_python(peer, "node()", timeout=8)
+  if "GB10" not in node.get("gpu", "") or ram_class(gib(node["ram_total"])) != profile["ram_class"]:
+    raise LocalError(f"{peer} isn't a DGX Spark of this one's memory ({node.get('gpu') or 'no GPU'}, {gib(node['ram_total']):.0f} GiB)")
+  side = _fabric(peer_address(peer))
+  if not side or not side.get("hca"):
+    raise LocalError(f"The route to {peer_address(peer)} doesn't go over a ConnectX-7 port")
+  pair = {"peer": peer, "host": node["host"], "home": node["home"], "ram_gib": round(gib(node["ram_total"]), 2)}
+  write_atomic(pair_path(), json.dumps(pair, indent=2) + "\n")
+  return pair
+
+
+def pair_link(pair):
+  """Both sides of the cable as the ranks use them now: rank 0 here, rank 1 on the peer.
+  Rails are used only when both sides have as many."""
+  here = _fabric(peer_address(pair["peer"]))
+  if not here or not here.get("hca") or here.get("gid") is None:
+    raise LocalError(f"No RoCE v2 address on this machine's link to {pair['peer']}: is it the ConnectX-7 cable, with an IPv4 address on each end?", short="Pair link has no RoCE address")
+  there = pair_python(pair["peer"], f"fabric_side({here['addr']!r})")
+  if not there or not there.get("hca") or there.get("gid") is None:
+    raise LocalError(f"The peer {pair['peer']} has no RoCE v2 address on its link back to {here['addr']}", short="Pair link has no RoCE address")
+  if len(here["hcas"]) != len(there["hcas"]):
+    here["hcas"], there["hcas"] = here["hcas"][:1], there["hcas"][:1]
+  return here, there
 
 
 # ---------------------------------------------------------------- validation
@@ -386,6 +587,48 @@ def validate_runtime(rid, runtime, root=None):
       errors.append(f"{where}: key_on_cmdline needs shell = '/bin/bash' to substitute the key inside the container")
   if runtime.get("shell") and runtime.get("shell") != "/bin/bash":
     errors.append(f"{where}.shell: only /bin/bash is supported")
+  errors += validate_pair_runtime(where, runtime, run)
+  return errors
+
+
+def validate_pair_runtime(where, runtime, run):
+  """A runtime spanning two machines: its own network, the ranks' state folder and environment,
+  and the flags the engine binds its API to loopback with. Both ranks run the runtime's command,
+  which their servers compare."""
+  errors = []
+  pair = runtime.get("pair")
+  fabric = run.get("network") == "fabric"
+  if pair is None:
+    if fabric:
+      errors.append(f"{where}.run.network: 'fabric' is only for runtimes with a [pair] table")
+    return errors
+  if not fabric:
+    errors.append(f"{where}.pair: a paired runtime needs run.network = 'fabric'")
+  if not isinstance(pair, dict):
+    return errors + [f"{where}.pair: must be a table"]
+  if pair.get("nodes") != 2:
+    errors.append(f"{where}.pair.nodes: only 2 is supported")
+  port = pair.get("master_port")
+  if not isinstance(port, int) or not 1024 <= port <= 65535:
+    errors.append(f"{where}.pair.master_port: must be 1024-65535")
+  state = pair.get("state")
+  if not (isinstance(state, str) and re.match(r"^/[a-z][a-z0-9_-]*$", state) and state not in ("/models", "/tmp")):
+    errors.append(f"{where}.pair.state: must be one top-level path such as /state, not /models or /tmp")
+  env = pair.get("env", {})
+  if not isinstance(env, dict):
+    errors.append(f"{where}.pair.env: must be a table")
+    env = {}
+  for key, value in env.items():
+    if not ENV_RE.match(key) or key == KEY_ENV or key in PAIR_NCCL:
+      errors.append(f"{where}.pair.env.{key}: not an allowed variable name ({', '.join(PAIR_NCCL)} are the engine's)")
+    _safe_string(value, f"{where}.pair.env.{key}", errors)
+  listen = runtime.get("listen")
+  if not (isinstance(listen, dict) and set(listen) == {"host", "port"} and all(isinstance(v, str) and ARG_RE.match(v) for v in listen.values())):
+    errors.append(f"{where}.listen: a host-network runtime names its bind flags, as {{ host = '--host', port = '--port' }}")
+  elif any(flag in runtime.get("command", []) for flag in listen.values()):
+    errors.append(f"{where}.command: the engine sets {', '.join(listen.values())} itself")
+  elif not all(flag in runtime.get("reserved", []) for flag in listen.values()):
+    errors.append(f"{where}.reserved: must reserve {', '.join(listen.values())}")
   return errors
 
 
@@ -627,6 +870,8 @@ def load_catalog():
 
 
 def runtime_supports(runtime, gpu):
+  if bool(runtime.get("pair")) != (gpu.get("nodes", 1) == 2):
+    return False
   devices = runtime.get("run", {}).get("devices", [])
   if gpu["vendor"] == "amd":
     return "cdi-nvidia" not in devices
@@ -684,7 +929,26 @@ def match_class(best, profile, gpu):
                if gpu_class(entry["gpu"]) == gpu_class(gpu["family"]) and entry["ram_class"] == profile["ram_class"]), None)
 
 
-def resolve_best(catalog, profile, gpu, ctx=None):
+def resolve_best(catalog, profile, gpu=None, ctx=None):
+  """The first fitting recipe of the class of `gpu`, or, with none named, of this machine's
+  GPUs from the strongest down: a pair's class first, then its own node's."""
+  if gpu is not None:
+    return _resolve_class(catalog, profile, gpu, ctx)
+  gpus = sorted(profile["gpus"], key=lambda g: (g.get("nodes", 1), g["memory_gib"]), reverse=True)
+  if not gpus:
+    raise LocalError("No supported GPU found on this machine")
+  failures = []
+  for candidate in gpus:
+    try:
+      return _resolve_class(catalog, profile, candidate, ctx)
+    except LocalError as error:
+      failures.append((candidate, error))
+  # The most telling failure: the first GPU that has a recommendation at all.
+  classed = [error for candidate, error in failures if match_class(catalog.best, profile, candidate)]
+  raise classed[0] if classed else failures[0][1]
+
+
+def _resolve_class(catalog, profile, gpu, ctx=None):
   entry = match_class(catalog.best, profile, gpu)
   if entry is None:
     near = [rid for rid, recipe in catalog.recipes.items() if any(gpu_class(hw.get("gpu")) == gpu_class(gpu["family"]) for hw in recipe.get("hardware", []))]
@@ -717,18 +981,19 @@ def recipe_listing(catalog, profile, running=()):
   best_id = None
   if gpu:
     try:
-      best_id = resolve_best(catalog, profile, gpu)[0]
+      best_id = resolve_best(catalog, profile)[0]
     except LocalError:
       best_id = None
   for rid in sorted(catalog.recipes):
     recipe = catalog.recipes[rid]
     runtime = catalog.runtimes.get(recipe.get("runtime"), {})
     if gpu:
-      variant, reason = compatibility(catalog, rid, profile, gpu)
+      own = recipe_gpu(profile, recipe)
+      variant, reason = compatibility(catalog, rid, profile, own)
     else:
-      variant, reason = None, gpu_error
+      own, variant, reason = None, None, gpu_error
     review = load_review(catalog, runtime) if runtime.get("tier") == "third-party" else {}
-    measured = load_measurement(catalog, recipe, profile, gpu) if variant else {}
+    measured = load_measurement(catalog, recipe, profile, own) if variant else {}
     rows.append({
       "id": rid,
       "name": recipe.get("name", rid),
@@ -1072,8 +1337,18 @@ def prune_filesets(rid, keep):
   if not os.path.isdir(base) or not FILESET_RE.match(keep or ""):
     return
   for name in os.listdir(base):
-    if name != keep:
+    # A paired recipe's rank folders (<fileset>.rank<N>) go with their file set.
+    if name != keep and not name.startswith(keep + "."):
       shutil.rmtree(os.path.join(base, name), ignore_errors=True)
+  # The peer's copies too, once the setup that replaced them is the current one.
+  setup = (load_model(rid) or {}).get("pair")
+  if setup:
+    peer_base = os.path.dirname(peer_fileset_dir(setup, rid, keep))
+    q = shlex.quote
+    try:
+      pair_ssh(setup["peer"], f"cd {q(peer_base)} && for d in *; do case $d in {q(keep)}|{q(keep)}.*) ;; *) rm -rf -- \"$d\" ;; esac; done", check=False)
+    except LocalError:
+      pass
 
 
 def materialize(rid, files, roles, seed_dir=None, progress=None):
@@ -1184,6 +1459,8 @@ def device_lines(runtime, gpu):
       lines.append("AddDevice=/dev/kfd")
     elif device == "cdi-nvidia":
       lines.append("AddDevice=nvidia.com/gpu=all")
+    elif device == "infiniband":
+      lines.append("AddDevice=/dev/infiniband")
   return lines
 
 
@@ -1207,6 +1484,8 @@ def render_container(rid, recipe, runtime, variant, roles, gpu, fileset):
   entrypoint, argv, env, _ = server_invocation(runtime, recipe, variant, roles, rid)
   run = runtime.get("run", {})
   key_mapping = runtime["inputs"]["key"]
+  pair = runtime.get("pair")
+  port = port_for(rid)
   lines = [
     "# Generated by omarchy-agent-local use; changes are overwritten.",
     "[Unit]",
@@ -1222,11 +1501,26 @@ def render_container(rid, recipe, runtime, variant, roles, gpu, fileset):
     f"ContainerName={unit_base(rid)}",
     f"Image={runtime['image']}",
     f"Label=org.omarchy.agent-local.recipe={rid}",
-    f"Network={NETWORK_UNIT}",
-    f"PublishPort=127.0.0.1:{port_for(rid)}:{runtime['port']}",
-    f"Volume=%h/.local/share/omarchy/agent-local/models/{rid}/{fileset}:/models:ro",
-    f"Secret={SECRET},type=env,target={KEY_ENV}",
   ]
+  if pair:
+    # Rank 0 shares the host's network to reach rank 1 over the cable; its API listens on
+    # loopback only, on the model's own port.
+    lines += [
+      "Network=host",
+      f"Volume=%h/.local/share/omarchy/agent-local/models/{rid}/{fileset}:/models:ro",
+      f"Volume=%h/.local/share/omarchy/agent-local/models/{rid}/{fileset}.rank0:{pair['state']}",
+      f"EnvironmentFile=%h/.local/state/omarchy/agent-local/pair/{rid}.env",
+      "Ulimit=stack=67108864:67108864",
+      "Tmpfs=/tmp",
+    ]
+    entrypoint, argv, env, _ = head_argv(runtime, recipe, variant, roles, rid)
+  else:
+    lines += [
+      f"Network={NETWORK_UNIT}",
+      f"PublishPort=127.0.0.1:{port}:{runtime['port']}",
+      f"Volume=%h/.local/share/omarchy/agent-local/models/{rid}/{fileset}:/models:ro",
+    ]
+  lines.append(f"Secret={SECRET},type=env,target={KEY_ENV}")
   if "env" in key_mapping:
     lines.append(f"Secret={SECRET},type=env,target={key_mapping['env']}")
   lines += device_lines(runtime, gpu)
@@ -1243,7 +1537,7 @@ def render_container(rid, recipe, runtime, variant, roles, gpu, fileset):
     lines.append(f"Entrypoint={_systemd_escape(entrypoint)}")
   if argv:
     lines.append("Exec=" + " ".join(_quote(arg) for arg in argv))
-  probe = runtime["health"]["probe"]
+  probe = [part.replace("@PORT@", str(port)) for part in runtime["health"]["probe"]]
   for part in probe:
     _systemd_escape(part)
   probe_json = _systemd_escape(json.dumps(probe))
@@ -1263,9 +1557,18 @@ def render_container(rid, recipe, runtime, variant, roles, gpu, fileset):
     "Notify=healthy",
     "",
     "[Service]",
-    "TimeoutStartSec=12m",
+    f"TimeoutStartSec={20 if pair else 12}m",
     "Restart=on-failure",
     "RestartSec=10s",
+  ]
+  if pair:
+    # Rank 1 starts on the peer first and stops with this unit, however it ends; the start also
+    # writes this unit's environment file, the link as it is now.
+    lines += [
+      f"ExecStartPre=/usr/bin/env omarchy-agent-local link-worker start {rid}",
+      f"ExecStopPost=-/usr/bin/env omarchy-agent-local link-worker stop {rid}",
+    ]
+  lines += [
     # The agents panel watches status.json; every start, stop and crash rewrites it.
     # systemd resolves a bare name in its own search path, not PATH; env uses the
     # unit's PATH, which holds Omarchy's bin.
@@ -1438,8 +1741,32 @@ def preflight(runtime, gpu):
       raise LocalError(f"{path} has no range for {user}; rootless Podman needs one (sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 {user})")
   for line in device_lines(runtime, gpu):
     device = line.split("=", 1)[1]
+    if device == "/dev/infiniband":
+      continue
     if device.startswith("/dev/") and not os.access(device, os.R_OK | os.W_OK):
       raise LocalError(f"{device} isn't accessible to {user}; add the user to its group (ls -l {device}) and log in again")
+  if runtime.get("pair"):
+    if not os.path.isdir("/dev/infiniband"):
+      raise LocalError("/dev/infiniband is missing: the RDMA devices of the ConnectX-7 ports are needed (rdma-core)")
+    if not shutil.which("rsync"):
+      raise LocalError("rsync is needed to copy the model files to the paired machine: omarchy agent local link setup")
+
+
+# Whether this user's services may lock unlimited memory: the manager's default for its units and
+# its own limit, which caps theirs.
+MEMLOCK_CHECK = r'''[[ "$(systemctl --user show -p DefaultLimitMEMLOCK --value)" == infinity ]] && grep -q '^Max locked memory *unlimited' "/proc/$(pgrep -u "$(id -u)" -x systemd | head -1)/limits"'''
+
+
+def pair_limits(peer):
+  """RDMA registers the ranks' buffers as locked memory. A rootless container can't raise its
+  limit past its user's, and systemd's user manager takes that from PAM at login, so a limit
+  `link setup` just lifted applies after the next login. Checked at admission: a setup is
+  prepared and kept even while it can't start yet."""
+  fix = "run: omarchy agent local link setup"
+  if subprocess.run(["bash", "-c", MEMLOCK_CHECK], capture_output=True).returncode != 0:
+    raise LocalError(f"Locked memory is limited for services here, which RDMA between the two machines needs unlimited; {fix}", short="Locked memory limited: run link setup")
+  if pair_ssh(peer, MEMLOCK_CHECK, check=False).returncode != 0:
+    raise LocalError(f"Locked memory is limited for services on the peer {peer}, which RDMA between the two machines needs unlimited; {fix}", short="Locked memory limited on the peer: run link setup")
 
 
 def http_status(url, key=None, timeout=10):
@@ -1524,6 +1851,9 @@ def evict_idle_weights(keep=()):
 
 
 def check_headroom(variant, gpu):
+  if gpu.get("nodes") == 2:
+    pair_limits(gpu["peer"])
+    peer_headroom(gpu["peer"], variant)
   for _ in range(15):
     available, gpu_free = free_memory(gpu)
     if available >= variant["peak_ram_gib"] + RESERVE_GIB and gpu_free >= variant["peak_gpu_gib"]:
@@ -1540,6 +1870,455 @@ def check_headroom(variant, gpu):
     + f"Largest memory users: {top_memory_users()}",
     short=short,
   )
+
+
+# ---------------------------------------------------------------- ranks on two machines
+#
+# A paired recipe's file set is materialized here as any other, then copied to the peer over the
+# cable. Each rank keeps its server's caches in its own writable folder, <fileset>.rank<N>, at the
+# runtime's state path. Rank 1 runs on the peer as a plain Podman container the head unit's hooks
+# start and stop, with the same boundary as the head's: read-only root and model mounts, no
+# capabilities, no new privileges, the GPU and RDMA devices only.
+
+def head_argv(runtime, recipe, variant, roles, rid):
+  """The server command both ranks run, bound to loopback on the model's port."""
+  entrypoint, argv, env, skipped = server_invocation(runtime, recipe, variant, roles, rid)
+  return entrypoint, argv + [runtime["listen"]["host"], "127.0.0.1", runtime["listen"]["port"], str(port_for(rid))], env, skipped
+
+
+def worker_name(rid):
+  return f"{UNIT_PREFIX}{rid}-rank1"
+
+
+def rank_dir(rid, fileset, rank, home_dir=None):
+  return os.path.join(home_dir or home(), ".local", "share", "omarchy", "agent-local", "models", rid, f"{fileset}.rank{rank}")
+
+
+def peer_fileset_dir(pair, rid, fileset):
+  return os.path.join(pair["home"], ".local", "share", "omarchy", "agent-local", "models", rid, fileset)
+
+
+def pair_env_path(rid):
+  return os.path.join(state_dir(), "pair", f"{rid}.env")
+
+
+def pair_setup_path(rid):
+  """The setup the paired unit runs: written with the unit, before its first start, since
+  the current manifest is only saved once a setup has started."""
+  return os.path.join(state_dir(), "pair", f"{rid}.json")
+
+
+def write_pair_setup(manifest):
+  if manifest and manifest.get("pair"):
+    write_atomic(pair_setup_path(manifest["recipe_id"]), json.dumps(manifest, indent=2) + "\n")
+
+
+def pair_manifest(rid):
+  try:
+    with open(pair_setup_path(rid)) as handle:
+      return json.load(handle)
+  except (OSError, ValueError):
+    return resolve_model(rid)
+
+
+def peer_headroom(peer, variant):
+  node = pair_python(peer, "node()", timeout=10)
+  available = gib(node["ram_available"])
+  need = variant["peak_ram_gib"] + RESERVE_GIB
+  if available < need:
+    raise LocalError(
+      f"Not enough free memory on the peer {node['host']}: rank 1 needs {variant['peak_ram_gib']:g} GiB plus {RESERVE_GIB} GiB, {available:.1f} GiB are free there.",
+      short=f"{NOT_ENOUGH_MEMORY} on {node['host']} (needs {need:g} GiB)",
+    )
+  return available
+
+
+def pair_setup(rid, manifest, runtime, pair):
+  """Everything rank 1 needs on the peer before the first start: the image, the file set and its
+  state folder (rank 0's here too)."""
+  fileset = manifest["fileset"]
+  models = fileset_dir(rid, fileset)
+  inspect = subprocess.run(["podman", "image", "inspect", "--format", "{{.Id}}", runtime["image"]], capture_output=True, text=True)
+  ident = inspect.stdout.strip()
+  if inspect.returncode != 0 or not re.match(r"^[0-9a-f]{64}$", ident):
+    raise LocalError(f"Can't read the ID of {runtime['image']}: {inspect.stderr.strip()}")
+  manifest["pair"] = {"peer": pair["peer"], "host": pair["host"], "home": pair["home"], "image_id": ident}
+  # A first setup cancelled from here on still knows where its copies went.
+  if load_installing(rid) is not None:
+    update_installing(rid, pair=manifest["pair"])
+  ensure_dir(rank_dir(rid, fileset, 0))
+  peer = pair["peer"]
+  q = shlex.quote
+  if pair_ssh(peer, f"podman image exists {q(ident)}", check=False).returncode != 0:
+    say(f"Copying the runtime image to {pair['host']} over the link")
+    save = subprocess.Popen(["podman", "save", runtime["image"]], stdout=subprocess.PIPE)
+    load = subprocess.run(pair_ssh_argv() + [peer, "podman load -q"], stdin=save.stdout, capture_output=True, text=True)
+    save.stdout.close()
+    if save.wait() != 0 or load.returncode != 0:
+      raise LocalError(f"Copying the image to {pair['host']} failed: {load.stderr.strip()[-400:]}", short="Image copy to the peer failed")
+    pair_ssh(peer, f"podman image exists {q(ident)}")
+  target = peer_fileset_dir(pair, rid, fileset)
+  say(f"Copying the model files to {pair['host']} over the link (only what it lacks)")
+  pair_ssh(peer, f"mkdir -p {q(target)}")
+  rsync = ["rsync", "-a", "--partial", "--delete", "--info=progress2", "--no-inc-recursive",
+           "-e", shlex.join(pair_ssh_argv() + ["-o", "Compression=no", "-c", "aes128-gcm@openssh.com"]), f"{models}/", f"{peer}:{target}/"]
+  if subprocess.run(rsync, stdin=subprocess.DEVNULL).returncode != 0:
+    raise LocalError(f"Copying the model files to {pair['host']} failed", short="Copy to the peer failed")
+  pair_ssh(peer, f"mkdir -p {q(rank_dir(rid, fileset, 1, pair['home']))}")
+
+
+def _placeholders(text, values):
+  for name, value in values.items():
+    text = text.replace(name, value)
+  return text
+
+
+def pair_worker_start(rid):
+  """From the head unit's ExecStartPre: the link as it is now into the head's environment file,
+  then rank 1 on the peer."""
+  manifest = pair_manifest(rid)
+  runtime, setup, variant = manifest["runtime"], manifest.get("pair"), manifest["variant"]
+  if not runtime.get("pair") or not setup:
+    raise LocalError(f"{rid} isn't a paired setup")
+  pair = {"peer": setup["peer"], "host": setup["host"], "home": setup["home"]}
+  here, there = pair_link(pair)
+  # Also here: systemd's restarts after a failure don't pass admission.
+  peer_headroom(pair["peer"], variant)
+  spec = runtime["pair"]
+  def environment(rank, side):
+    values = {"@RANK@": str(rank), "@WORLD@": str(spec["nodes"]), "@MASTER_ADDR@": here["addr"],
+              "@MASTER_PORT@": str(spec["master_port"]), "@RDMA_DEVICES@": ",".join(side["hcas"])}
+    env = {name: _placeholders(value, values) for name, value in spec.get("env", {}).items()}
+    env.update(NCCL_SOCKET_IFNAME=side["dev"], NCCL_IB_HCA=",".join(side["hcas"]), NCCL_IB_GID_INDEX=str(side["gid"]))
+    return env
+  write_atomic(pair_env_path(rid), "".join(f"{name}={value}\n" for name, value in sorted(environment(0, here).items())))
+  fileset = manifest["fileset"]
+  _, argv, worker, _ = head_argv(runtime, manifest["recipe"], variant, manifest["roles"], rid)
+  worker.update(environment(1, there))
+  run = runtime.get("run", {})
+  command = ["podman", "run", "-d", "--replace", "--name", worker_name(rid), "--label", f"org.omarchy.agent-local.recipe={rid}",
+             "--network", "host", "--read-only", "--tmpfs", "/tmp", "--cap-drop", "all", "--security-opt", "no-new-privileges", "--device", "nvidia.com/gpu=all", "--device", "/dev/infiniband",
+             "--ulimit", "memlock=-1:-1", "--ulimit", "stack=67108864:67108864",
+             "-v", f"{peer_fileset_dir(pair, rid, fileset)}:/models:ro", "-v", f"{rank_dir(rid, fileset, 1, pair['home'])}:{spec['state']}"]
+  if run.get("shm_size_gib"):
+    command += ["--shm-size", f"{int(run['shm_size_gib'] * 1024)}m"]
+  for name, value in sorted(worker.items()):
+    command += ["-e", f"{name}={value}"]
+  command += [setup["image_id"], *argv]
+  pair_ssh(pair["peer"], shlex.join(command), timeout=120)
+  say(f"Rank 1 started on {pair['host']} ({there['addr']}, RoCE {','.join(there['hcas'])}); rank 0 rendezvous {here['addr']}:{spec['master_port']}")
+
+
+def pair_worker_stop(rid):
+  manifest = pair_manifest(rid) if os.path.exists(pair_setup_path(rid)) else (load_model(rid) or {})
+  setup = manifest.get("pair")
+  if not setup:
+    return
+  pair_ssh(setup["peer"], f"podman stop -t 30 {shlex.quote(worker_name(rid))}", timeout=90, check=False)
+
+
+def pair_remove(manifest, local_only=False):
+  """Removes a paired recipe's rank 1 container, files and (when unused) image from the peer.
+  Fails while the peer can't be reached, before anything here is deleted, so remove can run
+  again; local_only skips the peer, for one that's gone for good."""
+  setup = manifest.get("pair")
+  if not setup:
+    return
+  rid = manifest["recipe_id"]
+  q = shlex.quote
+  base = os.path.join(setup["home"], ".local", "share", "omarchy", "agent-local", "models", rid)
+  others = {(load_model(other) or {}).get("pair", {}).get("image_id") for other in known_models() if other != rid}
+  command = f"podman rm -f {q(worker_name(rid))} >/dev/null 2>&1; rm -rf -- {q(base)}"
+  if setup["image_id"] not in others:
+    command += f"; podman rmi {q(setup['image_id'])} >/dev/null 2>&1"
+  try:
+    pair_ssh(setup["peer"], command + "; true", timeout=600)
+  except LocalError as error:
+    if not local_only:
+      raise LocalError(f"Can't reach {setup['host']} to remove {rid}'s copies there ({error.short}). Run remove again once it's back, "
+                       f"or with --local-only if it's gone for good", short=f"{setup['host']} unreachable")
+    say(f"Leaving {rid}'s copies on {setup['host']}, which can't be reached: {error.short}")
+  for path in (pair_env_path(rid), pair_setup_path(rid)):
+    if os.path.exists(path):
+      os.unlink(path)
+
+
+def cmd_link_worker(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local link-worker")
+  parser.add_argument("action", choices=("start", "stop"))
+  parser.add_argument("recipe")
+  args = parser.parse_args(argv)
+  if not ID_RE.match(args.recipe):
+    raise LocalError("Not a recipe id")
+  if args.action == "start":
+    try:
+      pair_worker_start(args.recipe)
+    except LocalError as error:
+      record_error(args.recipe, error.short)
+      raise
+  else:
+    pair_worker_stop(args.recipe)
+  return 0
+
+
+# What `link setup` makes true on each machine, as one root shell script per machine: every step
+# checks first, so it can run again at any time. RDMA needs unlimited locked memory (DGX OS ships
+# it in 99-nv-spark-limits.conf, Arch doesn't); the worker runs rootless Podman with the NVIDIA CDI
+# GPU and rsync; its user lingers, so rank 1 outlives the SSH session that started it.
+HOST_SETUP = r'''
+set -euo pipefail
+user=$1
+# Logins (PAM) and the user's systemd manager, whose units the models run in; a running manager
+# gets it now: re-executed to read the default, then its own limit raised to match.
+if ! grep -qs '^\*[[:space:]]*hard[[:space:]]*memlock[[:space:]]*unlimited' /etc/security/limits.d/*.conf; then
+  mkdir -p /etc/security/limits.d
+  printf '# RDMA between paired DGX Sparks registers large buffers as locked memory.\n*   soft    memlock   unlimited\n*   hard    memlock   unlimited\n' > /etc/security/limits.d/99-rdma-memlock.conf
+  echo "  unlimited locked memory for logins"
+fi
+if [[ ! -f /etc/systemd/user.conf.d/99-rdma-memlock.conf ]]; then
+  mkdir -p /etc/systemd/user.conf.d
+  printf '# RDMA between paired DGX Sparks registers large buffers as locked memory.\n[Manager]\nDefaultLimitMEMLOCK=infinity\n' > /etc/systemd/user.conf.d/99-rdma-memlock.conf
+  echo "  unlimited locked memory for user services"
+fi
+manager=$(pgrep -u "$user" -x systemd | head -1 || true)
+if [[ -n "$manager" ]]; then
+  # The default its services get, then its own limit, which caps theirs (a re-exec resets it).
+  if [[ "$(systemctl --user -M "$user@" show -p DefaultLimitMEMLOCK --value)" != infinity ]]; then
+    systemctl --user -M "$user@" daemon-reexec
+    echo "  applied to $user's running services"
+  fi
+  if ! grep -q '^Max locked memory *unlimited' "/proc/$manager/limits"; then
+    prlimit --pid "$manager" --memlock=unlimited:unlimited
+  fi
+fi
+missing=()
+for tool in podman rsync python3; do command -v "$tool" >/dev/null || missing+=("$tool"); done
+if (( ${#missing[@]} )); then
+  echo "  installing ${missing[*]}"
+  if command -v pacman >/dev/null; then pacman -S --needed --noconfirm "${missing[@]}" >/dev/null
+  elif command -v apt-get >/dev/null; then DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" >/dev/null
+  else echo "  no pacman or apt-get: install ${missing[*]} yourself" >&2; exit 1; fi
+fi
+# Podman before 5 can't read the CDI 0.7 spec nvidia-ctk 1.18+ writes (Ubuntu 24.04 ships 4.9): keep a 0.6 copy in
+# /etc/cdi, rewritten after every nvidia-cdi-refresh.
+major=$(podman version --format '{{.Client.Version}}' 2>/dev/null | cut -d. -f1)
+if [[ -n "$major" ]] && (( major < 5 )) && grep -qs additionalGids /var/run/cdi/nvidia.yaml; then
+  cat > /usr/local/sbin/nvidia-cdi-podman-compat <<'PYEOF'
+@CDI_COMPAT@
+PYEOF
+  chmod 755 /usr/local/sbin/nvidia-cdi-podman-compat
+  mkdir -p /etc/systemd/system/nvidia-cdi-refresh.service.d
+  printf '[Service]\nExecStartPost=/usr/local/sbin/nvidia-cdi-podman-compat\n' > /etc/systemd/system/nvidia-cdi-refresh.service.d/podman-compat.conf
+  systemctl daemon-reload
+  /usr/local/sbin/nvidia-cdi-podman-compat
+  echo "  NVIDIA CDI spec for Podman $major"
+fi
+if [[ "$(loginctl show-user "$user" -p Linger --value 2>/dev/null)" != yes ]]; then
+  loginctl enable-linger "$user"
+  echo "  lingering user $user"
+fi
+'''
+CDI_COMPAT = r'''#!/usr/bin/python3 -I
+# Written by omarchy-local-ai link setup. Podman before 5 predates CDI spec 0.7.0 and rejects the additionalGids
+# field nvidia-ctk 1.18+ writes. This writes /etc/cdi/nvidia.yaml as the same spec without it, at 0.6.0, after every
+# nvidia-cdi-refresh (a drop-in runs it), so rootless Podman keeps the GPU across driver updates.
+import os, re
+src = open("/var/run/cdi/nvidia.yaml").read()
+out, skip, indent = [], False, 0
+for line in src.splitlines():
+    if skip:
+        if line.lstrip().startswith("- ") and len(line) - len(line.lstrip()) >= indent:
+            continue
+        skip = False
+    match = re.match(r"^(\s*)additionalGids:\s*$", line)
+    if match:
+        skip, indent = True, len(match.group(1))
+        continue
+    out.append(line)
+text = re.sub(r"^cdiVersion: 0\.7\.0$", "cdiVersion: 0.6.0", "\n".join(out) + "\n", count=1, flags=re.M)
+os.makedirs("/etc/cdi", exist_ok=True)
+tmp = "/etc/cdi/.nvidia.yaml.tmp"
+with open(tmp, "w") as handle:
+    handle.write(text)
+os.chmod(tmp, 0o644)
+os.replace(tmp, "/etc/cdi/nvidia.yaml")'''
+
+# Addresses for cable ports, as dev=address/prefix (plan_link chooses them), through NetworkManager.
+LINK_SETUP = r'''
+set -euo pipefail
+command -v nmcli >/dev/null || { echo "  NetworkManager (nmcli) is needed to address the cable" >&2; exit 1; }
+for spec in "$@"; do
+  dev=${spec%%=*}; address=${spec#*=}
+  name="omarchy-pair-$dev"
+  for old in $(nmcli -t -f NAME,DEVICE connection show --active | awk -F: -v d="$dev" -v n="$name" '$2 == d && $1 != n {print $1}'); do
+    nmcli connection modify "$old" connection.autoconnect no
+  done
+  if nmcli -t -f NAME connection show | grep -qx "$name"; then
+    nmcli connection modify "$name" ipv4.method manual ipv4.addresses "$address"
+  else
+    nmcli connection add type ethernet ifname "$dev" con-name "$name" ipv4.method manual ipv4.addresses "$address" \
+      ipv6.method link-local 802-3-ethernet.mtu 9000 connection.autoconnect yes >/dev/null
+  fi
+  nmcli connection up "$name" >/dev/null
+  echo "  $dev: $address, MTU 9000"
+done
+'''
+
+
+# The ranks' rendezvous, NCCL's sockets and the engine's SSH cross the cable. Where ufw guards a
+# machine (Omarchy turns it on), what the peer's own address sends to a cable port is let in, ahead
+# of the SSH rate limit, as dev=address pairs (link_rules); nothing else on that port. A broader
+# rule an earlier setup inserted for the port goes.
+FIREWALL_SETUP = r'''
+set -euo pipefail
+command -v ufw >/dev/null || exit 0
+ufw status | grep -q '^Status: active' || exit 0
+for spec in "$@"; do
+  dev=${spec%%=*}; from=${spec#*=}
+  if ufw status | grep -qE "^Anywhere on $dev +ALLOW +Anywhere +# omarchy-local-ai"; then
+    ufw delete allow in on "$dev" >/dev/null || true
+  fi
+  if ! ufw status | grep -qE "^Anywhere on $dev +ALLOW +${from//./\\.}( |$)"; then
+    ufw insert 1 allow in on "$dev" from "$from" comment "omarchy-local-ai pair link" >/dev/null
+    echo "  firewall: allowing $from on $dev"
+  fi
+done
+'''
+
+
+def local_ports():
+  scope = {}
+  exec(FABRIC_SIDE, scope)
+  return scope["ports"]()
+
+
+def plan_link(here, there):
+  """Addresses for the cable ports both machines share by name (dev=address/prefix, for each
+  end). A port addressed on one end only gets the other host of that /24 on the other end, so
+  an interrupted setup finishes; a port addressed on neither gets a fresh 10.99.N.0/24, .1 here
+  and .2 there. Ports on only one machine aren't the cable and are left alone."""
+  taken = {ipaddress.ip_interface(c).network for side in (here, there) for cidrs in side.values() for c in cidrs}
+  mine, theirs, subnet = [], [], 0
+  def other_end(cidr):
+    iface = ipaddress.ip_interface(cidr)
+    host = next(h for h in itertools.islice(iface.network.hosts(), 2) if h != iface.ip)
+    return f"{host}/{iface.network.prefixlen}"
+  for dev in sorted(set(here) & set(there)):
+    a = [ipaddress.ip_interface(c) for c in here[dev]]
+    b = [ipaddress.ip_interface(c) for c in there[dev]]
+    if any(x.network == y.network for x in a for y in b):
+      continue
+    if a and not b:
+      theirs.append(f"{dev}={other_end(here[dev][0])}")
+    elif b and not a:
+      mine.append(f"{dev}={other_end(there[dev][0])}")
+    elif not a and not b:
+      while ipaddress.ip_network(f"10.99.{subnet}.0/24") in taken:
+        subnet += 1
+      taken.add(ipaddress.ip_network(f"10.99.{subnet}.0/24"))
+      mine.append(f"{dev}=10.99.{subnet}.1/24")
+      theirs.append(f"{dev}=10.99.{subnet}.2/24")
+  return mine, theirs
+
+
+def link_rules(here, there, rails):
+  """Firewall rules for the cable, as dev=address for each end: each rail port the ranks use (on
+  both ends) lets in the other end's address on the same network, and only that. Other RDMA
+  ports, on a shared network say, are left to the firewall as they were."""
+  mine, theirs = [], []
+  for dev in sorted(set(here) & set(there) & set(rails)):
+    for x in here[dev]:
+      for y in there[dev]:
+        x_iface, y_iface = ipaddress.ip_interface(x), ipaddress.ip_interface(y)
+        if x_iface.network == y_iface.network:
+          mine.append(f"{dev}={y_iface.ip}")
+          theirs.append(f"{dev}={x_iface.ip}")
+  return mine, theirs
+
+
+def root_script(script, *args, peer=None):
+  """Runs a setup script as root here or on the peer; sudo asks for a password on this terminal when it needs one."""
+  argv = ["sudo", "bash", "-c", script, "omarchy-local-pair", *args]
+  if peer:
+    argv = pair_ssh_argv(tty=True) + [peer, shlex.join(argv)]
+  if subprocess.run(argv).returncode != 0:
+    raise LocalError(f"Setting up {'the peer ' + peer if peer else 'this machine'} failed (see above)")
+
+
+def cmd_link_setup(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local link setup",
+                                   description="Prepare this Spark and the one cabled to it to run models across both. Safe to run again.")
+  parser.add_argument("peer", nargs="?", help="the other Spark as SSH reaches it now, e.g. user@spark-1234.local (default: the linked one)")
+  args = parser.parse_args(argv)
+  profile = machine_profile()
+  if NVIDIA_UNIFIED_FAMILIES.get(profile["platform"]) not in PAIR_FAMILIES:
+    raise LocalError("Pairs are supported between DGX Sparks (GB10) only")
+  peer = args.peer or (cached_pair(profile) or {}).get("peer")
+  if not peer or not PEER_RE.match(peer):
+    raise LocalError("Name the other Spark as SSH reaches it, e.g.: omarchy agent local link setup spark-1234.local")
+  if not local_ports():
+    raise LocalError("No ConnectX-7 port has a link: connect the two Sparks' QSFP ports with a direct cable")
+
+  say("SSH key to the peer")
+  key = pair_key()
+  if not os.path.exists(key):
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"{os.environ.get('USER', 'user')}@{os.uname().nodename}", "-f", key], check=True)
+  if subprocess.run(pair_ssh_argv() + [peer, "true"], capture_output=True).returncode != 0:
+    say(f"  copying {key}.pub to {peer} (asks for its password once)")
+    if subprocess.run(["ssh-copy-id", "-i", key + ".pub", "-o", "StrictHostKeyChecking=accept-new", "-o", "PubkeyAuthentication=no", peer]).returncode != 0:
+      raise LocalError(f"Can't log in to {peer} with a key: check the name and password")
+  node = pair_python(peer, "node()")
+  if "GB10" not in node.get("gpu", ""):
+    raise LocalError(f"{peer} doesn't report a GB10 GPU ({node.get('gpu') or 'nvidia-smi found none'})")
+
+  say("This machine")
+  root_script(HOST_SETUP.replace("@CDI_COMPAT@", CDI_COMPAT), os.environ.get("USER") or os.path.basename(home()))
+  say(f"The peer, {node['host']}")
+  root_script(HOST_SETUP.replace("@CDI_COMPAT@", CDI_COMPAT), pair_ssh(peer, "id -un").stdout.strip(), peer=peer)
+
+  say("Addresses on the cable")
+  here, there = local_ports(), pair_python(peer, "ports()")
+  if not set(here) & set(there):
+    raise LocalError("The two Sparks share no linked ConnectX-7 port name: are they cabled port to port?")
+  mine, theirs = plan_link(here, there)
+  if mine:
+    root_script(LINK_SETUP, *mine)
+  if theirs:
+    root_script(LINK_SETUP, *theirs, peer=peer)
+  if not mine and not theirs:
+    say(f"  {', '.join(sorted(set(here) & set(there)))} already addressed")
+
+  pair = record_pair(profile, cable_peer(peer))
+
+  say("Firewalls")
+  near, far = pair_link(pair)
+  mine, theirs = link_rules(local_ports(), pair_python(pair["peer"], "ports()"), set(near["devs"]) & set(far["devs"]))
+  root_script(FIREWALL_SETUP, *mine)
+  root_script(FIREWALL_SETUP, *theirs, peer=pair["peer"])
+  say(f"Linked to {pair['host']} at {pair['peer']}")
+  pair_limits(pair["peer"])
+  return 0
+
+
+def cmd_link(argv):
+  if argv[:1] == ["setup"]:
+    return cmd_link_setup(argv[1:])
+  parser = argparse.ArgumentParser(prog="omarchy agent local link")
+  parser.add_argument("--json", action="store_true")
+  args = parser.parse_args(argv)
+  profile = machine_profile()
+  pair = profile.get("pair")
+  if args.json:
+    print(json.dumps(pair, indent=2))
+    return 0
+  if not pair:
+    say("No Spark is linked to this one yet: cable them, then run omarchy agent local link setup <the other Spark>")
+    return 0
+  here, there = pair_link(pair)
+  say(f"Linked to {pair['host']} at {pair['peer']} ({pair['ram_gib']:.0f} GiB)")
+  say(f"  here  {here['addr']} on {here['dev']}, RoCE {','.join(here['hcas'])} (GID {here['gid']})")
+  say(f"  there {there['addr']} on {there['dev']}, RoCE {','.join(there['hcas'])} (GID {there['gid']})")
+  return 0
 
 
 # ---------------------------------------------------------------- current manifests
@@ -1709,6 +2488,7 @@ def activate(manifest, recipe, runtime, gpu, key, catalog, profile):
     evict_idle_weights(keep=[rid])
     before_ram, before_gpu = check_headroom(manifest["variant"], gpu)
     write_unit_files(rid, container_text)
+    write_pair_setup(manifest)
     systemctl("reset-failed", unit_name(rid))
     write_status(catalog, profile, {rid: "activating"}, pending={rid: manifest})
     load_seconds = start_unit(rid)
@@ -1716,6 +2496,9 @@ def activate(manifest, recipe, runtime, gpu, key, catalog, profile):
   except (LocalError, subprocess.CalledProcessError) as error:
     systemctl("stop", unit_name(rid))
     write_unit_files(rid, previous_text)
+    if os.path.exists(pair_setup_path(rid)):
+      os.unlink(pair_setup_path(rid))
+    write_pair_setup(load_model(rid))
     if previous_text is not None and was_running:
       say(f"Restoring the previous setup of {rid}")
       systemctl("start", unit_name(rid))
@@ -1752,15 +2535,16 @@ def cmd_use(argv):
   args = parser.parse_args(argv)
   catalog = load_catalog()
   profile = machine_profile()
-  gpu = choose_gpu(profile, args.gpu)
+  gpu = choose_gpu(profile, args.gpu) if args.gpu else None
   if args.target == "best":
     rid, variant, skipped = resolve_best(catalog, profile, gpu, args.ctx)
+    gpu = recipe_gpu(profile, catalog.recipes[rid], args.gpu)
     for skipped_id, reason in skipped:
       say(f"Skipping {skipped_id}: {reason}")
     say(f"Best for this machine ({gpu['family']}, {profile['ram_class']} GB): {rid}")
   else:
     rid = args.target
-    _lookup_recipe(catalog, rid)
+    gpu = recipe_gpu(profile, _lookup_recipe(catalog, rid), args.gpu)
     variant, reason = compatibility(catalog, rid, profile, gpu, args.ctx)
     if variant is None:
       if not args.unqualified:
@@ -1868,6 +2652,10 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
     update_installing(rid, image=runtime["image"])
   ensure_image(runtime["image"], progress)
   key = ensure_key()
+  if runtime.get("pair"):
+    if not profile.get("pair"):
+      raise LocalError(f"{rid} runs across two machines, and no paired machine was found on a ConnectX-7 link")
+    say(f"Linked to {profile['pair']['host']} at {profile['pair']['peer']}")
   manifest = {
     "schema": SCHEMA,
     "recipe_id": rid,
@@ -1885,6 +2673,8 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
     "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     "measured_load_seconds": measured_load,
   }
+  if runtime.get("pair"):
+    pair_setup(rid, manifest, runtime, profile["pair"])
   _, _, _, skipped = server_invocation(runtime, recipe, variant, roles, rid)
   if skipped:
     say(f"Note: runtime {recipe['runtime']} takes no {', '.join(skipped)} default; clients choose their own")
@@ -1895,6 +2685,7 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
       check_headroom(variant, gpu)
     except LocalError as error:
       write_unit_files(rid, render_container(rid, recipe, runtime, variant, roles, gpu, fileset))
+      write_pair_setup(manifest)
       clear_error(rid)
       # Its first start runs the checks activate() would have.
       manifest["unchecked"] = True
@@ -1905,7 +2696,8 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
       write_status(catalog, profile)
       say("")
       say(f"Installed {rid}, but it can't start now: {error}")
-      say(f"Stop another model, then press play in the agents panel or run: omarchy agent local start {rid}")
+      first = "Stop another model, then press" if error.short.startswith(NOT_ENOUGH_MEMORY) else "Then press"
+      say(f"{first} play in the agents panel or run: omarchy agent local start {rid}")
       say(f"Manifest: {path}")
       return 0
   activate(manifest, recipe, runtime, gpu, key, catalog, profile)
@@ -1944,7 +2736,8 @@ def cmd_list(argv):
     print(json.dumps(rows, indent=2))
     return 0
   gpu = profile["gpus"][0]["family"] if profile["gpus"] else "no GPU"
-  say(f"Catalog {catalog.version} · this machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}")
+  paired = f" · linked to {profile['pair']['host']}" if profile.get("pair") else ""
+  say(f"Catalog {catalog.version} · this machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}{paired}")
   for row in rows:
     marks = [mark for mark, on in (("best", row["best"]), ("running", row["active"]), ("installed", row["installed"])) if on]
     tier = f" · third-party ({row['publisher']})" if row["tier"] == "third-party" else ""
@@ -2035,7 +2828,7 @@ def status_record(catalog, profile):
     "best": None,
   }
   try:
-    record["best"] = resolve_best(catalog, profile, choose_gpu(profile))[0]
+    record["best"] = resolve_best(catalog, profile)[0]
   except LocalError:
     pass
   return record
@@ -2207,6 +3000,7 @@ def _start(args, catalog, profile):
 def cmd_remove(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local remove")
   parser.add_argument("recipe")
+  parser.add_argument("--local-only", action="store_true", help="for a model across two machines: remove it here even if the other can't be reached")
   args = parser.parse_args(argv)
   catalog = load_catalog()
   profile = machine_profile()
@@ -2226,6 +3020,8 @@ def cmd_remove(argv):
       systemctl("stop", unit_name(rid))
       # Read again: the setup may have reached its image since the first look.
       setting_up = load_installing(rid) or setting_up
+      if setting_up.get("pair"):
+        pair_remove({"recipe_id": rid, "pair": setting_up["pair"]}, args.local_only)
       clear_installing(rid)
       freed, _ = _remove_files(rid, setting_up.get("image"))
       # Only this setup's half-downloaded files: others resume from theirs.
@@ -2253,6 +3049,8 @@ def cmd_remove(argv):
         say(f"Stopping {rid}")
         systemctl("stop", unit_name(rid))
       deleting = time.time()
+      if manifest:
+        pair_remove(manifest, args.local_only)
       result = _remove_files(rid)
       if size_gib > 1:
         write_atomic(os.path.join(state_dir(), "removal_rate"), f"{(time.time() - deleting) / size_gib:.4f}\n")
@@ -2603,6 +3401,8 @@ COMMANDS = {
   "refresh": cmd_refresh,
   "validate": cmd_validate,
   "overlay": cmd_overlay,
+  "link": cmd_link,
+  "link-worker": cmd_link_worker,
 }
 
 SUMMARIES = {
@@ -2612,6 +3412,7 @@ SUMMARIES = {
   "start": "Start a model that's set up, the last one started by default",
   "stop": "Stop a model, or every running one",
   "remove": "Remove a model's weights, manifests and unused image",
+  "link": "Show the Spark cabled to this one; 'link setup <peer>' prepares both",
 }
 
 
