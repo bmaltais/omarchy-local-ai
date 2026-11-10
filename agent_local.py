@@ -3861,17 +3861,18 @@ def clean_listing(listing, dns):
 
 
 def fetch_listing(dns):
-  """(state, listing, error): online with its models, not_sharing, or unreachable."""
-  status, body = http_status(f"https://{dns}{LISTING_ROUTE}", timeout=LISTING_TIMEOUT)
-  # Tailscale stops listening on 443 once a host's last serve route goes, so
-  # an online host refusing the connection simply shares nothing.
-  if status == 404 or (status == 0 and b"Connection refused" in body):
-    return "not_sharing", None, ""
-  if status != 200:
-    return "unreachable", None, f"HTTP {status}" if status else body.decode(errors="replace")[:200]
-  # A peer's listing is untrusted: whatever it makes parsing or cleaning raise (nesting deep
-  # enough to recurse out, say) leaves that one peer unreachable, never the whole survey.
+  """(state, listing, error): online with its models, not_sharing, or unreachable.
+  A peer's answer is untrusted: whatever it makes fetching, parsing or cleaning raise (a
+  malformed response, nesting deep enough to recurse out) leaves that one peer
+  unreachable, never the whole survey."""
   try:
+    status, body = http_status(f"https://{dns}{LISTING_ROUTE}", timeout=LISTING_TIMEOUT)
+    # Tailscale stops listening on 443 once a host's last serve route goes, so
+    # an online host refusing the connection simply shares nothing.
+    if status == 404 or (status == 0 and b"Connection refused" in body):
+      return "not_sharing", None, ""
+    if status != 200:
+      return "unreachable", None, f"HTTP {status}" if status else body.decode(errors="replace")[:200]
     return "online", clean_listing(json.loads(body), dns), ""
   except Exception as error:
     return "unreachable", None, str(error)[:200]

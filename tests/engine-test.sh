@@ -835,6 +835,9 @@ check("a peer's oversized listing is read only up to the cap and left unreachabl
 with patch.object(a, "http_status", return_value=(200, b"[" * 100000 + b"]" * 100000)):
   state, deep, _ = a.fetch_listing("deep.tail.ts.net")
 check("a peer's deeply nested listing leaves only that peer unreachable", state == "unreachable" and deep is None)
+with patch.object(a.urllib.request, "urlopen", side_effect=__import__("http.client").client.BadStatusLine("garbage")):
+  state, bad, _ = a.fetch_listing("bad.tail.ts.net")
+check("a peer's malformed HTTP answer leaves only that peer unreachable", state == "unreachable" and bad is None)
 
 answers = {
   "box.tail.ts.net": ("online", clean, ""),
