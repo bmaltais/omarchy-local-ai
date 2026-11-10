@@ -2046,8 +2046,11 @@ def pair_setup(rid, manifest, runtime, pair):
   prepared = runtime["pair"].get("prepared_gib", 0) * 2**30
   have = sum(os.path.getsize(os.path.join(d, f)) for d, _, names in os.walk(local_rank) for f in names)
   need_disk("this machine", shutil.disk_usage(local_rank).free, prepared - have)
-  base = os.path.dirname(peer_fileset_dir(pair, rid, fileset))
-  free, present = (pair_ssh(peer, f"mkdir -p {q(base)} && df -B1 --output=avail {q(base)} | tail -1 && du -sb {q(base)} | cut -f1").stdout.split() + ["0", "0"])[:2]
+  # Only what this setup reuses counts as already there: its file set and its generation's rank
+  # folder, not an older generation that stays until the new setup has started.
+  target, peer_rank = peer_fileset_dir(pair, rid, fileset), rank_dir(rid, fileset, 1, pair["home"], runtime)
+  base = os.path.dirname(target)
+  free, present = (pair_ssh(peer, f"mkdir -p {q(base)} && df -B1 --output=avail {q(base)} | tail -1 && du -sbc {q(target)} {q(peer_rank)} 2>/dev/null | tail -1 | cut -f1").stdout.split() + ["0", "0"])[:2]
   need_disk(pair["host"], int(free), sum(record["size"] for record in manifest.get("files", [])) + prepared - int(present))
   if runtime["pair"].get("prepare"):
     say("Preparing rank 0's inputs here (minutes the first time)")
@@ -2062,13 +2065,11 @@ def pair_setup(rid, manifest, runtime, pair):
     if save.wait() != 0 or load.returncode != 0:
       raise LocalError(f"Copying the image to {pair['host']} failed: {load.stderr.strip()[-400:]}", short="Image copy to the peer failed")
     pair_ssh(peer, f"podman image exists {q(ident)}")
-  target = peer_fileset_dir(pair, rid, fileset)
   say(f"Copying the model files to {pair['host']} over the link (only what it lacks)")
   pair_ssh(peer, f"mkdir -p {q(target)}")
   stream(["rsync", "-a", "--partial", "--delete", "--info=progress2", "--no-inc-recursive",
           "-e", shlex.join(pair_ssh_argv() + ["-o", "Compression=no", "-c", "aes128-gcm@openssh.com"]),
           f"{models}/", f"{peer}:{target}/"], f"Copying the model files to {pair['host']}")
-  peer_rank = rank_dir(rid, fileset, 1, pair["home"], runtime)
   pair_ssh(peer, f"mkdir -p {q(peer_rank)}")
   if runtime["pair"].get("prepare"):
     say(f"Preparing rank 1's inputs on {pair['host']}")

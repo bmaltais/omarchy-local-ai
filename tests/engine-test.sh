@@ -420,8 +420,11 @@ big = dict(pair_rt, pair=dict(pair_rt["pair"], prepared_gib=100))
 ran.clear()
 with patch.object(a.subprocess, "run", side_effect=fake_prepare), patch.object(a, "load_installing", return_value=None), \
      patch.object(a.shutil, "disk_usage", return_value=SimpleNamespace(free=500 * 2**30)), \
-     patch.object(a, "pair_ssh", return_value=SimpleNamespace(returncode=0, stdout="%d\n0\n" % (50 * 2**30), stderr="")):
+     patch.object(a, "pair_ssh", return_value=SimpleNamespace(returncode=0, stdout="%d\n0\n" % (50 * 2**30), stderr="")) as disk:
   raises("a peer without room for the files and prepared inputs stops setup first", lambda: a.pair_setup("paired", {"fileset": "e" * 16, "files": [{"size": 10 * 2**30}]}, big, {"peer": "10.99.1.2", "host": "spark2", "home": "/home/bob"}), "spark2 has 50 GiB free")
+measured = disk.call_args_list[0].args[1].split("du -sbc ", 1)[1].split(" 2>")[0]
+check("the peer credits only the file set and the current generation as already there",
+      shlex.split(measured) == [f"/home/bob/.local/share/omarchy/agent-local/models/paired/{'e' * 16}", a.rank_dir("paired", "e" * 16, 1, "/home/bob", big)], measured)
 check("nothing is prepared or copied when the disk check fails", not [argv for argv in ran if "prep" in argv or argv[:1] == ["rsync"]], repr(ran))
 check("prepare containers are named for their recipe and rank", "--name" in prepares[0] and a.prepare_name("paired", 0) in prepares[0] and a.prepare_name("paired", 1) in " ".join(prepares[1]))
 with patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as local, patch.object(a, "pair_ssh") as remote, patch.object(a, "known_models", return_value=[]):
