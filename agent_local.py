@@ -1770,13 +1770,18 @@ def pair_limits(peer):
     raise LocalError(f"Locked memory is limited for services on the peer {peer}, which RDMA between the two machines needs unlimited; {fix}", short="Locked memory limited on the peer: run link setup")
 
 
+# No answer we read is near this; a peer's listing that is gets cut off, fails to parse and
+# leaves that peer unreachable instead of filling this machine's memory.
+HTTP_MAX_BYTES = 1 << 20
+
+
 def http_status(url, key=None, timeout=10):
   headers = {"User-Agent": "omarchy-agent-local"}
   if key:
     headers["Authorization"] = f"Bearer {key}"
   try:
     with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as response:
-      return response.status, response.read()
+      return response.status, response.read(HTTP_MAX_BYTES)
   except urllib.error.HTTPError as error:
     return error.code, b""
   except (urllib.error.URLError, TimeoutError, ConnectionError) as error:

@@ -773,6 +773,15 @@ check("a peer's listing keeps only known states and measurements", clean["models
 check("a peer's listing keeps a known architecture and drops any other", clean["models"][0]["architecture"] == "moe" and clean["models"][1]["architecture"] == "")
 raises("a listing of another schema is refused", lambda: a.clean_listing({"schema": 2, "models": []}, "box"), "Not an Omarchy")
 check("a number too big for a float is no number", a._number(10 ** 400) is None)
+class Huge:
+  status = 200
+  def __enter__(self): return self
+  def __exit__(self, *args): return False
+  def read(self, size=-1):
+    return (b'{"schema": 1, "models": [' + b" " * (2 * a.HTTP_MAX_BYTES))[:size if size >= 0 else None]
+with patch.object(a.urllib.request, "urlopen", return_value=Huge()):
+  state, huge, _ = a.fetch_listing("big.tail.ts.net")
+check("a peer's oversized listing is read only up to the cap and left unreachable", state == "unreachable" and huge is None)
 
 answers = {
   "box.tail.ts.net": ("online", clean, ""),
