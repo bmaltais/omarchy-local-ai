@@ -3513,7 +3513,7 @@ def pi_overlay(rid=None):
       "input": model_inputs(manifest),
       "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
       "contextWindow": manifest["variant"]["ctx"],
-      "maxTokens": 16384,
+      "maxTokens": max_output_tokens(manifest),
     }],
   }
   source = (
@@ -3527,6 +3527,25 @@ def pi_overlay(rid=None):
   path = os.path.join(config_dir(), "overlays", f"pi-{rid}.ts")
   write_atomic(path, source)
   return path, OVERLAY_PROVIDER, rid
+
+
+DEFAULT_MAX_OUTPUT_TOKENS = 16384
+
+
+def max_output_tokens(manifest):
+  """The reply cap the server enforces, so agents never ask for less (or more) than it allows."""
+  args = manifest["recipe"].get("server", {}).get("args", []) + manifest["variant"].get("args", [])
+  value = None
+  for index, arg in enumerate(args):
+    if arg == "--max-tokens" and index + 1 < len(args):
+      value = args[index + 1]
+    elif arg.startswith("--max-tokens="):
+      value = arg.split("=", 1)[1]
+  try:
+    tokens = int(value)
+  except (TypeError, ValueError):
+    return DEFAULT_MAX_OUTPUT_TOKENS
+  return min(tokens, manifest["variant"]["ctx"]) if tokens > 0 else DEFAULT_MAX_OUTPUT_TOKENS
 
 
 def model_inputs(manifest):
@@ -3545,7 +3564,7 @@ def opencode_overlay(rid=None):
         "options": {"baseURL": endpoint(rid), "apiKey": "{file:" + key_path() + "}"},
         "models": {rid: {
           "name": manifest["recipe"].get("name", rid),
-          "limit": {"context": manifest["variant"]["ctx"], "output": 16384},
+          "limit": {"context": manifest["variant"]["ctx"], "output": max_output_tokens(manifest)},
           "attachment": "image" in model_inputs(manifest),
           "modalities": {"input": model_inputs(manifest), "output": ["text"]},
         }},
