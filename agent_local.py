@@ -3821,6 +3821,10 @@ def remote_use(host, args, catalog):
   try:
     with Lock():
       say(f"Setting up {rid} on {host}")
+      if not fresh:
+        # Set up again: loading from now on, as a local setup shows its restart.
+        clear_error(rid)
+        write_status(catalog, machine_profile(), {rid: "activating"})
       sync_engine(host)
       flags = (["--ctx", str(args.ctx)] if args.ctx else []) + (["--unqualified"] if args.unqualified else [])
       done = threading.Event()
