@@ -515,12 +515,15 @@ check("logs shows the last error, this machine's log and rank 1's from the peer"
 os.unlink(a.model_manifest_path("crashy"))
 a.clear_error("crashy")
 # A failed first setup's reason lives in its installing record.
-a.write_atomic(a.installing_path("crashy"), json.dumps({"recipe_id": "crashy", "phase": "failed", "error": "Download failed"}))
+a.write_atomic(a.installing_path("crashy"), json.dumps({"recipe_id": "crashy", "phase": "failed", "error": "Download failed",
+                                                       "pair": {"peer": "10.99.1.2", "host": "spark2", "home": "/home/u"}}))
 printed = []
 with patch.object(a, "say", side_effect=printed.append), \
-     patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")):
+     patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")), \
+     patch.object(a, "pair_ssh", return_value=SimpleNamespace(returncode=0, stdout="rank1 failed", stderr="")):
   a.cmd_logs(["crashy"])
 check("logs shows a failed setup's saved reason", printed[:1] == ["Last error: Download failed"], repr(printed))
+check("a failed first paired start still shows rank 1's log", "rank1 failed" in printed, repr(printed))
 os.unlink(a.installing_path("crashy"))
 
 # The default root must work without an Omarchy checkout or a catalog override.

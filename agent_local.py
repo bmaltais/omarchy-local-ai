@@ -3575,8 +3575,9 @@ def cmd_logs(argv):
   rid = args.recipe or last_model_id()
   if not rid or not ID_RE.match(rid):
     raise LocalError("Name the model: omarchy agent local logs <recipe>")
-  # A first setup that failed keeps its reason in its installing record.
-  error = _read(error_path(rid)) or (load_installing(rid) or {}).get("error", "")
+  # A first setup or start that failed keeps its reason, and its peer, in its installing record.
+  installing = load_installing(rid) or {}
+  error = _read(error_path(rid)) or installing.get("error", "")
   if error:
     say(f"Last error: {error}")
     say("")
@@ -3590,7 +3591,7 @@ def cmd_logs(argv):
   try:
     setup = pair_manifest(rid).get("pair")
   except LocalError:
-    setup = None
+    setup = installing.get("pair")
   if setup:
     say(f"== {rid}: rank 1 on {setup['host']}")
     result = pair_ssh(setup["peer"], f"podman logs --tail {int(args.lines)} {shlex.quote(worker_name(rid))} 2>&1", check=False, timeout=30)
