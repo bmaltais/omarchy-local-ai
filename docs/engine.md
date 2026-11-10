@@ -198,7 +198,10 @@ with a notification whose action opens `link setup` in a terminal. Each model co
 
 Panel unit states are `active`, `activating`, `inactive`, `failed`, `deactivating`,
 `removing` and `installing`. The panel uses `fits` to disable play and `error` to explain a
-failure. Transition timestamps are Unix milliseconds. Pending activation uses
+failure: the reason the start recorded, else the server's own last `error:` line,
+else systemd's result. A failure links to `logs <recipe>`, which prints that
+error, the setup and model journals and, for a paired model, rank 1's container
+log from the peer. Transition timestamps are Unix milliseconds. Pending activation uses
 the current manifest's observations until the new setup has been measured.
 
 `list.json` rows contain `id`, `name`, `summary`, `runtime`, `tier`, `publisher`,
@@ -208,7 +211,8 @@ have null memory/context; missing measurements have null speeds.
 
 The panel calls plain `start <recipe>`, `stop <recipe>`, `remove <recipe>`,
 `use --detach <recipe>`, `refresh --quiet` on opening the add view, and
-`status --write` when refreshing admission state. Units call `status --write`
+`status --write` when refreshing admission state, and opens `logs <recipe>` in a
+terminal from a failure's error line. Units call `status --write`
 with `--started <recipe>` or `--stopped <recipe>` from their hooks.
 `list --json` and `status --json` print the corresponding shapes; `profile`
 prints the machine profile. `refresh` rebuilds both caches using the installed
