@@ -174,8 +174,9 @@ through `use` over SSH. Here its manifest is the remote's, plus `remote: {host, 
 unit (`~/.config/systemd/user/omarchy-agent-local-model-<recipe>.service`, not Quadlet) runs
 `start <recipe>` there as `ExecStartPre`, then forwards the model's port here to the remote's
 loopback port with `ssh -N -L`, ready once the port accepts connections. Its `ExecStopPost`
-runs `stop <recipe>` there only when the unit stopped cleanly; ssh exiting on its own (a dropped
-connection) fails the unit, which restarts and leaves the model running there. The API stays on
+runs `stop <recipe>` there only when the unit stopped cleanly. ssh reconnects in a loop inside
+the unit when the connection drops, leaving the model running there; the unit has no `Restart=`,
+so a start the remote refuses (its memory taken) fails once, with the remote's reason. The API stays on
 loopback on both machines and only SSH crosses the network. Start admission, memory figures and
 fit are the remote's; `logs` adds the remote's logs; `remove` removes the model there first and,
 while the remote can't be reached, fails before deleting anything here unless `--local-only`.

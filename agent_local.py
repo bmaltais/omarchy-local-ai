@@ -3740,9 +3740,10 @@ def remote_unit_path(rid):
 def render_remote_unit(rid, host, port):
   ssh = pair_ssh_argv()
   there = lambda *argv: f"{REMOTE_ENGINE} {shlex.join(argv)}"
-  # Under bash, not exec'd: a stop kills both, which systemd counts as success, while ssh exiting
-  # on its own (the network dropped) is a failure, restarted. Only a stop stops the model there.
-  tunnel = f"{shlex.join(ssh + ['-N', '-o', 'ExitOnForwardFailure=yes', '-L', f'127.0.0.1:{port_for(rid)}:127.0.0.1:{port}', host])}; exit 1"
+  # ssh reconnects in a loop when the network drops, without stopping the model there. No
+  # Restart=: that would also retry a start the remote refused (its memory taken), forever.
+  # A stop kills the loop, which systemd counts as success; only then is the model stopped there.
+  tunnel = f"while :; do {shlex.join(ssh + ['-N', '-o', 'ExitOnForwardFailure=yes', '-L', f'127.0.0.1:{port_for(rid)}:127.0.0.1:{port}', host])}; sleep 5; done"
   ready = f"for i in {{1..100}}; do (exec 3<>/dev/tcp/127.0.0.1/{port_for(rid)}) 2>/dev/null && exit 0; sleep 0.1; done; exit 1"
   stop = f'[ "$SERVICE_RESULT" = success ] && exec {shlex.join(ssh + [host, there("stop", rid)])}; exit 0'
   return "\n".join([
@@ -3752,8 +3753,6 @@ def render_remote_unit(rid, host, port):
     "",
     "[Service]",
     "TimeoutStartSec=20m",
-    "Restart=on-failure",
-    "RestartSec=10s",
     "ExecStartPre=/usr/bin/env " + " ".join(_quote(arg) for arg in ssh + [host, there("start", rid)]),
     f"ExecStart=/bin/bash -c {_quote(tunnel)}",
     f"ExecStartPost=/bin/bash -c {_quote(ready)}",
@@ -3821,7 +3820,13 @@ def remote_start(manifest, catalog, profile):
   result = systemctl("start", unit_name(rid))
   write_atomic(os.path.join(state_dir(), "last"), rid + "\n")
   if result.returncode != 0:
-    record_error(rid, f"Didn't start on {host}: omarchy agent local logs {rid} shows why")
+    # The remote's own reason, such as its memory being taken. Prefixed, a memory refusal still
+    # shows: play stays enabled, since only the remote knows when it has room again.
+    try:
+      reason = pair_ssh(host, f"cat ~/.local/state/omarchy/agent-local/errors/{shlex.quote(rid)}", check=False, timeout=10).stdout.strip()
+    except LocalError:
+      reason = ""
+    record_error(rid, f"On {host}: {reason}" if reason else f"Didn't start on {host}: omarchy agent local logs {rid} shows why")
     write_status(catalog, profile)
     raise LocalError(f"{rid} didn't start on {host}: {result.stderr.strip()}\n{journal_tail(rid)}")
   write_atomic(load_seconds_path(rid), f"{time.time() - started:.1f}\n")

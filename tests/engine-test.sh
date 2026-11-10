@@ -813,7 +813,8 @@ with patch.object(a, "load_remotes", return_value={"me@dgx": dgx}):
   raises("use --on names a remote that's set up", lambda: a.remote_placement(cat, bolt, here, on="other"), "isn't set up as a remote")
 remote_text = a.render_remote_unit(bolt, "me@dgx", 11435)
 check("the tunnel unit starts the model there before forwarding this machine's port to it",
-      f"me@dgx\" \"~/.local/share/omarchy-local-ai/omarchy-local-ai start {bolt}\"" in remote_text and f"-L 127.0.0.1:{a.port_for(bolt)}:127.0.0.1:11435 me@dgx; exit 1" in remote_text)
+      f"me@dgx\" \"~/.local/share/omarchy-local-ai/omarchy-local-ai start {bolt}\"" in remote_text and f"-L 127.0.0.1:{a.port_for(bolt)}:127.0.0.1:11435 me@dgx; sleep 5; done" in remote_text)
+check("a start the remote refuses fails once, not retried forever", "Restart=" not in remote_text)
 check("only a stop, not a dropped connection, stops the model there", '[ \\"$$SERVICE_RESULT\\" = success ] && exec' in remote_text and f"omarchy-local-ai stop {bolt}" in remote_text)
 remote_manifest = {"recipe_id": bolt, "remote": {"host": "me@dgx", "port": 11435}, "profile": dgx, "variant": {"peak_ram_gib": 999, "peak_gpu_gib": 999}}
 check("a remote model is admitted by the remote, against its memory", a.start_fit(remote_manifest, here) == (True, "") and a.nodes_ram_gib(remote_manifest, here) == 121.6)
