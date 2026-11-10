@@ -11,6 +11,11 @@ gpu = "nvidia-n1x"
 ram_class = 128
 measured = "measurements/nemotron-3.5-bolt-tensorfold-n1x-128.toml"
 
+[[hardware]]
+gpu = "nvidia-n1x"
+ram_class = 64
+measured = "measurements/nemotron-3.5-bolt-tensorfold-n1x-64.toml"
+
 # IQ2_XXS experts, NVFP4 Mamba projections, Q8_0 attention. The server loads the directory.
 [[artifacts]]
 repo = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
@@ -36,10 +41,20 @@ draft = "."
 ctx = 262144
 peak_ram_gib = 54
 peak_gpu_gib = 54
+args = ["--parallel", "4", "--prompt-cache-gib", "8"]
+
+# For 64 GB: one stream at the full window and the same 8 GiB prompt cache. Measured on an N1x
+# laptop with a 194K-token conversation and its follow-ups: 30 GiB at load, 39.3 GiB at peak once
+# the cache held it, and each follow-up resumed in 0.3 to 0.4 s against 86 s for the first turn.
+[[variant]]
+ctx = 262144
+peak_ram_gib = 40
+peak_gpu_gib = 40
+args = ["--parallel", "1", "--prompt-cache-gib", "8"]
 
 [sampling]
 temperature = 1.0
 top_p = 0.95
 
 [server]
-args = ["--parallel", "4", "--prompt-cache-gib", "8", "--max-tokens", "32768", "--thinking", "--vision"]
+args = ["--max-tokens", "32768", "--thinking", "--vision"]

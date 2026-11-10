@@ -1,0 +1,42 @@
+name = "GLM-5.3 Flash"
+summary = "GLM-5.3 Flash at 4 bits, split across two DGX Sparks: 83 GiB a Spark, so the head can keep its desktop. One shared KV pool for long contexts."
+runtime = "tensorfold-glm53-pair"
+vendor = "zai"
+architecture = "moe"
+# Screenshots and photos through the checkpoint's vision tower, with MiaAI-Lab's vision chat template.
+input = ["text", "image"]
+
+# Two Sparks cabled through their ConnectX-7 ports: this one serves rank 0 and the API, the other rank 1. Memory
+# figures are per Spark.
+[[hardware]]
+gpu = "nvidia-gb10-pair"
+ram_class = 128
+measured = "measurements/glm-5.3-flash-tensorfold-pair-gb10x2-128.toml"
+
+# Mia's AI Lab's EXL3 quantization: routed experts at 4 bits a weight, the rest BF16, which the engine stores at 8.
+# Each rank reads every shard and keeps its half (83.3 GiB a Spark).
+[[artifacts]]
+repo = "Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold"
+revision = "76c0b5173166d2795dd48860f45d8224817f894c"
+license = "apache-2.0"
+files = ["*.safetensors", "*.json", "*.jinja"]
+dest = "model"
+model = "."
+
+# The engine loads 84 GiB of weights, keeps its 9.5 GiB reserve free, and gives the rest to one shared FP8 KV pool of
+# whole windows and the prompt cache; it refuses to start without room for one window, which takes about 99 GiB
+# free: the 91 here plus the 8 admission keeps for the desktop. Measured on a pair whose head runs the Omarchy
+# desktop. Headless Sparks get a larger pool from the same setup.
+[[variant]]
+ctx = 262144
+peak_ram_gib = 91
+peak_gpu_gib = 91
+
+[sampling]
+temperature = 1.0
+top_p = 0.95
+top_k = 20
+
+# Four streams; the checkpoint's own MTP head drafts (MiaAI's default DFlash2 drafter is non-commercial).
+[server]
+args = ["--parallel", "4", "--max-tokens", "32768", "--kv-cache", "fp8", "--no-thinking", "--reasoning-effort", "xhigh", "--vision", "--vision-max-images", "50"]

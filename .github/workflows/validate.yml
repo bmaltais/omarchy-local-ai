@@ -3,7 +3,7 @@ name: Validate catalog and engine
 on:
   pull_request:
   push:
-    branches: [schema-1]
+    branches: [master]
     tags: ["v*"]
 
 jobs:

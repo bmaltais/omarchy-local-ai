@@ -93,6 +93,12 @@ for flag in ("--host", "--host=0.0.0.0", "--model", "--model=other"):
   changed = copy.deepcopy(recipe)
   changed["server"] = {"args": [flag]}
   check(f"server args cannot override {flag}", any("server.args" in e for e in a.validate_recipe("model", changed, {"server": runtime})))
+for name, args, fragment in (("a reserved flag", ["--host"], "reserved"), ("an input's flag", ["--model=other"], "inputs"),
+                             ("a shared flag", ["--threads", "2"], "already in server.args")):
+  changed = copy.deepcopy(recipe)
+  changed["server"] = {"args": ["--threads", "4"]}
+  changed["variant"] = [dict(variant, args=args)]
+  check(f"variant args reject {name}", any(".variant[0].args" in e and fragment in e for e in a.validate_recipe("model", changed, {"server": runtime})))
 for field, value in (("files", ["../weights"]), ("files", ["/weights"]), ("dest", "../outside"), ("dest", "/outside")):
   changed = copy.deepcopy(recipe)
   changed["artifacts"][0][field] = value
@@ -111,12 +117,25 @@ check("best requires a GPU selector", any(".gpu" in e for e in a.validate_best({
 check("best rejects platform selectors", any(".platform" in e for e in a.validate_best({"class": [dict(entry, platform="x86")]}, {"model": recipe})))
 catalog.recipes["model"]["variant"] = [variant, dict(variant, ctx=8192), dict(variant, ctx=16384, peak_ram_gib=60)]
 check("largest fitting context wins", a.resolve_best(catalog, profile, gpu)[1]["ctx"] == 8192)
+small = dict(variant, ctx=8192, args=["--parallel", "1"])
+catalog.recipes["model"]["variant"] = [small, dict(variant, ctx=16384, peak_ram_gib=60, args=["--parallel", "3"])]
+picked = a.resolve_best(catalog, profile, gpu)[1]
+check("a smaller machine falls back to the variant sized for it", picked is small)
+catalog.recipes["model"]["variant"] = [dict(small, ctx=16384, peak_ram_gib=40), dict(small, ctx=16384, peak_ram_gib=60, args=["--parallel", "3"])]
+check("at the same context a smaller machine takes the smaller setup", a.resolve_best(catalog, profile, gpu)[1]["peak_ram_gib"] == 40)
+check("at the same context a larger machine takes the larger setup", a.resolve_best(catalog, dict(profile, ram_gib=128), dict(gpu, memory_gib=96))[1]["args"] == ["--parallel", "3"])
+_, argv, _, _ = a.server_invocation(runtime, dict(recipe, server={"args": ["--vision"]}), picked, {"model": "w"}, "model")
+check("a variant's args follow the shared server args", argv[-3:] == ["--vision", "--parallel", "1"])
 for reason, bad in (("non-fitting variants", dict(recipe, variant=[dict(variant, peak_gpu_gib=100)])),
                     ("unmeasured hardware", dict(recipe, hardware=[dict(recipe["hardware"][0], ram_class=128)]))):
   catalog.recipes["first"] = bad
   catalog.best = {"class": [dict(entry, recipes=["first", "model"])]}
   result = a.resolve_best(catalog, profile, gpu)
   check(f"best falls through {reason}", result[0] == "model" and result[2][0][0] == "first")
+catalog.recipes["first"] = recipe
+catalog.recipes["model"]["variant"] = [variant, dict(variant, ctx=8192)]
+result = a.resolve_best(catalog, profile, gpu, ctx=8192)
+check("best falls through a recipe without the requested context", result[0] == "model" and result[1]["ctx"] == 8192 and "ctx 8192" in result[2][0][1])
 catalog.best = {"class": []}
 try:
   a.resolve_best(catalog, profile, gpu)
@@ -131,6 +150,9 @@ check("explicit GPU resolves a memory tie", a.choose_gpu(tied, "amd-other") == r
 with patch.object(a, "platform_name", return_value="aarch64-n1x"), patch.object(a, "amd_gpus", return_value=[]), patch.object(a, "meminfo", return_value={"MemTotal": 120 * 2**30}):
   n1x = a.machine_profile()
 check("an N1x laptop has a unified NVIDIA GPU of its own family", n1x["ram_class"] == 128 and [(g["vendor"], g["family"], g["memory_gib"]) for g in n1x["gpus"]] == [("nvidia", "nvidia-n1x", 120)])
+spark = dict(recipe, hardware=[{"gpu": "nvidia-gb10", "ram_class": 128, "measured": "measurements/model.toml"}])
+check("an N1x runs what a GB10 with the same memory runs", a.qualified(spark, n1x, n1x["gpus"][0]) and a.match_class({"class": [dict(entry, gpu="nvidia-gb10", ram_class=128)]}, n1x, n1x["gpus"][0]) is not None)
+check("best treats the N1x and GB10 as one class", any("same selectors" in e for e in a.validate_best({"class": [dict(entry, gpu="nvidia-gb10", ram_class=128, recipes=["spark"]), dict(entry, gpu="nvidia-n1x", ram_class=128, recipes=["spark"])]}, {"spark": spark})))
 check("GPU peak exceeding capacity does not fit", not a.fits(dict(variant, peak_gpu_gib=49), profile, gpu)[0])
 check("RAM fit preserves desktop reserve", not a.fits(dict(variant, peak_ram_gib=57), profile, gpu)[0])
 with patch.object(a, "free_memory", return_value=(1, 1)), patch.object(a, "top_memory_users", return_value="browser (12 GiB), editor (4 GiB)"), patch.object(a.time, "sleep"):
@@ -275,6 +297,197 @@ if generator:
 else:
   skip("Quadlet parser unavailable: Podman generator is not installed")
 
+# Paired machines: a runtime spanning two runs on the host network only with a [pair] table,
+# binds its API to loopback through flags it reserves, and leaves NCCL settings to the engine.
+pair_rt = copy.deepcopy(runtime)
+pair_rt.update(command=["server", "serve"], listen={"host": "--host", "port": "--port"}, reserved=["--host", "--port", "API_KEY"],
+               run={"devices": ["cdi-nvidia", "infiniband"], "network": "fabric", "memlock": "unlimited"},
+               health={"probe": ["curl", "http://127.0.0.1:@PORT@/health"]},
+               pair={"nodes": 2, "master_port": 29620, "state": "/state",
+                     "env": {"NCCL_COMM_ID": "@MASTER_ADDR@:@MASTER_PORT@", "TF_RANK": "@RANK@"}})
+check("a paired runtime fixture is accepted", not a.validate_runtime("pair", pair_rt), "\n".join(a.validate_runtime("pair", pair_rt)))
+for name, mutate, fragment in (
+  ("host network without a pair", lambda r: r.pop("pair"), "only for runtimes with a [pair]"),
+  ("a pair on the internal network", lambda r: r["run"].pop("network"), "needs run.network"),
+  ("a pair without bind flags", lambda r: r.pop("listen"), ".listen"),
+  ("bind flags in the command", lambda r: r.update(command=["server", "--port", "1"]), "sets --host, --port itself"),
+  ("unreserved bind flags", lambda r: r.update(reserved=["API_KEY"]), "must reserve"),
+  ("NCCL settings in the runtime", lambda r: r["pair"]["env"].update(NCCL_IB_HCA="mlx5_0"), "NCCL_"),
+  ("three nodes", lambda r: r["pair"].update(nodes=3), "only 2"),
+  ("no state path", lambda r: r["pair"].pop("state"), "pair.state"),
+  ("a state path over the models", lambda r: r["pair"].update(state="/models"), "pair.state"),
+  ("the link's NCCL interface", lambda r: r["pair"]["env"].update(NCCL_SOCKET_IFNAME="eth0"), "NCCL_SOCKET_IFNAME"),
+):
+  changed = copy.deepcopy(pair_rt)
+  mutate(changed)
+  check(f"paired runtime rejects {name}", any(fragment in e for e in a.validate_runtime("pair", changed)), "\n".join(a.validate_runtime("pair", changed)))
+
+spark = {"vendor": "nvidia", "family": "nvidia-gb10", "memory_gib": 121.9, "unified": True, "sysfs": ""}
+pair_gpu = dict(spark, family="nvidia-gb10-pair", nodes=2, memory_gib=121.7, peer="10.99.0.2")
+pair_profile = {"platform": "aarch64-gb10", "ram_class": 128, "ram_gib": 121.9, "gpus": [spark, pair_gpu]}
+check("a pair outranks its own node", a.choose_gpu(pair_profile)["family"] == "nvidia-gb10-pair")
+single = dict(recipe, hardware=[{"gpu": "nvidia-gb10", "ram_class": 128, "measured": "m.toml"}], runtime="server")
+paired = dict(recipe, hardware=[{"gpu": "nvidia-gb10-pair", "ram_class": 128, "measured": "m.toml"}], runtime="pair",
+              variant=[{"ctx": 4096, "peak_ram_gib": 104, "peak_gpu_gib": 104}])
+check("a pair machine runs single-node recipes on its own GPU", a.recipe_gpu(pair_profile, single)["family"] == "nvidia-gb10" and a.recipe_gpu(pair_profile, paired)["family"] == "nvidia-gb10-pair")
+nv_rt = dict(runtime, run={"devices": ["cdi-nvidia"]})
+pair_catalog = SimpleNamespace(recipes={"single": single, "paired": paired}, runtimes={"server": nv_rt, "pair": pair_rt},
+                               best={"class": [{"gpu": "nvidia-gb10", "ram_class": 128, "recipes": ["single"]},
+                                               {"gpu": "nvidia-gb10-pair", "ram_class": 128, "recipes": ["paired"]}]})
+check("best on a pair is the pair's recipe", a.resolve_best(pair_catalog, pair_profile)[0] == "paired")
+check("best without the pair is the node's own", a.resolve_best(pair_catalog, dict(pair_profile, gpus=[spark]))[0] == "single")
+small = dict(pair_profile, gpus=[spark, dict(pair_gpu, memory_gib=100)])
+check("best falls back to the node's class when the pair recipe doesn't fit", a.resolve_best(pair_catalog, small)[0] == "single")
+check("a paired runtime never runs on one node, nor a single one on the pair", not a.runtime_supports(pair_rt, spark) and not a.runtime_supports(nv_rt, pair_gpu))
+pair_text = a.render_container("paired", paired, pair_rt, paired["variant"][0], {"model": "model"}, pair_gpu, "b" * 16)
+pair_port = a.port_for("paired")
+check("the pair unit shares the host network and publishes nothing", "Network=host" in pair_text and "PublishPort" not in pair_text)
+check("the pair unit binds its API to loopback on the model's port", f'"--host" "127.0.0.1" "--port" "{pair_port}"' in pair_text and f"127.0.0.1:{pair_port}/health" in pair_text)
+check("the pair unit mounts rank 0's state folder writable and reads the link from its environment file", f"models/paired/{'b' * 16}.rank0:/state\n" in pair_text and "EnvironmentFile=%h/.local/state/omarchy/agent-local/pair/paired.env" in pair_text)
+check("the pair unit starts and stops rank 1 with itself", "ExecStartPre=/usr/bin/env omarchy-agent-local link-worker start paired" in pair_text and "ExecStopPost=-/usr/bin/env omarchy-agent-local link-worker stop paired" in pair_text)
+_, rank_argv, _, _ = a.head_argv(pair_rt, paired, paired["variant"][0], {"model": "model"}, "paired")
+check("both ranks run the runtime's command, bound to loopback", rank_argv[-4:] == ["--host", "127.0.0.1", "--port", str(a.port_for("paired"))] and rank_argv[:2] == ["server", "serve"])
+# Each rank gets its own link settings, and rank 1 the head's command inside the same restrictions.
+setup = {"schema": 1, "recipe_id": "paired", "runtime": pair_rt, "recipe": paired, "variant": paired["variant"][0], "roles": {"model": "model"},
+         "fileset": "e" * 16, "pair": {"peer": "bob@10.99.1.2", "host": "spark2", "home": "/home/bob", "image_id": "f" * 64}}
+a.write_pair_setup(setup)
+here = {"addr": "10.99.1.1", "dev": "enp1", "hcas": ["rocep1", "roceP2"], "gid": "5"}
+there = {"addr": "10.99.1.2", "dev": "enp1", "hcas": ["rocep1", "roceP2"], "gid": "3"}
+with patch.object(a, "pair_link", return_value=(here, there)), patch.object(a, "peer_headroom") as headroom, patch.object(a, "pair_ssh") as ssh:
+  a.pair_worker_start("paired")
+head_env = dict(line.split("=", 1) for line in Path(a.pair_env_path("paired")).read_text().splitlines())
+worker = shlex.split(ssh.call_args.args[1])
+worker_env = dict(worker[i + 1].split("=", 1) for i, word in enumerate(worker) if word == "-e")
+check("rank 0's environment is rank 0's side of the link", head_env == {"NCCL_COMM_ID": "10.99.1.1:29620", "TF_RANK": "0", "NCCL_SOCKET_IFNAME": "enp1", "NCCL_IB_HCA": "rocep1,roceP2", "NCCL_IB_GID_INDEX": "5"}, repr(head_env))
+check("rank 1's environment is rank 1's side, same rendezvous", worker_env["TF_RANK"] == "1" and worker_env["NCCL_COMM_ID"] == "10.99.1.1:29620" and worker_env["NCCL_IB_GID_INDEX"] == "3" and "API_KEY" not in worker_env, repr(worker_env))
+check("rank 1 starts on the peer as its user, with the head's command and the same restrictions",
+      ssh.call_args.args[0] == "bob@10.99.1.2" and headroom.called
+      and all(flag in worker for flag in ("--read-only", "no-new-privileges", "/dev/infiniband", "f" * 64))
+      and worker[worker.index("--cap-drop") + 1] == "all"
+      and f"/home/bob/.local/share/omarchy/agent-local/models/paired/{'e' * 16}:/models:ro" in worker
+      and f"/home/bob/.local/share/omarchy/agent-local/models/paired/{'e' * 16}.rank1:/state" in worker
+      and worker[worker.index("f" * 64) + 1:][:2] == ["server", "serve"] and worker[-4:] == ["--host", "127.0.0.1", "--port", str(a.port_for("paired"))], repr(worker))
+os.unlink(a.pair_setup_path("paired"))
+# Setup copies the image (only when the peer lacks it) and the file set, and makes both ranks' state folders.
+ran = []
+def fake_run(argv, **kwargs):
+  ran.append(argv)
+  return SimpleNamespace(returncode=0, stdout="f" * 64 + "\n", stderr="")
+manifest = {"fileset": "e" * 16}
+with patch.object(a.subprocess, "run", side_effect=fake_run), patch.object(a.subprocess, "Popen") as save, \
+     patch.object(a, "pair_ssh", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as ssh, patch.object(a, "load_installing", return_value=None):
+  a.pair_setup("paired", manifest, pair_rt, {"peer": "bob@10.99.1.2", "host": "spark2", "home": "/home/bob"})
+rsync = next(argv for argv in ran if argv[0] == "rsync")
+check("setup records the peer and the image by ID", manifest["pair"] == {"peer": "bob@10.99.1.2", "host": "spark2", "home": "/home/bob", "image_id": "f" * 64})
+check("setup copies the file set to the peer, not an image it already has", not save.called and rsync[-1] == f"bob@10.99.1.2:/home/bob/.local/share/omarchy/agent-local/models/paired/{'e' * 16}/")
+check("setup makes both ranks' state folders", Path(a.rank_dir("paired", "e" * 16, 0)).is_dir() and any(f"{'e' * 16}.rank1" in call.args[1] for call in ssh.call_args_list))
+check("the pair unit keeps the container restrictions", all(line in pair_text for line in ("ReadOnly=true", "DropCapability=all", "NoNewPrivileges=true", "AddDevice=/dev/infiniband")))
+if generator:
+  quadlets = Path(a.quadlet_dir())
+  (quadlets / "omarchy-agent-local.container").write_text(pair_text)
+  result = subprocess.run([generator, "--user", "--dryrun"], env=dict(os.environ, QUADLET_UNIT_DIRS=str(quadlets)), capture_output=True, text=True)
+  check("Quadlet accepts the pair unit", result.returncode == 0 and "--network host" in result.stdout.replace("=", " "), result.stdout[-2000:] + result.stderr)
+scope = {}
+exec(a.FABRIC_SIDE, scope)
+check("the fabric probe runs on its own and finds no RoCE device on loopback", (scope["fabric_side"]("127.0.0.1") or {}).get("hca") is None)
+base = Path(a.data_dir(), "models", "keep")
+for name in ("c" * 16, "c" * 16 + ".rank0", "d" * 16, "d" * 16 + ".rank0"):
+  (base / name).mkdir(parents=True)
+a.prune_filesets("keep", "c" * 16)
+check("pruning keeps a file set's rank inputs and drops the others'", sorted(p.name for p in base.iterdir()) == ["c" * 16, "c" * 16 + ".rank0"])
+with patch.object(a, "platform_name", return_value="aarch64-gb10"), patch.object(a, "amd_gpus", side_effect=lambda: []):
+  check("no pair without a record of one", "pair" not in a.machine_profile())
+  Path(a.pair_path()).parent.mkdir(parents=True, exist_ok=True)
+  Path(a.pair_path()).write_text(json.dumps({"peer": "10.99.0.2", "host": "spark2", "home": "/home/u", "ram_gib": 121.9}))
+  cached = a.machine_profile()
+  check("a recorded pair adds the pair GPU without probing", [g["family"] for g in cached["gpus"]] == ["nvidia-gb10", "nvidia-gb10-pair"] and cached["gpus"][1]["peer"] == "10.99.0.2", json.dumps(cached))
+  os.unlink(a.pair_path())
+  # The record keeps the SSH user link setup was given, and routes by the address alone.
+  routed = []
+  with patch.object(a, "pair_python", return_value={"gpu": "NVIDIA GB10", "ram_total": 128 * 2**30, "home": "/home/bob", "host": "spark2"}), \
+       patch.object(a, "_fabric", side_effect=lambda address: routed.append(address) or {"hca": "rocep1s0f0"}):
+    a.record_pair(pair_profile, "bob@10.99.1.2")
+  check("a recorded peer keeps the SSH user it was set up with", a.cached_pair(pair_profile)["peer"] == "bob@10.99.1.2" and routed == ["10.99.1.2"], repr(routed))
+  with patch.object(a, "local_ports", return_value={"enp1": ["10.99.1.1/24"], "lan0": ["192.168.1.5/24"]}), \
+       patch.object(a, "pair_python", return_value={"enp1": ["10.99.1.2/24"]}):
+    check("link setup reaches the peer at its own cable address, as the same user", a.cable_peer("bob@spark-760a.local") == "bob@10.99.1.2")
+  with patch.object(a, "pair_python", return_value={"gpu": "", "ram_total": 128 * 2**30, "home": "/", "host": "x"}):
+    raises("only a GB10 is recorded as a peer", lambda: a.record_pair(pair_profile, "10.99.1.9"), "isn't a DGX Spark")
+  os.unlink(a.pair_path())
+
+for name, script in (("host", a.HOST_SETUP.replace("@CDI_COMPAT@", a.CDI_COMPAT)), ("link", a.LINK_SETUP), ("firewall", a.FIREWALL_SETUP)):
+  result = subprocess.run(["bash", "-n", "-c", script], capture_output=True, text=True)
+  check(f"link setup's {name} script parses", result.returncode == 0, result.stderr)
+# Cable addressing finishes whatever an earlier setup left, and leaves ports that aren't shared alone.
+fresh = a.plan_link({"enp1": [], "enP2": []}, {"enp1": [], "enP2": []})
+check("a fresh cable gets a /24 per port, .1 here and .2 there", fresh == (["enP2=10.99.0.1/24", "enp1=10.99.1.1/24"], ["enP2=10.99.0.2/24", "enp1=10.99.1.2/24"]), repr(fresh))
+half = a.plan_link({"enp1": ["10.99.1.1/24"], "lan0": ["192.168.1.5/24"]}, {"enp1": []})
+check("an interrupted setup gives the peer the other end of this side's /24 and ignores unshared ports", half == ([], ["enp1=10.99.1.2/24"]), repr(half))
+check("a cable addressed on both ends is left alone", a.plan_link({"enp1": ["10.99.1.1/24"]}, {"enp1": ["10.99.1.2/24"]}) == ([], []))
+check("a new /24 avoids networks either end already uses", a.plan_link({"enp1": [], "enp2": ["10.99.0.1/24"]}, {"enp1": [], "enp2": ["10.99.0.2/24"]})[0] == ["enp1=10.99.1.1/24"])
+rules = a.link_rules({"enp1": ["10.99.1.1/24"], "lan0": ["192.168.1.5/24"]}, {"enp1": ["10.99.1.2/24"], "lan0": ["192.168.1.9/24"], "ib9": ["10.0.0.2/8"]}, {"enp1"})
+check("the firewall lets in only the other end's address, on the rails alone", rules == (["enp1=10.99.1.2"], ["enp1=10.99.1.1"]), repr(rules))
+with patch.object(a, "pair_ssh", side_effect=a.LocalError("unreachable")), patch.object(a, "known_models", return_value=[]):
+  raises("removing a paired model stops while its peer can't be reached", lambda: a.pair_remove({"recipe_id": "paired", "pair": {"peer": "10.99.1.2", "host": "spark2", "home": "/home/u", "image_id": "c" * 64}}), "--local-only")
+  a.pair_remove({"recipe_id": "paired", "pair": {"peer": "10.99.1.2", "host": "spark2", "home": "/home/u", "image_id": "c" * 64}}, local_only=True)
+  check("--local-only removes a paired model whose peer is gone", True)
+compile(a.CDI_COMPAT, "nvidia-cdi-podman-compat", "exec")
+check("the CDI compatibility script compiles", True)
+
+# A Spark on the cable before setup is offered by the address mDNS names; a linked one by its host.
+with patch.object(a, "cable_neighbors", return_value=["fe80::1%enp1", "fe80::2%enp1"]), patch.object(a, "mdns_names", return_value={"fe80::2": "spark-760a"}):
+  offered = a.link_probe(pair_profile)
+check("a Spark on the cable waiting for setup is offered by its mDNS name", offered == {"state": "available", "address": "fe80::2%enp1", "host": "spark-760a"} and a.link_state() == offered, repr(offered))
+check("a linked Spark is shown as linked", a.link_probe(dict(pair_profile, pair={"host": "spark2"})) == {"state": "linked", "host": "spark2"})
+with patch.object(a, "cable_neighbors", return_value=[]):
+  check("an empty cable offers nothing", a.link_probe(pair_profile) == {"state": "none"})
+check("machines that can't pair offer nothing", a.link_probe(dict(pair_profile, platform="x86")) == {"state": "none"})
+with patch.object(a, "cable_neighbors", return_value=["fe80::2%enp1"]), patch.object(a, "mdns_names", return_value={}), \
+     patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as sent:
+  a.link_notify(pair_profile)
+  a.link_notify(pair_profile)
+notices = [call.args[0] for call in sent.call_args_list if call.args and call.args[0][:1] == ["omarchy-notification-send"]]
+check("a newly cabled Spark is announced once, with link setup as its action", len(notices) == 1 and notices[0][-1] == "omarchy-agent-local link setup", repr(notices))
+os.unlink(os.path.join(a.state_dir(), "link-notified"))
+# A refresh that found the Spark first doesn't stop the announcement.
+with patch.object(a, "cable_neighbors", return_value=["fe80::3%enp1"]), patch.object(a, "mdns_names", return_value={}):
+  a.link_probe(pair_profile)
+  with patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as sent:
+    a.link_notify(pair_profile)
+check("a Spark a refresh found first is still announced", any(c.args and c.args[0][:1] == ["omarchy-notification-send"] for c in sent.call_args_list))
+os.unlink(os.path.join(a.state_dir(), "link-notified"))
+# A send that failed (no notification daemon yet, say) is tried again next time.
+with patch.object(a, "cable_neighbors", return_value=["fe80::4%enp1"]), patch.object(a, "mdns_names", return_value={}):
+  with patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=1, stdout="", stderr="")):
+    a.link_notify(pair_profile)
+  with patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as sent:
+    a.link_notify(pair_profile)
+check("a failed announcement is tried again", any(c.args and c.args[0][:1] == ["omarchy-notification-send"] for c in sent.call_args_list))
+os.unlink(os.path.join(a.state_dir(), "link-notified"))
+os.unlink(a.link_path())
+# The parsers read what the tools print.
+ping = """PING ff02::1%enp1 (ff02::1%enp1) 56 data bytes
+64 bytes from fe80::adfd:1ade:3de8:d49b%enp1: icmp_seq=1 ttl=64 time=0.067 ms
+64 bytes from fe80::aba5:f382:c378:65aa%enp1: icmp_seq=1 ttl=64 time=0.133 ms
+64 bytes from fe80::5a6b:10b2:a79:3111%enp1: icmp_seq=1 ttl=64 time=0.472 ms
+64 bytes from fe80::5a6b:10b2:a79:3111%enp1: icmp_seq=2 ttl=64 time=0.401 ms (DUP!)
+"""
+own = a.own_link_local(json.dumps([{"ifname": "enp1", "addr_info": [{"family": "inet6", "local": "fe80::adfd:1ade:3de8:d49b", "scope": "link"}]},
+                                   {"ifname": "enp2", "addr_info": [{"family": "inet6", "local": "fe80::aba5:f382:c378:65aa", "scope": "link"},
+                                                                    {"family": "inet6", "local": "fd00::1", "scope": "global"}]}]))
+check("own link-local addresses are read from ip -j", own == {"fe80::adfd:1ade:3de8:d49b", "fe80::aba5:f382:c378:65aa"}, repr(own))
+check("a ping's answers drop this machine's own addresses and repeats", a.ping_answers(ping, own) == ["fe80::5a6b:10b2:a79:3111"])
+check("a failed ping or ip read gives nothing", a.ping_answers("", own) == [] and a.own_link_local("not json") == set())
+avahi = "+;enp1;IPv6;spark-760a;SSH Remote Terminal;local\n=;enp1;IPv6;spark-760a;SSH Remote Terminal;local;spark-760a.local;fe80::9514:4be5:80e5:7b8b;22;\n=;enP7s7;IPv4;spark-760a;SSH Remote Terminal;local;spark-760a.local;192.168.1.162;22;\n"
+check("mDNS names come from avahi-browse's resolved IPv6 lines", a.mdns_ssh_hosts(avahi) == {"fe80::9514:4be5:80e5:7b8b": "spark-760a"})
+# Once a pair is recorded, status says linked whatever the last probe saw.
+a.write_atomic(a.link_path(), json.dumps({"state": "available", "address": "fe80::2%enp1", "host": "x"}))
+with patch.object(a, "known_models", return_value=[]), patch.object(a, "installing_models", return_value=[]), patch.object(a, "resolve_best", side_effect=a.LocalError("none")):
+  linked = a.status_record(SimpleNamespace(version="test", best={}, recipes={}), dict(pair_profile, pair={"host": "spark2"}))["link"]
+check("status shows a recorded pair as linked, not a stale offer", linked == {"state": "linked", "host": "spark2"}, repr(linked))
+os.unlink(a.link_path())
+check("the cable hook parses", subprocess.run(["bash", "-n", os.path.join(os.environ["ENGINE_ROOT"], "system/90-omarchy-local-ai-link")]).returncode == 0)
+
 # The default root must work without an Omarchy checkout or a catalog override.
 check("installed catalog loads and validates from the engine directory", not a.load_catalog().errors() and a.load_catalog().root == os.environ["ENGINE_ROOT"])
 root = Path(os.environ["HOME"])
@@ -390,6 +603,144 @@ for response, succeeds in (([(200, b"")], False),
     else:
       raises("first start refuses failed authentication or wrong model ID", lambda: a._start(SimpleNamespace(recipe=rid), cat, profile))
       check("failed first check stops the model and retains its check obligation", ("stop", a.unit_name(rid)) in [call.args for call in systemctl.call_args_list] and a.load_model(rid)["unchecked"])
+check("a pair's memory is both ranks'", a.ram_used_gib({"pair": {"peer": "10.99.1.2"}}, 100.0, 10.0, 120.0, 29.0) == 181.0 and a.ram_used_gib({"pair": {"peer": "10.99.1.2"}}, 100.0, 10.0, None, 29.0) == 180.0 and a.ram_used_gib({}, 100.0, 10.0, None, None) == 90.0)
+check("a pair's memory is shown against both machines", a.nodes_ram_gib({"pair": {"peer": "10.99.1.2"}}, {"ram_gib": 121.9, "pair": {"peer": "10.99.1.2", "ram_gib": 121.7}}) == 243.6 and a.nodes_ram_gib({}, {"ram_gib": 121.9, "pair": {"peer": "10.99.1.2", "ram_gib": 121.7}}) == 121.9)
+check("a pair's memory total is its own peer's, not a later link's", a.nodes_ram_gib({"pair": {"peer": "10.99.1.2"}, "profile": {"pair": {"peer": "10.99.1.2", "ram_gib": 121.7}}}, {"ram_gib": 121.9, "pair": {"peer": "10.99.1.3", "ram_gib": 60.0}}) == 243.6)
+
+# A first setup is listed while it fetches: bytes so far, total and speed, in
+# the panel's status, until its manifest exists or remove dismisses it.
+a.clear_installing("fresh")
+a.begin_installing("fresh", {"name": "Fresh model", "vendor": "qwen"})
+status = json.loads(Path(a.state_dir(), "status.json").read_text())
+check("a setup shows as installing before it fetches anything", status["models"]["fresh"]["unit"] == "installing" and status["models"]["fresh"]["install"]["phase"] == "waiting" and status["models"]["fresh"]["name"] == "Fresh model")
+progress = a.Progress(rid="fresh")
+progress.samples = [(progress.started - 1, 0)]
+progress.grow(4 * 2**20)
+progress.published = 0
+progress.add(3 * 2**20)
+progress.published = 0
+progress.pulled(2**20, 2 * 2**20)
+row = json.loads(Path(a.state_dir(), "status.json").read_text())["models"]["fresh"]
+check("progress counts weights and image layers toward one bar", row["install"]["phase"] == "downloading" and row["install"]["done_bytes"] == 4 * 2**20 and row["install"]["total_bytes"] == 6 * 2**20, json.dumps(row["install"]))
+check("progress reports a download speed", row["install"]["rate_bytes_s"] > 0)
+with patch.object(a, "known_models", return_value=[]), patch.object(a, "unit_props", return_value={}):
+  listed = a.status_record(a.load_catalog(), profile)
+check("a full status rewrite keeps the setup's row", listed["models"]["fresh"]["unit"] == "installing")
+with patch.object(a, "known_models", return_value=["current"]), patch.object(a, "unit_props", return_value={}), patch.object(a, "free_memory", return_value=(64, 48)):
+  a.write_status(a.load_catalog(), profile)
+a.publish_installing("current", {"name": "Current", "phase": "downloading"})
+check("setting up an installed model again leaves its row as it is", json.loads(Path(a.state_dir(), "status.json").read_text())["models"]["current"]["unit"] != "installing")
+
+a.clear_installing("timed")
+a.begin_installing("timed", {"name": "Timed"}, 48.0)
+check("a setup's row carries the catalog's load time for the panel's bar", json.loads(Path(a.state_dir(), "status.json").read_text())["models"]["timed"]["expected_load_seconds"] == 48.0)
+a.clear_installing("timed")
+check("a first start runs against the catalog's load time", a.expected_load_seconds("never-started", {"measured_load_seconds": 48.0}) == 48.0)
+
+# A failed first setup keeps its row with the reason, and remove dismisses it.
+a.clear_installing(rid)
+with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "compatibility", return_value=(variant, "")), patch.object(a, "load_model", return_value=None), patch.object(a, "preflight"), patch.object(a, "build_artifacts", return_value=([], {"model": "model.gguf"})), patch.object(a, "materialize", side_effect=a.LocalError("Need 90 GiB free for downloads")), patch.object(a, "write_status"):
+  raises("a failed setup reports its reason", lambda: a.cmd_use([rid]), "Need 90 GiB")
+failed = a.load_installing(rid)
+check("a failed setup stays listed with its reason", failed is not None and failed["phase"] == "failed" and failed["error"].startswith("Need 90 GiB"), json.dumps(failed))
+check("a setup records its process for cancelling", failed["pid"] == os.getpid())
+a.clear_installing(rid)
+Path(a.model_manifest_path("dismissed")).unlink(missing_ok=True)
+a.begin_installing("dismissed", {"name": "Dismissed"})
+a.fail_installing("dismissed", "Download failed")
+with patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0)) as stop, patch.object(a, "known_models", return_value=[]), patch.object(a, "write_unit_files"), patch.object(a, "refresh_list_cache"), patch.object(a, "write_status"):
+  check("remove dismisses a failed setup", a.cmd_remove(["dismissed"]) == 0 and a.load_installing("dismissed") is None)
+  check("remove stops the setup's unit first", ("stop", a.install_unit("dismissed")) in [call.args for call in stop.call_args_list])
+
+# A setup waiting for another's lock is already cancellable, and stops if its
+# record was removed while it waited.
+class Waiting:
+  def __init__(self, during=None):
+    self.during = during
+  def __enter__(self):
+    self.seen = (a.load_installing(rid) or {}).get("pid")
+    if self.during:
+      self.during()
+    return self
+  def __exit__(self, *exc):
+    return False
+a.clear_installing(rid)
+waiting = Waiting()
+with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "compatibility", return_value=(variant, "")), patch.object(a, "load_model", return_value=None), patch.object(a, "Lock", return_value=waiting), patch.object(a, "_use_setup", return_value=0), patch.object(a, "write_status"):
+  a.cmd_use([rid])
+check("a setup records its process before it waits for the lock", waiting.seen == os.getpid())
+a.update_installing(rid, pid=os.getppid())
+second = Waiting()
+with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "compatibility", return_value=(variant, "")), patch.object(a, "load_model", return_value=None), patch.object(a, "Lock", return_value=second), patch.object(a, "_use_setup", return_value=0), patch.object(a, "write_status"):
+  a.cmd_use([rid])
+check("a second use of the same recipe leaves the live owner's process in place while it waits", second.seen == os.getppid())
+check("a queued use takes the setup over once it holds the lock", a.load_installing(rid)["pid"] == os.getpid())
+a.update_installing(rid, pid=os.getppid())
+class Interrupted(Waiting):
+  def __enter__(self):
+    raise KeyboardInterrupt
+with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "compatibility", return_value=(variant, "")), patch.object(a, "load_model", return_value=None), patch.object(a, "Lock", return_value=Interrupted()), patch.object(a, "_use_setup", return_value=0), patch.object(a, "write_status"):
+  try:
+    a.cmd_use([rid])
+  except KeyboardInterrupt:
+    pass
+check("interrupting a use still waiting leaves the active setup's record", (a.load_installing(rid) or {}).get("pid") == os.getppid())
+a.update_installing(rid, image=runtime["image"])
+with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "Lock", return_value=Waiting()), patch.object(a, "load_model", return_value=None), patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0)), patch.object(a, "stop_setup_process"), patch.object(a, "write_status"), patch.object(a, "refresh_list_cache"), patch.object(a, "_remove_files", return_value=(0, [])) as removed:
+  a.cmd_remove([rid])
+check("cancelling a setup removes the image it pulled", removed.call_args.args == (rid, runtime["image"]))
+with patch.object(a, "known_models", return_value=[]), patch.object(a, "write_unit_files"), patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as rmi:
+  a._remove_files(rid, runtime["image"])
+check("removal drops a cancelled setup's image no installed model uses", rmi.call_args.args[0] == ["podman", "rmi", runtime["image"]])
+with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "compatibility", return_value=(variant, "")), patch.object(a, "load_model", return_value=None), patch.object(a, "Lock", return_value=Waiting(lambda: a.clear_installing(rid))), patch.object(a, "_use_setup", return_value=0) as setup, patch.object(a, "write_status"):
+  raises("a setup removed while it waited stops", lambda: a.cmd_use([rid]), "cancelled")
+  check("a cancelled setup fetches nothing", not setup.called and a.load_installing(rid) is None)
+
+# Bytes an interrupted download left on disk count as done, but not as speed.
+resumed = a.Progress()
+resumed.grow(10 * 2**20)
+resumed.resumed(4 * 2**20)
+done_now, total_now, rate_now = resumed.snapshot()
+check("a resumed download's saved bytes count toward the bar", done_now == 4 * 2**20 and total_now == 10 * 2**20)
+check("a resumed download's saved bytes don't count as speed", rate_now == 0)
+
+# A new attempt replaces a failed setup's record rather than inheriting it.
+a.begin_installing("retried", {"name": "Retried"})
+a.fail_installing("retried", "Download failed")
+check("a failed setup can be set up again", a.installing_idle("retried"))
+a.begin_installing("retried", {"name": "Retried"})
+fresh_record = a.load_installing("retried")
+check("a retry starts without the old failure", fresh_record["phase"] == "waiting" and fresh_record["error"] == "")
+check("a setup under way isn't replaced", not a.installing_idle("retried"))
+a.clear_installing("retried")
+
+# Cancelling stops a model its setup already started and drops only its own partial downloads.
+staging = Path(a.data_dir(), "staging")
+staging.mkdir(parents=True, exist_ok=True)
+mine, other = "a" * 64 + ".part", "b" * 64 + ".part"
+(staging / mine).write_bytes(b"x" * 10)
+(staging / other).write_bytes(b"y" * 10)
+a.begin_installing("cancelled", {"name": "Cancelled"})
+a.update_installing("cancelled", partials=[mine, "../escape.part"])
+with patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0)) as stop, patch.object(a, "known_models", return_value=[]), patch.object(a, "write_unit_files"), patch.object(a, "refresh_list_cache"), patch.object(a, "write_status"):
+  a.cmd_remove(["cancelled"])
+check("cancelling a setup stops its model service", ("stop", a.unit_name("cancelled")) in [call.args for call in stop.call_args_list])
+check("cancelling a setup drops only its own partial downloads", not (staging / mine).exists() and (staging / other).exists())
+
+# --detach hands the setup to a transient user unit and returns.
+a.clear_installing(rid)
+with patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=3)), patch.object(a, "load_model", return_value=None), patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as run:
+  check("a detached setup returns at once", a.detach_use(rid, SimpleNamespace(ctx=8192, gpu=None, seed=None, unqualified=False), cat.recipes[rid]) == 0)
+  argv = run.call_args.args[0]
+check("a detached setup runs use in its own user unit", argv[:3] == ["systemd-run", "--user", "--collect"] and f"--unit={a.install_unit(rid)}" in argv and argv[-4:-2] == ["use", rid] and argv[-2:] == ["--ctx", "8192"], " ".join(argv))
+check("a detached setup is listed before its unit starts", a.load_installing(rid)["phase"] == "waiting")
+a.clear_installing(rid)
+with patch.dict(os.environ, {"HF_TOKEN": "hf_secret_value", "OMARCHY_LOCAL_AI_CATALOG": "relative/catalog"}), patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=3)), patch.object(a, "load_model", return_value=None), patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as run:
+  a.detach_use(rid, SimpleNamespace(ctx=None, gpu=None, seed=None, unqualified=False), cat.recipes[rid])
+  argv, env = run.call_args.args[0], run.call_args.kwargs["env"]
+check("a detached setup never puts the token on a command line", not any("hf_secret_value" in arg for arg in argv) and "--setenv=HF_TOKEN" in argv and env["HF_TOKEN"] == "hf_secret_value")
+check("a detached setup gets the catalog as an absolute path", env["OMARCHY_LOCAL_AI_CATALOG"] == os.path.abspath("relative/catalog"))
+a.clear_installing(rid)
 
 # Refresh shares one catalog/profile across both caches.
 with patch.object(a, "load_catalog", return_value=cat) as load, patch.object(a, "machine_profile", return_value=profile) as machine, patch.object(a, "known_models", return_value=[]), patch.object(a, "running_models", return_value=set()):
