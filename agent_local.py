@@ -3316,6 +3316,9 @@ def cmd_remove(argv):
   refresh_list_cache(catalog, profile)
   write_status(catalog, profile)
   freed, images = result
+  if (manifest or {}).get("remote"):
+    say(f"Removed {rid} in {time.time() - started:.0f}s")
+    return 0
   say(f"Removed {rid} in {time.time() - started:.0f}s: {gib(freed):.1f} GiB of weights no other recipe uses" + (f", {len(images)} image(s)" if images else ""))
   return 0
 
@@ -3843,7 +3846,9 @@ def remote_remove(manifest, local_only=False):
     return
   rid = manifest["recipe_id"]
   try:
-    remote_engine(remote["host"], "remove", rid, timeout=900)
+    removed = remote_engine(remote["host"], "remove", rid, timeout=900).stdout.strip().splitlines()
+    # What it freed is there: this machine kept none of its weights.
+    say(f"On {remote['host']}: {removed[-1] if removed else 'removed'}")
   except LocalError as error:
     if not local_only:
       raise LocalError(f"Can't reach {remote['host']} to remove {rid} there ({error.short}). Run remove again once it's back, "
