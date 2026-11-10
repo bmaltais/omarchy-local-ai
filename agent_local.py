@@ -228,9 +228,9 @@ def ram_class(ram_gib):
   return RAM_CLASSES[-1]
 
 
-def machine_profile(probe_pair=False):
-  """This machine's GPUs and memory. A peer machine cabled to this one adds a pair GPU,
-  from the last detection (pair.json) unless `probe_pair` looks again over SSH."""
+def machine_profile():
+  """This machine's GPUs and memory. The machine `link setup` joined to this one (pair.json)
+  adds a pair GPU."""
   mem = meminfo()
   ram = gib(mem.get("MemTotal", 0))
   platform = platform_name()
@@ -238,7 +238,7 @@ def machine_profile(probe_pair=False):
   if platform in NVIDIA_UNIFIED_FAMILIES:
     gpus.append({"vendor": "nvidia", "family": NVIDIA_UNIFIED_FAMILIES[platform], "render_node": "", "vram_gib": 0, "gtt_gib": 0, "unified": True, "memory_gib": round(ram, 2), "sysfs": ""})
   profile = {"platform": platform, "ram_gib": round(ram, 2), "ram_class": ram_class(ram), "gpus": gpus}
-  pair = detect_pair(profile) if probe_pair else cached_pair(profile)
+  pair = cached_pair(profile)
   if pair:
     local = next(gpu for gpu in gpus if gpu["family"] in PAIR_FAMILIES)
     # Memory figures are per node: the smaller machine bounds what each rank may hold.
@@ -386,46 +386,9 @@ def pair_python(peer, expression, timeout=20):
 PEER_RE = re.compile(r"^([A-Za-z0-9._-]+@)?[A-Za-z0-9._:%-]+$")
 
 
-def pair_override():
-  """An explicit peer, for when the cable's other end isn't found: one [user@]host or address
-  in ~/.config/omarchy/agent-local/link."""
-  value = _read(os.path.join(config_dir(), "link")).split()
-  return value[0] if value and PEER_RE.match(value[0]) else None
-
-
-def peer_user(peer):
-  return peer.split("@", 1)[0] if peer and "@" in peer else None
-
-
 def peer_address(peer):
   """The address part of an SSH target, user@address or address."""
   return peer.rsplit("@", 1)[-1]
-
-
-def fabric_candidates():
-  """Addresses at the other end of this machine's RDMA-capable links: their neighbors, and in a
-  two-host subnet the other host, or .1/.2 of a larger one."""
-  candidates = []
-  try:
-    links = json.loads(subprocess.run(["ip", "-j", "-4", "addr", "show", "up"], capture_output=True, text=True, timeout=5).stdout or "[]")
-  except (OSError, subprocess.SubprocessError, ValueError):
-    return candidates
-  for link in links:
-    dev = link.get("ifname", "")
-    if not os.path.isdir(f"/sys/class/net/{dev}/device/infiniband") or _read(f"/sys/class/net/{dev}/carrier") != "1":
-      continue
-    for info in link.get("addr_info", []):
-      try:
-        mine = ipaddress.ip_interface(f"{info['local']}/{info['prefixlen']}")
-      except (KeyError, ValueError):
-        continue
-      neighbors = subprocess.run(["ip", "-j", "-4", "neigh", "show", "dev", dev], capture_output=True, text=True, timeout=5).stdout
-      for entry in json.loads(neighbors or "[]"):
-        if entry.get("dst") and entry.get("state") != ["FAILED"]:
-          candidates.append(entry["dst"])
-      hosts = [str(host) for host in itertools.islice(mine.network.hosts(), 2)]
-      candidates += [host for host in hosts if host != str(mine.ip)]
-  return list(dict.fromkeys(candidates))
 
 
 def pair_path():
@@ -443,34 +406,28 @@ def cached_pair(profile):
   return pair if isinstance(pair, dict) and pair.get("peer") else None
 
 
-def detect_pair(profile, user=None):
-  """Finds a machine of this one's GPU family on a direct ConnectX-7 link, records it in
-  pair.json, and returns it, or None (and forgets the old one) when there is none. The peer is
-  reached as `user` when given, else as the user it was last reached as."""
-  family = NVIDIA_UNIFIED_FAMILIES.get(profile["platform"])
-  if family not in PAIR_FAMILIES:
-    return None
-  override = pair_override()
-  user = user or peer_user(override) or peer_user((cached_pair(profile) or {}).get("peer"))
-  candidates = [peer_address(override)] if override else fabric_candidates()
-  found = None
-  for peer in (f"{user}@{address}" if user else address for address in candidates):
-    try:
-      node = pair_python(peer, "node()", timeout=8)
-    except (LocalError, ValueError):
-      continue
-    if "GB10" not in node.get("gpu", "") or ram_class(gib(node["ram_total"])) != profile["ram_class"]:
-      continue
-    side = _fabric(peer_address(peer))
-    if not side or not side.get("hca"):
-      continue
-    found = {"peer": peer, "host": node["host"], "home": node["home"], "ram_gib": round(gib(node["ram_total"]), 2)}
-    break
-  if found:
-    write_atomic(pair_path(), json.dumps(found, indent=2) + "\n")
-  elif os.path.exists(pair_path()):
-    os.unlink(pair_path())
-  return found
+def cable_peer(peer):
+  """The peer as SSH reaches it over the cable from now on: its address on a port both machines
+  share, with the user it was given."""
+  theirs, _ = link_rules(local_ports(), pair_python(peer, "ports()"), set(local_ports()))
+  if not theirs:
+    raise LocalError("The cable has no address on both ends: check that both ends of the link are up")
+  user = peer.rsplit("@", 1)[0] + "@" if "@" in peer else ""
+  return user + theirs[0].split("=", 1)[1]
+
+
+def record_pair(profile, peer):
+  """Records the machine link setup joined to this one, as SSH reaches it over the cable, once it
+  shows a GB10 of this machine's RAM class with a RoCE device on the route to it."""
+  node = pair_python(peer, "node()", timeout=8)
+  if "GB10" not in node.get("gpu", "") or ram_class(gib(node["ram_total"])) != profile["ram_class"]:
+    raise LocalError(f"{peer} isn't a DGX Spark of this one's memory ({node.get('gpu') or 'no GPU'}, {gib(node['ram_total']):.0f} GiB)")
+  side = _fabric(peer_address(peer))
+  if not side or not side.get("hca"):
+    raise LocalError(f"The route to {peer_address(peer)} doesn't go over a ConnectX-7 port")
+  pair = {"peer": peer, "host": node["host"], "home": node["home"], "ram_gib": round(gib(node["ram_total"]), 2)}
+  write_atomic(pair_path(), json.dumps(pair, indent=2) + "\n")
+  return pair
 
 
 def pair_link(pair):
@@ -1923,9 +1880,6 @@ def check_headroom(variant, gpu):
 # start and stop, with the same boundary as the head's: read-only root and model mounts, no
 # capabilities, no new privileges, the GPU and RDMA devices only.
 
-RANK_CONTAINER = ["--read-only", "--tmpfs", "/tmp", "--cap-drop", "all", "--security-opt", "no-new-privileges"]
-
-
 def head_argv(runtime, recipe, variant, roles, rid):
   """The server command both ranks run, bound to loopback on the model's port."""
   entrypoint, argv, env, skipped = server_invocation(runtime, recipe, variant, roles, rid)
@@ -1979,25 +1933,15 @@ def peer_headroom(peer, variant):
   return available
 
 
-def image_id(image):
-  result = subprocess.run(["podman", "image", "inspect", "--format", "{{.Id}}", image], capture_output=True, text=True)
-  if result.returncode != 0 or not re.match(r"^[0-9a-f]{64}$", result.stdout.strip()):
-    raise LocalError(f"Can't read the ID of {image}: {result.stderr.strip()}")
-  return result.stdout.strip()
-
-
-def stream(argv, what):
-  """Runs a long step with its output on this terminal."""
-  if subprocess.run(argv, stdin=subprocess.DEVNULL).returncode != 0:
-    raise LocalError(f"{what} failed", short=f"{what} failed")
-
-
 def pair_setup(rid, manifest, runtime, pair):
   """Everything rank 1 needs on the peer before the first start: the image, the file set and its
   state folder (rank 0's here too)."""
   fileset = manifest["fileset"]
   models = fileset_dir(rid, fileset)
-  ident = image_id(runtime["image"])
+  inspect = subprocess.run(["podman", "image", "inspect", "--format", "{{.Id}}", runtime["image"]], capture_output=True, text=True)
+  ident = inspect.stdout.strip()
+  if inspect.returncode != 0 or not re.match(r"^[0-9a-f]{64}$", ident):
+    raise LocalError(f"Can't read the ID of {runtime['image']}: {inspect.stderr.strip()}")
   manifest["pair"] = {"peer": pair["peer"], "host": pair["host"], "home": pair["home"], "image_id": ident}
   # A first setup cancelled from here on still knows where its copies went.
   if load_installing(rid) is not None:
@@ -2016,9 +1960,10 @@ def pair_setup(rid, manifest, runtime, pair):
   target = peer_fileset_dir(pair, rid, fileset)
   say(f"Copying the model files to {pair['host']} over the link (only what it lacks)")
   pair_ssh(peer, f"mkdir -p {q(target)}")
-  stream(["rsync", "-a", "--partial", "--delete", "--info=progress2", "--no-inc-recursive",
-          "-e", shlex.join(pair_ssh_argv() + ["-o", "Compression=no", "-c", "aes128-gcm@openssh.com"]),
-          f"{models}/", f"{peer}:{target}/"], f"Copying the model files to {pair['host']}")
+  rsync = ["rsync", "-a", "--partial", "--delete", "--info=progress2", "--no-inc-recursive",
+           "-e", shlex.join(pair_ssh_argv() + ["-o", "Compression=no", "-c", "aes128-gcm@openssh.com"]), f"{models}/", f"{peer}:{target}/"]
+  if subprocess.run(rsync, stdin=subprocess.DEVNULL).returncode != 0:
+    raise LocalError(f"Copying the model files to {pair['host']} failed", short="Copy to the peer failed")
   pair_ssh(peer, f"mkdir -p {q(rank_dir(rid, fileset, 1, pair['home']))}")
 
 
@@ -2037,7 +1982,7 @@ def pair_worker_start(rid):
     raise LocalError(f"{rid} isn't a paired setup")
   pair = {"peer": setup["peer"], "host": setup["host"], "home": setup["home"]}
   here, there = pair_link(pair)
-  pair_limits(pair["peer"])
+  # Also here: systemd's restarts after a failure don't pass admission.
   peer_headroom(pair["peer"], variant)
   spec = runtime["pair"]
   def environment(rank, side):
@@ -2052,7 +1997,7 @@ def pair_worker_start(rid):
   worker.update(environment(1, there))
   run = runtime.get("run", {})
   command = ["podman", "run", "-d", "--replace", "--name", worker_name(rid), "--label", f"org.omarchy.agent-local.recipe={rid}",
-             "--network", "host", *RANK_CONTAINER, "--device", "nvidia.com/gpu=all", "--device", "/dev/infiniband",
+             "--network", "host", "--read-only", "--tmpfs", "/tmp", "--cap-drop", "all", "--security-opt", "no-new-privileges", "--device", "nvidia.com/gpu=all", "--device", "/dev/infiniband",
              "--ulimit", "memlock=-1:-1", "--ulimit", "stack=67108864:67108864",
              "-v", f"{peer_fileset_dir(pair, rid, fileset)}:/models:ro", "-v", f"{rank_dir(rid, fileset, 1, pair['home'])}:{spec['state']}"]
   if run.get("shm_size_gib"):
@@ -2303,13 +2248,13 @@ def root_script(script, *args, peer=None):
 def cmd_link_setup(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local link setup",
                                    description="Prepare this Spark and the one cabled to it to run models across both. Safe to run again.")
-  parser.add_argument("peer", nargs="?", help="the other Spark as SSH reaches it now, e.g. user@spark-1234.local (default: the detected pair)")
+  parser.add_argument("peer", nargs="?", help="the other Spark as SSH reaches it now, e.g. user@spark-1234.local (default: the linked one)")
   args = parser.parse_args(argv)
   profile = machine_profile()
   if NVIDIA_UNIFIED_FAMILIES.get(profile["platform"]) not in PAIR_FAMILIES:
     raise LocalError("Pairs are supported between DGX Sparks (GB10) only")
-  available = link_probe(profile) if not args.peer and not cached_pair(profile) and not pair_override() else {}
-  peer = args.peer or (cached_pair(profile) or {}).get("peer") or pair_override() or available.get("address")
+  available = link_probe(profile) if not args.peer and not cached_pair(profile) else {}
+  peer = args.peer or (cached_pair(profile) or {}).get("peer") or available.get("address")
   if not peer or not PEER_RE.match(peer):
     raise LocalError("Name the other Spark as SSH reaches it, e.g.: omarchy agent local link setup spark-1234.local")
   if not local_ports():
@@ -2344,9 +2289,7 @@ def cmd_link_setup(argv):
   if not mine and not theirs:
     say(f"  {', '.join(sorted(set(here) & set(there)))} already addressed")
 
-  pair = detect_pair(machine_profile(), user=peer_user(peer))
-  if not pair:
-    raise LocalError("The peer wasn't found on the cable after setup: check that both ends of the link are up (omarchy agent local link)")
+  pair = record_pair(profile, cable_peer(peer))
 
   say("Firewalls")
   near, far = pair_link(pair)
@@ -2362,12 +2305,12 @@ def cmd_link(argv):
   if argv[:1] == ["setup"]:
     return cmd_link_setup(argv[1:])
   if argv[:1] == ["notify"]:
-    link_notify(machine_profile(probe_pair=True))
+    link_notify(machine_profile())
     return 0
   parser = argparse.ArgumentParser(prog="omarchy agent local link")
   parser.add_argument("--json", action="store_true")
   args = parser.parse_args(argv)
-  profile = machine_profile(probe_pair=True)
+  profile = machine_profile()
   pair = profile.get("pair")
   state = link_probe(profile)
   if args.json:
@@ -2377,7 +2320,7 @@ def cmd_link(argv):
     say(f"Another Spark is on the cable: {state['host'] or state['address']}. Set both up with: omarchy agent local link setup")
     return 0
   if not pair:
-    say("No paired machine found on a ConnectX-7 link (name one in ~/.config/omarchy/agent-local/link)")
+    say("No Spark is linked to this one yet: cable them, then run omarchy agent local link setup <the other Spark>")
     return 0
   here, there = pair_link(pair)
   say(f"Linked to {pair['host']} at {pair['peer']} ({pair['ram_gib']:.0f} GiB)")
@@ -2688,7 +2631,7 @@ def cmd_use(argv):
   parser.add_argument("--detach", action="store_true", help="set it up in the background; the agents panel shows its progress")
   args = parser.parse_args(argv)
   catalog = load_catalog()
-  profile = machine_profile(probe_pair=True)
+  profile = machine_profile()
   gpu = choose_gpu(profile, args.gpu) if args.gpu else None
   if args.target == "best":
     rid, variant, skipped = resolve_best(catalog, profile, gpu, args.ctx)
@@ -2882,7 +2825,7 @@ def cmd_list(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local list")
   parser.add_argument("--json", action="store_true")
   args = parser.parse_args(argv)
-  profile = machine_profile(probe_pair=True)
+  profile = machine_profile()
   catalog = load_catalog()
   rows = recipe_listing(catalog, profile, running_models())
   write_list_cache(rows)
@@ -3425,7 +3368,7 @@ def _remove_files(rid, setup_image=None):
 
 def cmd_profile(argv):
   argparse.ArgumentParser(prog="omarchy agent local profile").parse_args(argv)
-  profile = machine_profile(probe_pair=True)
+  profile = machine_profile()
   print(json.dumps(profile, indent=2))
   return 0
 
@@ -3435,7 +3378,7 @@ def cmd_refresh(argv):
   parser.add_argument("--quiet", action="store_true")
   args = parser.parse_args(argv)
   catalog = load_catalog()
-  profile = machine_profile(probe_pair=True)
+  profile = machine_profile()
   link_probe(profile)
   refresh_list_cache(catalog, profile)
   write_status(catalog, profile)
