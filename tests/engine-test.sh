@@ -343,7 +343,7 @@ pair_text = a.render_container("paired", paired, pair_rt, paired["variant"][0], 
 pair_port = a.port_for("paired")
 check("the pair unit shares the host network and publishes nothing", "Network=host" in pair_text and "PublishPort" not in pair_text)
 check("the pair unit binds its API to loopback on the model's port", f'"--host" "127.0.0.1" "--port" "{pair_port}"' in pair_text and f"127.0.0.1:{pair_port}/health" in pair_text)
-check("the pair unit mounts rank 0's inputs and reads the link from its environment file", f"models/paired/{'b' * 16}.rank0:/prepared:ro" in pair_text and "EnvironmentFile=%h/.local/state/omarchy/agent-local/pair/paired.env" in pair_text)
+check("the pair unit mounts rank 0's inputs and reads the link from its environment file", f"models/paired/{a.rank_folder('b' * 16, 0, pair_rt)}:/prepared:ro" in pair_text and "EnvironmentFile=%h/.local/state/omarchy/agent-local/pair/paired.env" in pair_text)
 check("the pair unit starts and stops rank 1 with itself", "ExecStartPre=/usr/bin/env omarchy-agent-local link-worker start paired" in pair_text and "ExecStopPost=-/usr/bin/env omarchy-agent-local link-worker stop paired" in pair_text)
 check("a paired runtime may serve its prepared folder", '"--model" "/prepared/model"' in a.render_container("paired", paired, dict(pair_rt, pair=dict(pair_rt["pair"], model="/prepared/model")), paired["variant"][0], {"model": "model"}, pair_gpu, "b" * 16))
 same_rt = copy.deepcopy(pair_rt)
@@ -389,6 +389,31 @@ rsync = next(argv for argv in ran if argv[0] == "rsync")
 check("setup records the peer and the image by ID", manifest["pair"] == {"peer": "bob@10.99.1.2", "host": "spark2", "home": "/home/bob", "image_id": "f" * 64})
 check("setup copies the file set to the peer, not an image it already has", not save.called and rsync[-1] == f"bob@10.99.1.2:/home/bob/.local/share/omarchy/agent-local/models/paired/{'e' * 16}/")
 check("setup makes both ranks' state folders", Path(a.rank_dir("paired", "e" * 16, 0)).is_dir() and any(f"{'e' * 16}.rank1" in call.args[1] for call in ssh.call_args_list))
+# Prepared files are a generation per image and prepare command, so an update never rewrites the running setup's.
+updated = dict(pair_rt, image=pair_rt["image"].replace("a" * 64, "b" * 64))
+check("a runtime update prepares into its own generation", a.rank_folder("e" * 16, 0, pair_rt) != a.rank_folder("e" * 16, 0, updated) and a.rank_folder("e" * 16, 0, same_rt) == "e" * 16 + ".rank0")
+base = Path(a.data_dir(), "models", "gen")
+old_gen, new_gen = a.rank_folder("e" * 16, 0, pair_rt), a.rank_folder("e" * 16, 0, updated)
+for name in ("e" * 16, old_gen, new_gen):
+  (base / name).mkdir(parents=True, exist_ok=True)
+with patch.object(a, "load_model", return_value={"runtime": updated}):
+  a.prune_filesets("gen", "e" * 16)
+check("pruning keeps only the committed setup's generation", sorted(p.name for p in base.iterdir()) == sorted(["e" * 16, new_gen]))
+# Prepare runs once per rank, without network, and a failure stops the setup.
+ran = []
+def fake_prepare(argv, **kwargs):
+  ran.append(argv)
+  return SimpleNamespace(returncode=0, stdout="f" * 64 + "\n", stderr="")
+with patch.object(a.subprocess, "run", side_effect=fake_prepare), patch.object(a.subprocess, "Popen"), \
+     patch.object(a, "pair_ssh", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")), patch.object(a, "load_installing", return_value=None):
+  a.pair_setup("paired", {"fileset": "e" * 16}, pair_rt, {"peer": "10.99.1.2", "host": "spark2", "home": "/home/bob"})
+prepares = [argv for argv in ran if any(word == "prep" or " prep " in word for word in argv)]
+check("prepare runs for rank 0 here and rank 1 on the peer, without network",
+      len(prepares) == 2 and prepares[0][-3:] == ["prep", "0", "2"] and "none" in prepares[0]
+      and "prep 1 2" in " ".join(prepares[1]) and "--network none" in " ".join(prepares[1]), repr(prepares))
+with patch.object(a.subprocess, "run", side_effect=lambda argv, **k: SimpleNamespace(returncode=1 if "prep" in argv else 0, stdout="f" * 64, stderr="")), \
+     patch.object(a, "pair_ssh", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")), patch.object(a, "load_installing", return_value=None):
+  raises("a failed prepare stops the setup", lambda: a.pair_setup("paired", {"fileset": "e" * 16}, pair_rt, {"peer": "10.99.1.2", "host": "spark2", "home": "/home/bob"}), "Preparing rank 0")
 check("the pair unit keeps the container restrictions", all(line in pair_text for line in ("ReadOnly=true", "DropCapability=all", "NoNewPrivileges=true", "AddDevice=/dev/infiniband")))
 if generator:
   quadlets = Path(a.quadlet_dir())

@@ -1364,17 +1364,20 @@ def prune_filesets(rid, keep):
   base = os.path.join(data_dir(), "models", rid)
   if not os.path.isdir(base) or not FILESET_RE.match(keep or ""):
     return
+  manifest = load_model(rid) or {}
+  # A paired recipe's rank folders go with their file set, and only the current generation's stay.
+  generation = rank_generation(manifest.get("runtime"))
+  current = f"{keep}.{generation}." if generation else f"{keep}."
   for name in os.listdir(base):
-    # A paired recipe's rank folders (<fileset>.rank<N>) go with their file set.
-    if name != keep and not name.startswith(keep + "."):
+    if name != keep and not name.startswith(current):
       shutil.rmtree(os.path.join(base, name), ignore_errors=True)
   # The peer's copies too, once the setup that replaced them is the current one.
-  setup = (load_model(rid) or {}).get("pair")
+  setup = manifest.get("pair")
   if setup:
     peer_base = os.path.dirname(peer_fileset_dir(setup, rid, keep))
     q = shlex.quote
     try:
-      pair_ssh(setup["peer"], f"cd {q(peer_base)} && for d in *; do case $d in {q(keep)}|{q(keep)}.*) ;; *) rm -rf -- \"$d\" ;; esac; done", check=False)
+      pair_ssh(setup["peer"], f"cd {q(peer_base)} && for d in *; do case $d in {q(keep)}|{q(current)}*) ;; *) rm -rf -- \"$d\" ;; esac; done", check=False)
     except LocalError:
       pass
 
@@ -1538,7 +1541,7 @@ def render_container(rid, recipe, runtime, variant, roles, gpu, fileset):
     lines += [
       "Network=host",
       f"Volume=%h/.local/share/omarchy/agent-local/models/{rid}/{fileset}:/models:ro",
-      "Volume=" + rank_mount(runtime, f"%h/.local/share/omarchy/agent-local/models/{rid}/{fileset}.rank0"),
+      "Volume=" + rank_mount(runtime, f"%h/.local/share/omarchy/agent-local/models/{rid}/{rank_folder(fileset, 0, runtime)}"),
       f"EnvironmentFile=%h/.local/state/omarchy/agent-local/pair/{rid}.env",
       "Ulimit=stack=67108864:67108864",
       "Tmpfs=/tmp",
@@ -1941,8 +1944,23 @@ def worker_name(rid):
   return f"{UNIT_PREFIX}{rid}-rank1"
 
 
-def rank_dir(rid, fileset, rank, home_dir=None):
-  return os.path.join(home_dir or home(), ".local", "share", "omarchy", "agent-local", "models", rid, f"{fileset}.rank{rank}")
+def rank_generation(runtime):
+  """A runtime with a prepare step keeps each rank's prepared files per image and prepare command:
+  an update prepares a new generation while the running setup keeps reading its own, and the old
+  one goes only once the new setup has started (prune_filesets)."""
+  prepare = (runtime or {}).get("pair", {}).get("prepare")
+  if not prepare:
+    return ""
+  return hashlib.sha256(json.dumps([runtime["image"], prepare]).encode()).hexdigest()[:12]
+
+
+def rank_folder(fileset, rank, runtime):
+  generation = rank_generation(runtime)
+  return f"{fileset}.{generation}.rank{rank}" if generation else f"{fileset}.rank{rank}"
+
+
+def rank_dir(rid, fileset, rank, home_dir=None, runtime=None):
+  return os.path.join(home_dir or home(), ".local", "share", "omarchy", "agent-local", "models", rid, rank_folder(fileset, rank, runtime))
 
 
 def peer_fileset_dir(pair, rid, fileset):
@@ -2007,7 +2025,7 @@ def pair_setup(rid, manifest, runtime, pair):
   # A first setup cancelled from here on still knows where its copies went.
   if load_installing(rid) is not None:
     update_installing(rid, pair=manifest["pair"])
-  local_rank = rank_dir(rid, fileset, 0)
+  local_rank = rank_dir(rid, fileset, 0, runtime=runtime)
   ensure_dir(local_rank)
   if runtime["pair"].get("prepare"):
     say("Preparing rank 0's inputs here (minutes the first time)")
@@ -2030,7 +2048,7 @@ def pair_setup(rid, manifest, runtime, pair):
   stream(["rsync", "-a", "--partial", "--delete", "--info=progress2", "--no-inc-recursive",
           "-e", shlex.join(pair_ssh_argv() + ["-o", "Compression=no", "-c", "aes128-gcm@openssh.com"]),
           f"{models}/", f"{peer}:{target}/"], f"Copying the model files to {pair['host']}")
-  peer_rank = rank_dir(rid, fileset, 1, pair["home"])
+  peer_rank = rank_dir(rid, fileset, 1, pair["home"], runtime)
   pair_ssh(peer, f"mkdir -p {q(peer_rank)}")
   if runtime["pair"].get("prepare"):
     say(f"Preparing rank 1's inputs on {pair['host']}")
@@ -2080,7 +2098,7 @@ def pair_worker_start(rid):
   command = ["podman", "run", "-d", "--replace", "--name", worker_name(rid), "--label", f"org.omarchy.agent-local.recipe={rid}",
              "--network", "host", "--read-only", "--tmpfs", "/tmp", "--cap-drop", "all", "--security-opt", "no-new-privileges", "--device", "nvidia.com/gpu=all", "--device", "/dev/infiniband",
              "--ulimit", "memlock=-1:-1", "--ulimit", "stack=67108864:67108864",
-             "-v", f"{peer_fileset_dir(pair, rid, fileset)}:/models:ro", "-v", rank_mount(runtime, rank_dir(rid, fileset, 1, pair["home"]))]
+             "-v", f"{peer_fileset_dir(pair, rid, fileset)}:/models:ro", "-v", rank_mount(runtime, rank_dir(rid, fileset, 1, pair["home"], runtime))]
   if run.get("shm_size_gib"):
     command += ["--shm-size", f"{int(run['shm_size_gib'] * 1024)}m"]
   for name, value in sorted(worker.items()):
