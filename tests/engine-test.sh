@@ -491,9 +491,11 @@ check("the cable hook parses", subprocess.run(["bash", "-n", os.path.join(os.env
 # A model that stopped unexpectedly says why: this start's own recorded reason, else the
 # server's last error line, else systemd's result.
 journal = "info: weights read\nerror: ncclCommInitRank: unhandled system error (run with NCCL_DEBUG=INFO for details) (2)\nsome trailing line"
-with patch.object(a, "unit_props", return_value={"InactiveExitTimestamp": "@%d" % int(__import__("time").time() - 60)}), patch.object(a, "journal_tail", return_value=journal):
+started = int(__import__("time").time() - 60)
+with patch.object(a, "unit_props", return_value={"InactiveExitTimestamp": "@%d" % started}), patch.object(a, "journal_tail", return_value=journal) as tail:
   a.clear_error("crashy")
   check("a crash shows the server's own last error", a.failure_reason("crashy", "exit-code").startswith("ncclCommInitRank: unhandled system error"))
+  check("only this start's log is searched, not an earlier run's", tail.call_args.args[2] == started * 1000, repr(tail.call_args))
   a.record_error("crashy", "Locked memory limited: run link setup")
   check("a reason the start already recorded isn't overwritten", a.failure_reason("crashy", "exit-code") == "Locked memory limited: run link setup")
 with patch.object(a, "unit_props", return_value={"InactiveExitTimestamp": "@%d" % int(__import__("time").time() + 60)}), patch.object(a, "journal_tail", return_value="nothing useful"):
@@ -512,6 +514,14 @@ check("logs shows the last error, this machine's log and rank 1's from the peer"
       and "podman logs --tail 50" in peer_logs.call_args.args[1], repr(printed))
 os.unlink(a.model_manifest_path("crashy"))
 a.clear_error("crashy")
+# A failed first setup's reason lives in its installing record.
+a.write_atomic(a.installing_path("crashy"), json.dumps({"recipe_id": "crashy", "phase": "failed", "error": "Download failed"}))
+printed = []
+with patch.object(a, "say", side_effect=printed.append), \
+     patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="-- No entries --", stderr="")):
+  a.cmd_logs(["crashy"])
+check("logs shows a failed setup's saved reason", printed[:1] == ["Last error: Download failed"], repr(printed))
+os.unlink(a.installing_path("crashy"))
 
 # The default root must work without an Omarchy checkout or a catalog override.
 check("installed catalog loads and validates from the engine directory", not a.load_catalog().errors() and a.load_catalog().root == os.environ["ENGINE_ROOT"])

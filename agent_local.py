@@ -1655,12 +1655,15 @@ SERVER_ERROR_RE = re.compile(r"^(error|tensorfold|fatal):\s*(.+)", re.IGNORECASE
 
 def failure_reason(rid, result):
   """Why a model stopped unexpectedly, for the panel's line: a reason this start already recorded
-  (the start hook's, say), else the server's own last error line, else systemd's result."""
+  (the start hook's, say), else the server's own last error line from this start, not an
+  earlier one's, else systemd's result."""
   started = _unix_ms(unit_props(rid, "InactiveExitTimestamp").get("InactiveExitTimestamp"))
+  if not started:
+    return f"Stopped unexpectedly ({result})"
   path = error_path(rid)
-  if started and os.path.exists(path) and os.path.getmtime(path) * 1000 >= started:
+  if os.path.exists(path) and os.path.getmtime(path) * 1000 >= started:
     return _read(path)
-  for line in reversed(journal_tail(rid, 60).splitlines()):
+  for line in reversed(journal_tail(rid, 60, started).splitlines()):
     match = SERVER_ERROR_RE.match(line.strip())
     if match:
       reason = match.group(2).strip()
@@ -1668,8 +1671,9 @@ def failure_reason(rid, result):
   return f"Stopped unexpectedly ({result})"
 
 
-def journal_tail(rid, lines=15):
-  result = subprocess.run(["journalctl", "--user", "-u", unit_name(rid), "-n", str(lines), "-o", "cat", "--no-pager"], capture_output=True, text=True)
+def journal_tail(rid, lines=15, since_ms=None):
+  since = ["--since", f"@{since_ms // 1000}"] if since_ms else []
+  result = subprocess.run(["journalctl", "--user", "-u", unit_name(rid), *since, "-n", str(lines), "-o", "cat", "--no-pager"], capture_output=True, text=True)
   return result.stdout.strip()
 
 
@@ -3573,7 +3577,8 @@ def cmd_logs(argv):
   rid = args.recipe or last_model_id()
   if not rid or not ID_RE.match(rid):
     raise LocalError("Name the model: omarchy agent local logs <recipe>")
-  error = _read(error_path(rid))
+  # A first setup that failed keeps its reason in its installing record.
+  error = _read(error_path(rid)) or (load_installing(rid) or {}).get("error", "")
   if error:
     say(f"Last error: {error}")
     say("")
