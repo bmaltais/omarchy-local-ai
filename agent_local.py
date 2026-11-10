@@ -1958,7 +1958,11 @@ def nodes_ram_gib(manifest, profile):
   """Total memory of the machines a model runs on, which its memory use is shown against."""
   total = profile.get("ram_gib") or gib(meminfo().get("MemTotal", 0))
   if manifest.get("pair"):
-    total += (profile.get("pair") or (manifest.get("profile") or {}).get("pair") or {}).get("ram_gib") or total
+    # The peer the model was set up with, which is the one it starts on: a link made to another
+    # machine since doesn't change it.
+    linked, saved = profile.get("pair") or {}, (manifest.get("profile") or {}).get("pair") or {}
+    peer = linked if linked.get("peer") == manifest["pair"].get("peer") else saved
+    total += peer.get("ram_gib") or total
   return round(total, 1)
 
 
