@@ -3767,14 +3767,33 @@ def remote_error(host, rid):
 
 
 def mirror_installing(host, rid, done):
-  """Copies the remote's setup progress into this machine's record, for the panel's bar."""
+  """Copies the remote's row for a model being set up into this machine's status, for the panel:
+  its download progress while it downloads, then loading, with the remote's expected load time."""
   while not done.wait(2):
     try:
-      there = json.loads(pair_ssh(host, f"cat ~/.local/state/omarchy/agent-local/installing/{shlex.quote(rid)}.json", check=False, timeout=10).stdout)
-    except (LocalError, ValueError):
+      there = json.loads(pair_ssh(host, "cat ~/.local/state/omarchy/agent-local/status.json", check=False, timeout=10).stdout)["models"][rid]
+    except (LocalError, ValueError, KeyError, TypeError):
       continue
-    if isinstance(there, dict) and there.get("phase") in ("waiting", "downloading"):
-      update_installing(rid, **{key: there[key] for key in ("phase", "done_bytes", "total_bytes", "rate_bytes_s") if key in there})
+    if there.get("unit") == "installing" and there.get("install", {}).get("phase") in ("waiting", "downloading"):
+      update_installing(rid, **{key: there["install"][key] for key in ("phase", "done_bytes", "total_bytes", "rate_bytes_s") if key in there["install"]})
+    elif there.get("unit") == "activating":
+      publish_row(rid, {**there, "port": port_for(rid), "endpoint": endpoint(rid), "error": ""})
+
+
+def publish_row(rid, row):
+  """Replaces this model's row in status.json, until the next full status write."""
+  ensure_dir(state_dir())
+  path = os.path.join(state_dir(), "status.json")
+  with open(os.path.join(state_dir(), "status.lock"), "w") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+      with open(path) as handle:
+        status = json.load(handle)
+    except (OSError, ValueError):
+      return
+    if isinstance(status, dict) and isinstance(status.get("models"), dict):
+      status["models"][rid] = row
+      write_atomic(path, json.dumps(status, indent=2) + "\n")
 
 
 def remote_unit_path(rid):

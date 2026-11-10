@@ -820,11 +820,19 @@ check("only a stop, not a dropped connection, stops the model there", '[ \\"$$SE
 remote_manifest = {"recipe_id": bolt, "remote": {"host": "me@dgx", "port": 11435}, "profile": dgx, "variant": {"peak_ram_gib": 999, "peak_gpu_gib": 999}}
 check("a remote model is admitted by the remote, against its memory", a.start_fit(remote_manifest, here) == (True, "") and a.nodes_ram_gib(remote_manifest, here) == 121.6)
 
-progress = json.dumps({"phase": "downloading", "done_bytes": 5, "total_bytes": 10, "rate_bytes_s": 2, "pid": 1})
-done = __import__("threading").Event()
-with patch.object(a, "pair_ssh", side_effect=lambda *_, **__: (done.set(), SimpleNamespace(stdout=progress))[1]), patch.object(a, "update_installing") as mirrored:
-  done.clear(); event = SimpleNamespace(wait=lambda _: done.is_set() and mirrored.called)
-  a.mirror_installing("me@dgx", bolt, event)
-check("a remote setup's progress reaches this machine's record", mirrored.call_args.kwargs == {"phase": "downloading", "done_bytes": 5, "total_bytes": 10, "rate_bytes_s": 2})
+def mirrored(row):
+  """Runs one round of mirror_installing against a remote whose status shows this row."""
+  done = __import__("threading").Event()
+  status = json.dumps({"models": {bolt: row}})
+  with patch.object(a, "pair_ssh", side_effect=lambda *_, **__: (done.set(), SimpleNamespace(stdout=status))[1]), \
+       patch.object(a, "update_installing") as installing, patch.object(a, "publish_row") as published:
+    a.mirror_installing("me@dgx", bolt, SimpleNamespace(wait=lambda _: done.is_set()))
+  return installing, published
+installing, published = mirrored({"unit": "installing", "install": {"phase": "downloading", "done_bytes": 5, "total_bytes": 10, "rate_bytes_s": 2}})
+check("a remote setup's download progress reaches this machine's record", installing.call_args.kwargs == {"phase": "downloading", "done_bytes": 5, "total_bytes": 10, "rate_bytes_s": 2} and not published.called)
+installing, published = mirrored({"unit": "activating", "port": 11500, "endpoint": "http://127.0.0.1:11500/v1", "expected_load_seconds": 50, "error": "old"})
+row = published.call_args.args[1] if published.called else {}
+check("a remote setup that's loading shows as loading here, at this machine's port", row.get("unit") == "activating" and row.get("expected_load_seconds") == 50
+      and row.get("endpoint") == a.endpoint(bolt) and row.get("error") == "" and not installing.called)
 
 PY
