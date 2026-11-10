@@ -3663,40 +3663,36 @@ def publish_shares(record, catalog, profile, force=False):
   """Bring the serve routes in line with shares.json and republish the
   listing when it changed. Errors land in share_error for the panel."""
   with share_lock():
-    _publish_shares(record, catalog, profile, force)
-
-
-def _publish_shares(record, catalog, profile, force):
-  shares = shared_recipes()
-  published = _read(published_path())
-  if not shares and not published and not force:
-    return
-  try:
-    dns = self_dns()
-    have = serve_handlers(dns)
-    want = {f"{SHARE_ROOT}/{rid}": f"http://127.0.0.1:{port_for(rid)}" for rid in shares if rid in record["models"]}
-    for path, target in want.items():
-      if (have.get(path) or {}).get("Proxy") != target:
-        serve_set(path, target)
-    for path in have:
-      if path != LISTING_ROUTE and path not in want:
-        serve_off(path)
-    if want:
-      text = json.dumps(shared_listing(record, catalog, profile, dns), sort_keys=True, separators=(",", ":"))
-      if (have.get(LISTING_ROUTE) or {}).get("Text") != text:
-        serve_set(LISTING_ROUTE, "text:" + text)
-      write_atomic(published_path(), text + "\n")
-    else:
-      if LISTING_ROUTE in have:
-        serve_off(LISTING_ROUTE)
-      if os.path.exists(published_path()):
-        os.unlink(published_path())
-    if os.path.exists(share_error_path()):
-      os.unlink(share_error_path())
-  except LocalError as error:
-    write_atomic(share_error_path(), str(error) + "\n")
-    if force:
-      raise
+    shares = shared_recipes()
+    published = _read(published_path())
+    if not shares and not published and not force:
+      return
+    try:
+      dns = self_dns()
+      have = serve_handlers(dns)
+      want = {f"{SHARE_ROOT}/{rid}": f"http://127.0.0.1:{port_for(rid)}" for rid in shares if rid in record["models"]}
+      for path, target in want.items():
+        if (have.get(path) or {}).get("Proxy") != target:
+          serve_set(path, target)
+      for path in have:
+        if path != LISTING_ROUTE and path not in want:
+          serve_off(path)
+      if want:
+        text = json.dumps(shared_listing(record, catalog, profile, dns), sort_keys=True, separators=(",", ":"))
+        if (have.get(LISTING_ROUTE) or {}).get("Text") != text:
+          serve_set(LISTING_ROUTE, "text:" + text)
+        write_atomic(published_path(), text + "\n")
+      else:
+        if LISTING_ROUTE in have:
+          serve_off(LISTING_ROUTE)
+        if os.path.exists(published_path()):
+          os.unlink(published_path())
+      if os.path.exists(share_error_path()):
+        os.unlink(share_error_path())
+    except LocalError as error:
+      write_atomic(share_error_path(), str(error) + "\n")
+      if force:
+        raise
 
 
 def cmd_share(argv):
@@ -3882,7 +3878,7 @@ def survey_network(previous, now=None):
   for host, remote in remotes.items():
     peers.setdefault(host, (remote["dns"], False))
   for host, before in (previous.get("hosts") or {}).items():
-    if isinstance(before, dict) and isinstance(before.get("dns"), str) and before["dns"].split(".")[0] == host:
+    if isinstance(before, dict) and before.get("dns"):
       peers.setdefault(host, (before["dns"], False))
   online = {host: dns for host, (dns, up) in peers.items() if up}
   with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
