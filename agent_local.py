@@ -3664,6 +3664,7 @@ def shared_listing(record, catalog, profile, dns):
       # speeds instead of this machine's memory.
       "architecture": recipe.get("architecture", ""),
       "ctx": model["ctx"],
+      "max_tokens": max_output_tokens(manifest) if manifest else DEFAULT_MAX_OUTPUT_TOKENS,
       "input": model_inputs(manifest) if manifest else ["text"],
       "unit": model["unit"],
       "error": model["error"],
@@ -3837,12 +3838,14 @@ def clean_listing(listing, dns):
     observed = model.get("observed") if isinstance(model.get("observed"), dict) else {}
     inputs = [value for value in model.get("input") or ["text"] if value in INPUTS] if isinstance(model.get("input"), list) else ["text"]
     ctx = _number(model.get("ctx"))
+    tokens = _number(model.get("max_tokens"))
     models.append({
       "recipe": model["recipe"],
       "name": _clean(model.get("name") or model["recipe"]),
       "vendor": model.get("vendor") if ID_RE.match(str(model.get("vendor", ""))) else "",
       "architecture": model.get("architecture") if model.get("architecture") in ARCHITECTURES else "",
       "ctx": int(ctx) if ctx and ctx > 0 else 0,
+      "max_tokens": int(min(tokens, ctx or tokens)) if tokens and tokens > 0 else DEFAULT_MAX_OUTPUT_TOKENS,
       "input": inputs or ["text"],
       "unit": model.get("unit") if model.get("unit") in REMOTE_UNITS else "inactive",
       "error": _clean(model.get("error"), 300),
@@ -4101,6 +4104,8 @@ def overlay_target(rid=None):
       "model": model["recipe"],
       "name": model["name"],
       "ctx": model["ctx"],
+      # A host that doesn't publish its cap yet gets the old default.
+      "max_tokens": model.get("max_tokens") or DEFAULT_MAX_OUTPUT_TOKENS,
       "input": model["input"],
       "file": f"{model['host']}--{model['recipe']}",
     }
@@ -4114,6 +4119,7 @@ def overlay_target(rid=None):
     "model": rid,
     "name": manifest["recipe"].get("name", rid),
     "ctx": manifest["variant"]["ctx"],
+    "max_tokens": max_output_tokens(manifest),
     "input": model_inputs(manifest),
     "file": rid,
   }
@@ -4135,7 +4141,7 @@ def pi_overlay(rid=None):
       "input": target["input"],
       "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
       "contextWindow": target["ctx"],
-      "maxTokens": 16384,
+      "maxTokens": target["max_tokens"],
     }],
   }
   source = (
@@ -4149,6 +4155,25 @@ def pi_overlay(rid=None):
   path = os.path.join(config_dir(), "overlays", f"pi-{target['file']}.ts")
   write_atomic(path, source)
   return path, target["provider"], target["model"]
+
+
+DEFAULT_MAX_OUTPUT_TOKENS = 16384
+
+
+def max_output_tokens(manifest):
+  """The reply cap the server enforces, so agents never ask for less (or more) than it allows."""
+  args = manifest["recipe"].get("server", {}).get("args", []) + manifest["variant"].get("args", [])
+  value = None
+  for index, arg in enumerate(args):
+    if arg == "--max-tokens" and index + 1 < len(args):
+      value = args[index + 1]
+    elif arg.startswith("--max-tokens="):
+      value = arg.split("=", 1)[1]
+  try:
+    tokens = int(value)
+  except (TypeError, ValueError):
+    return DEFAULT_MAX_OUTPUT_TOKENS
+  return min(tokens, manifest["variant"]["ctx"]) if tokens > 0 else DEFAULT_MAX_OUTPUT_TOKENS
 
 
 def model_inputs(manifest):
@@ -4166,7 +4191,7 @@ def opencode_overlay(rid=None):
         "options": {"baseURL": target["base_url"], "apiKey": "{file:" + target["key_path"] + "}"},
         "models": {target["model"]: {
           "name": target["name"],
-          "limit": {"context": target["ctx"], "output": 16384},
+          "limit": {"context": target["ctx"], "output": target["max_tokens"]},
           "attachment": "image" in target["input"],
           "modalities": {"input": target["input"], "output": ["text"]},
         }},
