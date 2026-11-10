@@ -355,6 +355,40 @@ same_text = a.render_container("paired", paired, same_rt, paired["variant"][0], 
 check("a state path mounts the rank folder writable", f"models/paired/{'b' * 16}.rank0:/state\n" in same_text)
 _, same_argv, _, _ = a.head_argv(same_rt, paired, paired["variant"][0], {"model": "model"}, "paired")
 check("rank 1's default command is the head's, bound to loopback", same_argv[-4:] == ["--host", "127.0.0.1", "--port", str(a.port_for("paired"))] and same_argv[:2] == ["server", "serve"])
+# Each rank gets its own link settings, and rank 1 the head's command inside the same restrictions.
+setup = {"schema": 1, "recipe_id": "paired", "runtime": same_rt, "recipe": paired, "variant": paired["variant"][0], "roles": {"model": "model"},
+         "fileset": "e" * 16, "pair": {"peer": "bob@10.99.1.2", "host": "spark2", "home": "/home/bob", "image_id": "f" * 64}}
+a.write_pair_setup(setup)
+here = {"addr": "10.99.1.1", "dev": "enp1", "hcas": ["rocep1", "roceP2"], "gid": "5"}
+there = {"addr": "10.99.1.2", "dev": "enp1", "hcas": ["rocep1", "roceP2"], "gid": "3"}
+with patch.object(a, "pair_link", return_value=(here, there)), patch.object(a, "peer_headroom") as headroom, patch.object(a, "pair_ssh") as ssh, patch.object(a, "pair_python"):
+  a.pair_worker_start("paired")
+head_env = dict(line.split("=", 1) for line in Path(a.pair_env_path("paired")).read_text().splitlines())
+worker = shlex.split(ssh.call_args.args[1])
+worker_env = dict(worker[i + 1].split("=", 1) for i, word in enumerate(worker) if word == "-e")
+check("rank 0's environment is rank 0's side of the link", head_env == {"NCCL_COMM_ID": "10.99.1.1:29620", "TF_RANK": "0", "TF_MASTER": "10.99.1.1", "NCCL_SOCKET_IFNAME": "enp1", "NCCL_IB_HCA": "rocep1,roceP2", "NCCL_IB_GID_INDEX": "5"}, repr(head_env))
+check("rank 1's environment is rank 1's side, same rendezvous", worker_env["TF_RANK"] == "1" and worker_env["NCCL_COMM_ID"] == "10.99.1.1:29620" and worker_env["NCCL_IB_GID_INDEX"] == "3" and "API_KEY" not in worker_env, repr(worker_env))
+check("rank 1 starts on the peer as its user, with the head's command and the same restrictions",
+      ssh.call_args.args[0] == "bob@10.99.1.2" and headroom.called
+      and all(flag in worker for flag in ("--read-only", "no-new-privileges", "/dev/infiniband", "f" * 64))
+      and worker[worker.index("--cap-drop") + 1] == "all"
+      and f"/home/bob/.local/share/omarchy/agent-local/models/paired/{'e' * 16}:/models:ro" in worker
+      and f"/home/bob/.local/share/omarchy/agent-local/models/paired/{'e' * 16}.rank1:/state" in worker
+      and worker[worker.index("f" * 64) + 1:][:2] == ["server", "serve"] and worker[-4:] == ["--host", "127.0.0.1", "--port", str(a.port_for("paired"))], repr(worker))
+os.unlink(a.pair_setup_path("paired"))
+# Setup copies the image (only when the peer lacks it) and the file set, and makes both ranks' state folders.
+ran = []
+def fake_run(argv, **kwargs):
+  ran.append(argv)
+  return SimpleNamespace(returncode=0, stdout="f" * 64 + "\n", stderr="")
+manifest = {"fileset": "e" * 16}
+with patch.object(a.subprocess, "run", side_effect=fake_run), patch.object(a.subprocess, "Popen") as save, \
+     patch.object(a, "pair_ssh", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as ssh, patch.object(a, "load_installing", return_value=None):
+  a.pair_setup("paired", manifest, same_rt, {"peer": "bob@10.99.1.2", "host": "spark2", "home": "/home/bob"})
+rsync = next(argv for argv in ran if argv[0] == "rsync")
+check("setup records the peer and the image by ID", manifest["pair"] == {"peer": "bob@10.99.1.2", "host": "spark2", "home": "/home/bob", "image_id": "f" * 64})
+check("setup copies the file set to the peer, not an image it already has", not save.called and rsync[-1] == f"bob@10.99.1.2:/home/bob/.local/share/omarchy/agent-local/models/paired/{'e' * 16}/")
+check("setup makes both ranks' state folders", Path(a.rank_dir("paired", "e" * 16, 0)).is_dir() and any(f"{'e' * 16}.rank1" in call.args[1] for call in ssh.call_args_list))
 check("the pair unit keeps the container restrictions", all(line in pair_text for line in ("ReadOnly=true", "DropCapability=all", "NoNewPrivileges=true", "AddDevice=/dev/infiniband")))
 if generator:
   quadlets = Path(a.quadlet_dir())
