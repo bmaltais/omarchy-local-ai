@@ -1658,16 +1658,14 @@ def failure_reason(rid, result):
   (the start hook's, say), else the server's own last error line from this start, not an
   earlier one's, else systemd's result."""
   started = _unix_ms(unit_props(rid, "InactiveExitTimestamp").get("InactiveExitTimestamp"))
-  if not started:
-    return f"Stopped unexpectedly ({result})"
-  path = error_path(rid)
-  if os.path.exists(path) and os.path.getmtime(path) * 1000 >= started:
-    return _read(path)
-  for line in reversed(journal_tail(rid, 60, started).splitlines()):
-    match = SERVER_ERROR_RE.match(line.strip())
-    if match:
-      reason = match.group(2).strip()
-      return reason if len(reason) <= 160 else reason[:157] + "..."
+  if started:
+    path = error_path(rid)
+    if os.path.exists(path) and os.path.getmtime(path) * 1000 >= started:
+      return _read(path)
+    for line in reversed(journal_tail(rid, 60, started).splitlines()):
+      match = SERVER_ERROR_RE.match(line.strip())
+      if match:
+        return match.group(2).strip()[:160]
   return f"Stopped unexpectedly ({result})"
 
 
@@ -3584,15 +3582,15 @@ def cmd_logs(argv):
     say("")
   # Its setup's log while it's being set up or failed to be, then the model's own.
   for unit, what in ((install_unit(rid), "setup"), (unit_name(rid), "model")):
-    out = subprocess.run(["journalctl", "--user", "-u", unit, "-n", str(args.lines), "-o", "short", "--no-pager"], capture_output=True, text=True).stdout.strip()
-    if out and not out.startswith("-- No entries --"):
+    out = subprocess.run(["journalctl", "--user", "-q", "-u", unit, "-n", str(args.lines), "--no-pager"], capture_output=True, text=True).stdout.strip()
+    if out:
       say(f"== {rid}: {what} log on this machine ({unit})")
       say(out)
       say("")
-  manifest = load_model(rid) or load_installing(rid) or {}
-  if os.path.exists(pair_setup_path(rid)):
-    manifest = pair_manifest(rid)
-  setup = manifest.get("pair")
+  try:
+    setup = pair_manifest(rid).get("pair")
+  except LocalError:
+    setup = None
   if setup:
     say(f"== {rid}: rank 1 on {setup['host']}")
     result = pair_ssh(setup["peer"], f"podman logs --tail {int(args.lines)} {shlex.quote(worker_name(rid))} 2>&1", check=False, timeout=30)

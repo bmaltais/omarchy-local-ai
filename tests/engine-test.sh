@@ -518,7 +518,7 @@ a.clear_error("crashy")
 a.write_atomic(a.installing_path("crashy"), json.dumps({"recipe_id": "crashy", "phase": "failed", "error": "Download failed"}))
 printed = []
 with patch.object(a, "say", side_effect=printed.append), \
-     patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="-- No entries --", stderr="")):
+     patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")):
   a.cmd_logs(["crashy"])
 check("logs shows a failed setup's saved reason", printed[:1] == ["Last error: Download failed"], repr(printed))
 os.unlink(a.installing_path("crashy"))
