@@ -3697,7 +3697,9 @@ def publish_shares(record, catalog, profile, force=False):
     try:
       dns = self_dns()
       have = serve_handlers(dns)
-      want = {f"{SHARE_ROOT}/{rid}": f"http://127.0.0.1:{port_for(rid)}" for rid in shares if rid in record["models"]}
+      want = {f"{SHARE_ROOT}/{rid}": f"http://127.0.0.1:{SHARE_PROXY_PORT}/{rid}" for rid in shares if rid in record["models"]}
+      if want:
+        ensure_share_proxy()
       for path, target in want.items():
         if (have.get(path) or {}).get("Proxy") != target:
           serve_set(path, target)
@@ -3714,6 +3716,7 @@ def publish_shares(record, catalog, profile, force=False):
           serve_off(LISTING_ROUTE)
         if os.path.exists(published_path()):
           os.unlink(published_path())
+        stop_share_proxy()
       if os.path.exists(share_error_path()):
         os.unlink(share_error_path())
     except LocalError as error:
@@ -3767,6 +3770,236 @@ def cmd_share(argv):
     say(f"{rid} is no longer shared")
   else:
     say(f"Sharing {rid} on your tailnet at https://{self_dns()}{SHARE_ROOT}/{rid}/v1")
+  return 0
+
+
+# ---------------------------------------------------------------- share proxy
+#
+# `tailscale serve` hands a shared model's requests to one loopback proxy at
+# /<recipe> instead of to the model's own port, so this machine can tell who
+# is using it: serve puts the caller's tailnet address in X-Forwarded-For. The
+# proxy forwards every request untouched, key check included, and streams the
+# answer back as it comes. A machine whose request the model accepted counts
+# as using it for ACTIVE_CLIENT_MS after its last one; clients.json holds the
+# count per shared model, rewritten only when a count changes.
+
+SHARE_PROXY_PORT = 11430
+SHARE_PROXY_UNIT = "omarchy-agent-local-share.service"
+ACTIVE_CLIENT_MS = 5 * 60 * 1000
+HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade"}
+
+
+def clients_path():
+  return os.path.join(state_dir(), "clients.json")
+
+
+def share_proxy_unit_path():
+  return os.path.join(home(), ".config", "systemd", "user", SHARE_PROXY_UNIT)
+
+
+def ensure_share_proxy():
+  """The proxy runs while anything is shared: written, reloaded and started on first need."""
+  text = "\n".join([
+    "[Unit]",
+    "Description=Omarchy local AI: count who uses the shared models",
+    "",
+    "[Service]",
+    "ExecStart=/usr/bin/env omarchy-agent-local share-proxy",
+    "Restart=on-failure",
+    "",
+  ])
+  path = share_proxy_unit_path()
+  if _read(path) != text.strip():
+    write_atomic(path, text)
+    systemctl("daemon-reload")
+  result = systemctl("start", SHARE_PROXY_UNIT)
+  if result.returncode != 0:
+    raise LocalError(f"Can't start the share proxy: {result.stderr.strip()}")
+
+
+def stop_share_proxy():
+  if os.path.exists(share_proxy_unit_path()):
+    systemctl("stop", SHARE_PROXY_UNIT)
+
+
+class ClientTracker:
+  """The machines using each shared model, by the time of their last accepted request."""
+
+  def __init__(self, path, window_ms=ACTIVE_CLIENT_MS, clock=lambda: int(time.time() * 1000)):
+    self.path = path
+    self.window_ms = window_ms
+    self.clock = clock
+    self.seen = {}
+    self.written = None
+    self.lock = threading.Condition()
+
+  def _prune(self, now):
+    for rid in list(self.seen):
+      self.seen[rid] = {client: at for client, at in self.seen[rid].items() if now - at < self.window_ms}
+      if not self.seen[rid]:
+        del self.seen[rid]
+
+  def _write(self):
+    counts = {rid: len(clients) for rid, clients in sorted(self.seen.items())}
+    if counts != self.written:
+      write_atomic(self.path, json.dumps({"models": counts}, sort_keys=True) + "\n")
+      self.written = counts
+
+  def saw(self, rid, client):
+    with self.lock:
+      now = self.clock()
+      self.seen.setdefault(rid, {})[client] = now
+      self._prune(now)
+      self._write()
+      self.lock.notify()
+
+  def expire(self):
+    """Drop machines past the window, and say how long until the next one lapses."""
+    with self.lock:
+      now = self.clock()
+      self._prune(now)
+      self._write()
+      times = [at for clients in self.seen.values() for at in clients.values()]
+      return (min(times) + self.window_ms - now) / 1000 if times else None
+
+  def run_expiry(self):
+    # Held across the deadline check and the wait, so a machine saw() adds in
+    # between can't slip past its notify. The condition's lock is reentrant.
+    with self.lock:
+      while True:
+        wait = self.expire()
+        self.lock.wait(timeout=None if wait is None else max(wait, 0.05))
+
+
+def proxy_client(headers, address):
+  forwarded = str(headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+  try:
+    return str(ipaddress.ip_address(forwarded))
+  except ValueError:
+    return address
+
+
+def make_share_proxy(tracker, ports=None, shares=None):
+  import http.client
+  import http.server
+  ports = ports or load_ports
+  shares = shares or shared_recipes
+
+  class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args):
+      pass
+
+    def _body(self):
+      """The request body as the model gets it: passed through in bounded
+      blocks as it arrives, never held whole, so a caller without the key
+      can't fill the proxy's memory before the model refuses it."""
+      if "chunked" in str(self.headers.get("Transfer-Encoding") or "").lower():
+        def chunks():
+          while True:
+            size = int(self.rfile.readline(1024).split(b";")[0].strip() or b"0", 16)
+            if size == 0:
+              while self.rfile.readline(1024).strip():
+                pass
+              return
+            while size > 0:
+              block = self.rfile.read(min(size, 65536))
+              if not block:
+                return
+              size -= len(block)
+              yield block
+            self.rfile.readline(1024)
+        return chunks(), True
+      length = int(self.headers.get("Content-Length") or 0)
+      if length <= 0:
+        return None, False
+      rfile = self.rfile
+
+      class Remaining:
+        def read(self, size=65536):
+          nonlocal length
+          block = rfile.read(min(size, length)) if length > 0 else b""
+          length -= len(block)
+          return block
+
+      return Remaining(), False
+
+    def _refuse(self, status):
+      # The body is left unread, so the connection can't be reused for another request.
+      self.close_connection = True
+      self.send_response(status)
+      self.send_header("Content-Length", "0")
+      self.send_header("Connection", "close")
+      self.end_headers()
+
+    def _forward(self):
+      rid, _, rest = self.path.lstrip("/").partition("/")
+      port = ports().get(rid)
+      if not ID_RE.match(rid) or rid not in shares() or not port:
+        return self._refuse(404)
+      body, chunked = self._body()
+      headers = {name: value for name, value in self.headers.items() if name.lower() not in HOP_HEADERS and name.lower() != "host"}
+      upstream = http.client.HTTPConnection("127.0.0.1", port, timeout=600)
+      try:
+        upstream.request(self.command, "/" + rest, body=body, headers=headers, encode_chunked=chunked)
+        answer = upstream.getresponse()
+      except OSError:
+        upstream.close()
+        return self._refuse(502)
+      # Only a request the model accepted counts: a wrong key or a bad path doesn't.
+      if answer.status < 400:
+        tracker.saw(rid, proxy_client(self.headers, self.client_address[0]))
+      try:
+        self.send_response(answer.status, answer.reason)
+        for name, value in answer.getheaders():
+          if name.lower() not in HOP_HEADERS and name.lower() != "content-length":
+            self.send_header(name, value)
+        length = answer.getheader("Content-Length")
+        if self.command == "HEAD":
+          self.send_header("Content-Length", length or "0")
+          self.end_headers()
+        elif length is not None:
+          self.send_header("Content-Length", length)
+          self.end_headers()
+          while chunk := answer.read1(65536):
+            self.wfile.write(chunk)
+        else:
+          # A streamed reply (server-sent events) goes out chunk by chunk as it arrives.
+          self.send_header("Transfer-Encoding", "chunked")
+          self.end_headers()
+          while chunk := answer.read1(65536):
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+            self.wfile.flush()
+          self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+      finally:
+        upstream.close()
+
+    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_HEAD = _forward
+
+  return Handler
+
+
+def cmd_share_proxy(argv):
+  import http.server
+  argparse.ArgumentParser(prog="omarchy agent local share-proxy").parse_args(argv)
+  tracker = ClientTracker(clients_path())
+  tracker.expire()
+  server = http.server.ThreadingHTTPServer(("127.0.0.1", SHARE_PROXY_PORT), make_share_proxy(tracker))
+  server.daemon_threads = True
+  threading.Thread(target=tracker.run_expiry, daemon=True).start()
+
+  def stop(*_):
+    raise SystemExit(0)
+
+  signal.signal(signal.SIGTERM, stop)
+  try:
+    server.serve_forever()
+  finally:
+    # Nobody counts as using a model once nothing is listening.
+    if os.path.exists(clients_path()):
+      os.unlink(clients_path())
   return 0
 
 
@@ -4349,6 +4582,7 @@ COMMANDS = {
   "overlay": cmd_overlay,
   "link": cmd_link,
   "link-worker": cmd_link_worker,
+  "share-proxy": cmd_share_proxy,
 }
 
 SUMMARIES = {
