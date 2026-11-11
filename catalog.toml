@@ -1,3 +1,3 @@
-# The catalog ships with the engine; releases version both together.
+# The catalog ships with the engine. Its version is the package's, which
+# writes it to VERSION beside them; a checkout has none.
 schema = 1
-version = "0.6.1"

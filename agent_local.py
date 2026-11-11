@@ -830,7 +830,7 @@ class Catalog:
     self.root = root
     with open(os.path.join(root, "catalog.toml"), "rb") as handle:
       self.meta = tomllib.load(handle)
-    self.version = self.meta.get("version", "unknown")
+    self.version = _read(os.path.join(root, "VERSION")) or "dev"
     self.runtimes = _load_toml_dir(root, "runtimes")
     self.recipes = _load_toml_dir(root, "recipes")
     with open(os.path.join(root, "best.toml"), "rb") as handle:
