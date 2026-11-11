@@ -915,11 +915,31 @@ check("disconnecting a model keeps the host's others and its key", a.load_remote
 with patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
   a.cmd_forget(["away/small-model"])
 check("disconnecting a model that isn't connected leaves the host paired", a.load_remotes()["away"]["models"] == ["other-model"])
+# A host paired whole: disconnecting one model needs no list of the others,
+# so a model it shares later, or an empty survey, can't disconnect more.
 pair_away()
+a.write_atomic(a.network_path(), json.dumps({"hosts": {}, "models": {}}))
+with patch.object(a, "tailscale_status", return_value=None), patch.object(a, "fetch_listing"):
+  a.cmd_forget(["away/small-model"])
+whole = a.load_remotes()["away"]
+check("disconnecting a model of a host paired whole keeps the key and every other model, even with no survey",
+      os.path.exists(a.remote_key_path("away")) and not a.connected(whole, "small-model") and a.connected(whole, "new-model"))
 a.write_atomic(a.network_path(), json.dumps(later))
+with patch.object(a.subprocess, "run", side_effect=AssertionError("no SSH")), patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
+  a.cmd_pair(["away", "small-model"])
+check("pairing it again reconnects it", a.connected(a.load_remotes()["away"], "small-model"))
+pair_away(models=["small-model"])
 with patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
   a.cmd_forget(["away/small-model"])
-check("disconnecting a host's only model unpairs it", "away" not in a.load_remotes() and not os.path.exists(a.remote_key_path("away")))
+check("disconnecting the only model of a one-at-a-time pairing unpairs the host", "away" not in a.load_remotes() and not os.path.exists(a.remote_key_path("away")))
+
+# The same host reached by another SSH name keeps what it connects.
+pair_away(models=["other-model"])
+export = json.dumps({"host": "away", "dns": "away.tail.ts.net", "key": "n" * 32})
+with patch.object(a.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, export + "\n")), patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
+  a.cmd_pair(["alice@away", "small-model"])
+again = a.load_remotes()["away"]
+check("pairing a host again under another name adds to its models", again["models"] == ["other-model", "small-model"] and again["ssh"] == "alice@away")
 a.write_atomic(a.remote_key_path("away"), "k" * 32, mode=0o600)
 a.write_atomic(os.path.join(a.remotes_dir(), "away.json"), json.dumps({"host": "away", "dns": "away.tail.ts.net", "ssh": "away"}))
 a.write_atomic(a.network_path(), json.dumps(later))

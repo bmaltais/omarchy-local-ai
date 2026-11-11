@@ -3800,13 +3800,44 @@ def load_remotes():
 
 
 def connected(remote, rid):
-  """Whether this machine uses a paired host's model. A pairing names the
-  models it connects; one without a list (from `pair <host>`) connects all."""
-  return bool(remote) and (not isinstance(remote.get("models"), list) or rid in remote["models"])
+  """Whether this machine uses a paired host's model. A pairing made for one
+  model at a time lists the models it connects; one made whole (`pair <host>`)
+  connects all it shares but those it lists as disconnected."""
+  if not remote:
+    return False
+  if isinstance(remote.get("models"), list):
+    return rid in remote["models"]
+  return rid not in (remote.get("disconnected") or [])
+
+
+@contextlib.contextmanager
+def remotes_lock():
+  """Held across reading, changing and saving a pairing, so two pair or forget
+  commands at once can't undo each other."""
+  ensure_dir(remotes_dir(), 0o700)
+  with open(os.path.join(remotes_dir(), ".lock"), "w") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    yield
 
 
 def save_remote(remote):
   write_atomic(os.path.join(remotes_dir(), f"{remote['host']}.json"), json.dumps(remote, indent=2) + "\n", mode=0o600)
+
+
+def unpair(host):
+  for path in (os.path.join(remotes_dir(), f"{host}.json"), remote_key_path(host)):
+    if os.path.exists(path):
+      os.unlink(path)
+
+
+def set_connected(remote, rid, on):
+  """Connect or disconnect one model of a pairing, in place. Returns False
+  when that leaves a one-at-a-time pairing with no model, which unpairs it."""
+  if isinstance(remote.get("models"), list):
+    remote["models"] = [m for m in remote["models"] if m != rid] + ([rid] if on else [])
+    return bool(remote["models"])
+  remote["disconnected"] = [m for m in remote.get("disconnected") or [] if m != rid] + ([] if on else [rid])
+  return True
 
 
 def network_path():
@@ -4025,14 +4056,16 @@ def cmd_pair(argv):
     raise LocalError("Not a recipe name")
   # A host already paired has given its key: connecting another of its models
   # needs no SSH.
-  remote = next((r for r in load_remotes().values() if target in (r["host"], r["dns"], r.get("ssh"))), None)
-  if remote and args.recipe:
-    if not connected(remote, args.recipe):
-      remote["models"].append(args.recipe)
-      save_remote(remote)
-    write_network()
-    say(f"Paired with {remote['host']}/{args.recipe}")
-    return 0
+  if args.recipe:
+    with remotes_lock():
+      remote = next((r for r in load_remotes().values() if target in (r["host"], r["dns"], r.get("ssh"))), None)
+      if remote:
+        set_connected(remote, args.recipe, True)
+        save_remote(remote)
+    if remote:
+      write_network()
+      say(f"Paired with {remote['host']}/{args.recipe}")
+      return 0
   say(f"Pairing with {target} over SSH")
   result = subprocess.run(ssh_command({"ssh": target, "dns": ""}, "share", "--export", interactive=True), stdout=subprocess.PIPE, text=True)
   if result.returncode == 255:
@@ -4046,12 +4079,17 @@ def cmd_pair(argv):
     raise LocalError(f"{target} answered with something other than its sharing details")
   if not HOST_RE.match(str(host)) or not DNS_RE.match(str(dns)) or not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key):
     raise LocalError(f"{target} answered with an invalid host name or key")
-  ensure_dir(remotes_dir(), 0o700)
-  write_atomic(remote_key_path(host), key, mode=0o600)
-  remote = {"host": host, "dns": dns, "ssh": target, "paired_ms": int(time.time() * 1000)}
-  if args.recipe:
-    remote["models"] = [args.recipe]
-  save_remote(remote)
+  with remotes_lock():
+    write_atomic(remote_key_path(host), key, mode=0o600)
+    # The same host reached by another name keeps the models it connects.
+    remote = load_remotes().get(host) or {"models": []}
+    remote.update(host=host, dns=dns, ssh=target, paired_ms=int(time.time() * 1000))
+    if args.recipe:
+      set_connected(remote, args.recipe, True)
+    else:
+      remote.pop("models", None)
+      remote.pop("disconnected", None)
+    save_remote(remote)
   network = write_network()
   shared = [m for m in network["models"].values() if m["host"] == host and m["paired"]]
   if shared:
@@ -4068,25 +4106,23 @@ def cmd_forget(argv):
   host = args.host
   if "/" in host:
     host, rid = split_remote_id(host)
-    remote = load_remotes().get(host)
-    if not connected(remote, rid):
-      say(f"{host}/{rid} isn't paired")
-      return 0
-    # Disconnecting one model of a host paired whole keeps the rest it shares.
-    if not isinstance(remote.get("models"), list):
-      remote["models"] = sorted({m["recipe"] for m in load_network()["models"].values() if isinstance(m, dict) and m.get("host") == host})
-    remote["models"] = [m for m in remote["models"] if m != rid]
-    # The last model disconnected unpairs the host, dropping its key.
-    if remote["models"]:
-      save_remote(remote)
-      write_network()
-      say(f"Disconnected {host}/{rid}")
-      return 0
+    with remotes_lock():
+      remote = load_remotes().get(host)
+      if not connected(remote, rid):
+        say(f"{host}/{rid} isn't paired")
+        return 0
+      # The last model disconnected unpairs the host, dropping its key.
+      if set_connected(remote, rid, False):
+        save_remote(remote)
+      else:
+        unpair(host)
+    write_network()
+    say(f"Disconnected {host}/{rid}")
+    return 0
   if not HOST_RE.match(host):
     raise LocalError("Not a host name")
-  for path in (os.path.join(remotes_dir(), f"{host}.json"), remote_key_path(host)):
-    if os.path.exists(path):
-      os.unlink(path)
+  with remotes_lock():
+    unpair(host)
   write_network(forget=host)
   say(f"Forgot {host}")
   return 0
