@@ -547,7 +547,7 @@ repo.mkdir()
 def write_toml(path, value):
   path.parent.mkdir(parents=True, exist_ok=True)
   path.write_text(bench.toml_dumps(value))
-write_toml(repo / "catalog.toml", {"schema": 1, "version": "0.1.0"})
+write_toml(repo / "catalog.toml", {"schema": 1})
 write_toml(repo / "best.toml", {"class": [entry]})
 write_toml(repo / "runtimes/server.toml", runtime)
 write_toml(repo / "recipes/model.toml", recipe)
@@ -557,7 +557,7 @@ os.environ["OMARCHY_LOCAL_AI_CATALOG"] = str(repo)
 check("catalog root can be overridden", a.load_catalog().root == str(repo))
 write_toml(repo / "catalog.toml", {"schema": 999})
 raises("invalid installed catalog is rejected", a.load_catalog, "failed validation")
-write_toml(repo / "catalog.toml", {"schema": 1, "version": "0.1.0"})
+write_toml(repo / "catalog.toml", {"schema": 1})
 # The package command follows /usr/bin-style symlinks to find its engine.
 link = root / "bin/omarchy-local-ai"
 link.parent.mkdir()
@@ -611,7 +611,7 @@ check("unit injects key through Podman secrets", f"Secret={a.SECRET},type=env,ta
 manifest = {"schema": 1, "recipe_id": "current", "recipe": recipe, "runtime": runtime,
             "runtime_id": "server", "image": runtime["image"], "variant": variant,
             "files": [], "roles": {"model": "model.gguf"}, "fileset": "a" * 16,
-            "gpu": gpu["family"], "profile": profile, "catalog": {"version": "0.1.0"},
+            "gpu": gpu["family"], "profile": profile,
             "observed": {"load_seconds": 12, "ram_used_gib": 16, "gpu_used_gib": 16}}
 path = a.save_model(manifest, started=False)
 check("a current manifest alone means installed", a.recipe_installed("current"))
@@ -925,6 +925,7 @@ now = 2_000_000
 with patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
   net = a.survey_network(previous, now=now)
 check("the survey lists a sharing peer's models by host/recipe", net["models"]["box/big-model"]["endpoint"] == "https://box.tail.ts.net/local-ai/big-model/v1" and net["models"]["box/big-model"]["offline"] == "")
+check("a model its host has stopped is left off the list", "box/odd-state" not in net["models"])
 check("the survey skips this machine, phones and peers sharing nothing", set(net["hosts"]) == {"box", "away", "flaky"})
 check("sharing needs HTTPS certificates on the tailnet", net["can_share"] is False)
 with patch.object(a, "tailscale_status", return_value={**ts_status, "CertDomains": ["me.tail.ts.net"]}), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
@@ -1005,13 +1006,9 @@ again = a.load_remotes()["away"]
 check("pairing a host again under another name adds to its models", again["models"] == ["other-model", "small-model"] and again["ssh"] == "alice@away")
 a.write_atomic(a.remote_key_path("away"), "k" * 32, mode=0o600)
 a.write_atomic(os.path.join(a.remotes_dir(), "away.json"), json.dumps({"host": "away", "dns": "away.tail.ts.net", "ssh": "away"}))
-a.write_atomic(a.network_path(), json.dumps(later))
-with patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
-  marked = a.write_network({"box/big-model": "deactivating", "away/small-model": "activating"})
-check("a remote stop shows at once; an offline model can't be marked", marked["models"]["box/big-model"]["unit"] == "deactivating" and marked["models"]["away/small-model"]["unit"] == "inactive")
 raises("a network model is named host/recipe", lambda: a.split_remote_id("box/../x"), "host/recipe")
-raises("an SSH target can't smuggle options", lambda: a.ssh_command({"ssh": "-oProxyCommand=x", "dns": ""}, "start", "m"), "Not an SSH target")
-check("remote commands quote their arguments", a.ssh_command({"ssh": "box", "dns": "box.tail.ts.net"}, "start", "big-model")[-2:] == ["box", "omarchy-agent-local start big-model"])
+raises("an SSH target can't smuggle options", lambda: a.ssh_command({"ssh": "-oProxyCommand=x", "dns": ""}, "share", "--export"), "Not an SSH target")
+check("remote commands quote their arguments", a.ssh_command({"ssh": "box", "dns": "box.tail.ts.net"}, "share", "--export")[-2:] == ["box", "omarchy-agent-local share --export"])
 
 # A paired, running remote model becomes an overlay with its own provider.
 a.write_atomic(a.remote_key_path("box"), "b" * 32, mode=0o600)
@@ -1039,27 +1036,122 @@ def fake_tailscale(*args, timeout=10):
 share_model = dict(manifest, recipe_id="current")
 a.save_model(share_model, started=False)
 with patch.object(a, "known_models", return_value=["current"]), patch.object(a, "unit_props", return_value={"ActiveState": "active"}), patch.object(a, "free_memory", return_value=(64, 48)), \
-     patch.object(a, "tailscale", side_effect=fake_tailscale), patch.object(a, "tailscale_status", return_value=ts_status):
+     patch.object(a, "tailscale", side_effect=fake_tailscale), patch.object(a, "tailscale_status", return_value=ts_status), \
+     patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0, stderr="")) as proxy_systemctl:
   record = a.write_status(cat, profile)
   check("nothing touches Tailscale Serve until a model is shared", handlers == {} and not record["models"]["current"]["shared"])
   a.save_shares(["current"])
   record = a.write_status(cat, profile)
   served = json.loads(handlers["/local-ai/models.json"]["Text"])
-  check("a shared model is proxied to its loopback port", handlers["/local-ai/current"] == {"Proxy": f"http://127.0.0.1:{a.port_for('current')}"} and record["models"]["current"]["shared"])
+  check("a shared model is served through the share proxy", handlers["/local-ai/current"] == {"Proxy": f"http://127.0.0.1:{a.SHARE_PROXY_PORT}/current"} and record["models"]["current"]["shared"])
+  check("sharing starts the share proxy", ("start", a.SHARE_PROXY_UNIT) in [call.args for call in proxy_systemctl.call_args_list])
   check("the listing names the model and its state, never the key", served["models"][0]["recipe"] == "current" and served["models"][0]["unit"] == "active" and "key" not in served and "key" not in served["models"][0])
   handlers["/other"] = {"Proxy": "http://127.0.0.1:9"}
   a.save_shares([])
   a.write_status(cat, profile)
   check("unsharing removes only our routes", handlers == {"/other": {"Proxy": "http://127.0.0.1:9"}} and not os.path.exists(a.published_path()))
+  check("unsharing the last model stops the share proxy", proxy_systemctl.call_args_list[-1].args == ("stop", a.SHARE_PROXY_UNIT))
 def refuse(*args, timeout=10):
   if args[:2] == ("serve", "status"):
     return SimpleNamespace(returncode=0, stdout="{}", stderr="")
   return SimpleNamespace(returncode=1, stdout="", stderr="sending serve config: 401 Unauthorized: must be root, or be an operator")
 with patch.object(a, "known_models", return_value=["current"]), patch.object(a, "unit_props", return_value={"ActiveState": "active"}), patch.object(a, "free_memory", return_value=(64, 48)), \
-     patch.object(a, "tailscale", side_effect=refuse), patch.object(a, "tailscale_status", return_value=ts_status):
+     patch.object(a, "tailscale", side_effect=refuse), patch.object(a, "tailscale_status", return_value=ts_status), \
+     patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0, stderr="")):
   a.save_shares(["current"])
   record = a.write_status(cat, profile)
   check("a refused share is reported with the fix", record["share_error"] == a.OPERATOR_HINT)
 a.save_shares([])
+
+# The share proxy: a request the model accepts counts its machine for the
+# window, a refused one doesn't, and a streamed answer arrives as it's sent.
+import http.client
+import http.server
+import threading
+
+release = threading.Event()
+
+class FakeModel(http.server.BaseHTTPRequestHandler):
+  protocol_version = "HTTP/1.1"
+  def log_message(self, *args):
+    pass
+  def do_POST(self):
+    if self.headers.get("Transfer-Encoding") == "chunked":
+      body = b""
+      while size := int(self.rfile.readline().strip(), 16):
+        body += self.rfile.read(size)
+        self.rfile.readline()
+      self.rfile.readline()
+    else:
+      body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+    if self.headers.get("Authorization") != "Bearer k":
+      self.send_response(401)
+      self.send_header("Content-Length", "0")
+      self.end_headers()
+      return
+    self.send_response(200)
+    self.send_header("Content-Type", "text/event-stream")
+    self.send_header("Transfer-Encoding", "chunked")
+    self.end_headers()
+    for index, part in enumerate((b"data: " + body + b"\n\n", b"data: [DONE]\n\n")):
+      # The second part waits until the first has reached the client, so a
+      # proxy that held the answer back until it ended would never finish.
+      if index:
+        release.wait(10)
+      self.wfile.write(b"%x\r\n%s\r\n" % (len(part), part))
+      self.wfile.flush()
+    self.wfile.write(b"0\r\n\r\n")
+
+def serve(handler):
+  server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+  server.daemon_threads = True
+  threading.Thread(target=server.serve_forever, daemon=True).start()
+  return server
+
+now = [1_000_000]
+tracker = a.ClientTracker(a.clients_path(), window_ms=1000, clock=lambda: now[0])
+model = serve(FakeModel)
+proxy = serve(a.make_share_proxy(tracker, ports=lambda: {"shared": model.server_address[1], "private": model.server_address[1]}, shares=lambda: ["shared"]))
+
+def ask(path, key="k", client="100.64.0.2"):
+  connection = http.client.HTTPConnection("127.0.0.1", proxy.server_address[1], timeout=10)
+  connection.request("POST", path, body=b"hello", headers={"Authorization": f"Bearer {key}", "X-Forwarded-For": client, "Content-Type": "application/json"})
+  answer = connection.getresponse()
+  body = answer.read()
+  connection.close()
+  return answer.status, body
+
+def counts():
+  return json.loads(open(a.clients_path()).read())["models"]
+
+connection = http.client.HTTPConnection("127.0.0.1", proxy.server_address[1], timeout=10)
+connection.request("POST", "/shared/v1/chat/completions", body=iter([b"hel", b"lo"]), encode_chunked=True, headers={"Authorization": "Bearer k", "X-Forwarded-For": "100.64.0.2"})
+answer = connection.getresponse()
+first = answer.read1(65536)
+release.set()
+rest = answer.read()
+connection.close()
+check("the proxy streams each part of the answer as the model sends it", answer.status == 200 and first == b"data: hello\n\n" and rest == b"data: [DONE]\n\n", f"{answer.status} {first!r} {rest!r}")
+release.clear()
+release.set()
+status, body = ask("/shared/v1/chat/completions")
+check("a request with a length passes its body through", status == 200 and body == b"data: hello\n\ndata: [DONE]\n\n", f"{status} {body!r}")
+check("an accepted request counts its machine", counts() == {"shared": 1})
+ask("/shared/v1/chat/completions")
+check("the same machine counts once", counts() == {"shared": 1})
+status, _ = ask("/shared/v1/chat/completions", key="wrong", client="100.64.0.3")
+check("a request the model refuses doesn't count", status == 401 and counts() == {"shared": 1})
+ask("/shared/v1/chat/completions", client="100.64.0.3")
+check("a second machine counts as a second user", counts() == {"shared": 2})
+status, _ = ask("/private/v1/chat/completions", client="100.64.0.4")
+check("a model that isn't shared isn't reachable through the proxy", status == 404 and counts() == {"shared": 2})
+now[0] += 600
+ask("/shared/v1/chat/completions", client="100.64.0.3")
+now[0] += 500
+check("a machine idle past the window stops counting", tracker.expire() is not None and counts() == {"shared": 1})
+now[0] += 600
+check("once everyone is idle nothing counts and nothing is pending", tracker.expire() is None and counts() == {})
+proxy.shutdown()
+model.shutdown()
 
 PY

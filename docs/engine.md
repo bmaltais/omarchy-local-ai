@@ -44,7 +44,7 @@ The real records are the examples and source of values:
 
 | Path | Rules |
 | --- | --- |
-| [catalog.toml](../catalog.toml) | Schema 1 and the release version. |
+| [catalog.toml](../catalog.toml) | The catalog schema, 1. |
 | [recipes/](../recipes/) | Name, summary, runtime, pinned artifacts, measured hardware, context variants, sampling and optional server arguments. Vendor names the panel logo; architecture is `dense` or `moe`; `input` is `["text"]` (the default) or `["text", "image"]`, which the agent overlays declare so agents can send screenshots. |
 | [runtimes/](../runtimes/) | Digest-pinned image, tier, port, command, standard input mappings, reserved options and nonempty `health.probe` argv. A paired runtime adds `listen` (its bind flags), `@PORT@` in its probe and a `[pair]` table: `nodes = 2`, `master_port`, the `state` path where each rank's own folder is mounted writable for the server's caches, and `env` for both ranks (any names but the link's `NCCL_SOCKET_IFNAME`, `NCCL_IB_HCA` and `NCCL_IB_GID_INDEX`, which the engine sets), whose values may hold `@RANK@`, `@WORLD@`, `@MASTER_ADDR@`, `@MASTER_PORT@` and `@RDMA_DEVICES@`. Both ranks run the runtime's command with the same arguments. |
 | [reviews/](../reviews/) | Third-party image digest, publisher, reviewer, date, license URL/hash and checked properties. |
@@ -183,7 +183,7 @@ Paths are relative to the user's home. JSON caches are atomically replaced.
 
 | Path | Purpose |
 | --- | --- |
-| `.local/state/omarchy/agent-local/models/<recipe>.json` | One current resolved manifest: schema, recipe/runtime IDs and definitions, catalog version, profile, GPU, variant, image, files, roles, required fileset, creation time, optional observations and unchecked flag. Its existence means installed. |
+| `.local/state/omarchy/agent-local/models/<recipe>.json` | One current resolved manifest: schema, recipe/runtime IDs and definitions, profile, GPU, variant, image, files, roles, required fileset, creation time, optional observations and unchecked flag. Its existence means installed. |
 | `.local/state/omarchy/agent-local/status.json` | Current model state and recommendation; shape below. |
 | `.local/state/omarchy/agent-local/list.json` | Array of recipe cards; shape below. |
 | `.local/state/omarchy/agent-local/ports.json`, `last` | Stable port assignments and last started recipe. |
@@ -197,8 +197,8 @@ Paths are relative to the user's home. JSON caches are atomically replaced.
 | `.config/containers/systemd/omarchy-agent-local-model-<recipe>.container` | Generated unit; shared `omarchy-agent-local.network` defines the internal network. |
 | `.config/omarchy/agent-local/key`, `overlays/` | Private API key and per-recipe client overlays. |
 
-`status.json` is `{models: {<recipe>: <model>}, last, ram_total_gib,
-catalog_version, best, link}`. `last` and `best` may be null. `link` is what the
+`status.json` is `{models: {<recipe>: <model>}, last, ram_total_gib, best,
+link}`. `last` and `best` may be null. `link` is what the
 ConnectX-7 cable shows: `{state: "none"}`, `{state: "linked", host}`, or, for another
 Spark answering on the cable's IPv6 link-local all-nodes address before `link setup`,
 `{state: "available", address, host}` (`host` from mDNS, may be null). `refresh` and
@@ -208,7 +208,7 @@ to `/etc/NetworkManager/dispatcher.d/`: when a ConnectX-7 port comes up it runs
 `link notify` for each logged-in user, which announces a newly available Spark once,
 with a notification whose action opens `link setup` in a terminal. Each model contains:
 
-- Identity: `recipe`, `name`, `vendor`, `runtime`, `image`, `ctx`, `catalog_version`.
+- Identity: `recipe`, `name`, `vendor`, `runtime`, `image`, `ctx`.
 - Connection: `port`, `endpoint` (including `/v1`).
 - State: `unit`, `sub_state`, `result`, `error`, `fits`, `fit_reason`.
 - Progress: `since_ms`, `expected_load_seconds`, `expected_stop_seconds`,
@@ -259,13 +259,15 @@ other's configuration. The generated files contain no literal key.
 
 ## Tailnet sharing
 
-`share <recipe>` lets the other machines of the user's tailnet use a model, and `share <recipe> --off` stops. The container, its loopback port and its key check are unchanged: `tailscale serve` proxies `https://<host>.<tailnet>.ts.net/local-ai/<recipe>` to the loopback port, reachable only on the tailnet, and the model still refuses a request without the key. Beside the models, a `text:` route at `/local-ai/models.json` lists the shared models with their state, context, reply cap, inputs, memory and measured speeds. It never contains the key. Every status write republishes the listing when it changed, so remote machines see starts and stops as they happen. Changing Serve needs the user to be Tailscale's operator (`sudo tailscale set --operator=$USER`); a refusal is recorded as `share_error` in `status.json` with that fix. Removing a model unshares it.
+`share <recipe>` lets the other machines of the user's tailnet use a model, and `share <recipe> --off` stops. The container, its loopback port and its key check are unchanged: `tailscale serve` proxies `https://<host>.<tailnet>.ts.net/local-ai/<recipe>`, reachable only on the tailnet, to the share proxy at `127.0.0.1:11430/<recipe>`, which forwards each request untouched to the model's loopback port and streams the answer back, and the model still refuses a request without the key. Beside the models, a `text:` route at `/local-ai/models.json` lists the shared models with their state, context, reply cap, inputs, memory and measured speeds. It never contains the key. Every status write republishes the listing when it changed, so remote machines see starts and stops as they happen. Changing Serve needs the user to be Tailscale's operator (`sudo tailscale set --operator=$USER`); a refusal is recorded as `share_error` in `status.json` with that fix. Removing a model unshares it.
+
+The share proxy (`share-proxy`, run as the `omarchy-agent-local-share.service` user unit while anything is shared, and stopped once nothing is) counts who uses each shared model. A request the model accepted counts the machine that sent it, by the tailnet address `tailscale serve` puts in `X-Forwarded-For`, for five minutes after its last one; a refused request counts nothing. `.local/state/omarchy/agent-local/clients.json` is `{models: {<recipe>: <machines>}}`, rewritten only when a count changes, as a machine starts or lapses, and removed when the proxy stops. The agents panel watches it to say how many machines use a shared model.
 
 `pair <host>` runs `omarchy-agent-local share --export` on the host over SSH, which prints its tailnet name and key, and stores them in `.config/omarchy/agent-local/remotes/<host>.{json,key}` (mode 0600). SSH is the only way a key leaves its machine. `forget <host>` deletes both and drops the host's models.
 
 `network` asks the local tailscaled for its online Linux peers, fetches each one's `models.json` in parallel (4s timeout) and writes `network.json`: `{schema, updated_ms, tailnet, self, hosts, models}`. Models are keyed `host/recipe` and carry the local model fields plus `host`, `dns`, `paired`, `endpoint`, `ram_total_gib`, `last_seen_ms` and `offline`. A host that drops off keeps its models, with `offline` set to `offline` (Tailscale says so) or `unreachable` (online but not answering) and `last_seen_ms` from its last answer. Paired hosts are kept until forgotten; unpaired ones for a week. An online host serving no listing shares nothing and its models go. Listings are untrusted input: only known states, recipe IDs and inputs survive, and text loses control characters.
 
-`remote start|stop <host>/<recipe>` runs the host's own `start` or `stop` over SSH for a paired host, marking the transition in `network.json` first. `overlay pi|opencode <host>/<recipe>` writes the same overlays for a paired host's running model, with provider `llamacpp-<host>`, the tailnet endpoint and the stored key file, so `omarchy agent --local-model <host>/<recipe>` launches against it.
+`overlay pi|opencode <host>/<recipe>` writes the same overlays for a paired host's running model, with provider `llamacpp-<host>`, the tailnet endpoint and the stored key file, so `omarchy agent --local-model <host>/<recipe>` launches against it.
 
 The agents panel watches `network.json` and runs `network --write` when it opens and every 20 seconds while it stays open. Each network model gets a line beside the local ones: pair while unpaired, start/stop and launch once paired, and an offline line with the last-seen time while its host is away.
 

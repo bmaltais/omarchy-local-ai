@@ -840,7 +840,6 @@ class Catalog:
     self.root = root
     with open(os.path.join(root, "catalog.toml"), "rb") as handle:
       self.meta = tomllib.load(handle)
-    self.version = self.meta.get("version", "unknown")
     self.runtimes = _load_toml_dir(root, "runtimes")
     self.recipes = _load_toml_dir(root, "recipes")
     with open(os.path.join(root, "best.toml"), "rb") as handle:
@@ -2753,7 +2752,7 @@ def activate(manifest, recipe, runtime, gpu, key, catalog, profile):
 def _lookup_recipe(catalog, target):
   if target not in catalog.recipes:
     known = ", ".join(sorted(catalog.recipes)) or "none"
-    raise LocalError(f"No recipe '{target}' in catalog {catalog.version} (known: {known})")
+    raise LocalError(f"No recipe '{target}' (known: {known})")
   return catalog.recipes[target]
 
 
@@ -2876,7 +2875,6 @@ def detach_use(rid, args, recipe, measured_load=None):
 def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=None):
   recipe = catalog.recipes[rid]
   runtime = catalog.runtimes[recipe["runtime"]]
-  catalog_info = {"version": catalog.version}
   if runtime.get("tier") == "third-party":
     review = load_review(catalog, runtime)
     say(f"Runtime {recipe['runtime']} is third-party: {review.get('publisher', 'unknown publisher')}, license {review.get('license_url', 'unknown')}")
@@ -2902,7 +2900,6 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
     "schema": SCHEMA,
     "recipe_id": rid,
     "runtime_id": recipe["runtime"],
-    "catalog": catalog_info,
     "profile": profile,
     "gpu": gpu["family"],
     "variant": variant,
@@ -2987,7 +2984,7 @@ def cmd_list(argv):
   paired = f" · linked to {profile['pair']['host']}" if profile.get("pair") else ""
   machines = "".join(f" · machine {host}: {', '.join(g['family'] for g in there.get('gpus', [])) or 'no GPU'}, {there.get('ram_class')} GB"
                      for host, there in load_machines().items())
-  say(f"Catalog {catalog.version} · this machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}{paired}{remotes}")
+  say(f"This machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}{paired}{machines}")
   for row in rows:
     marks = [mark for mark, on in (("best", row["best"]), ("running", row["active"]), ("installed", row["installed"])) if on]
     tier = f" · third-party ({row['publisher']})" if row["tier"] == "third-party" else ""
@@ -3055,7 +3052,6 @@ def model_record(rid, manifest, profile):
     "result": props.get("Result", ""),
     "port": port_for(rid),
     "endpoint": endpoint(rid),
-    "catalog_version": manifest.get("catalog", {}).get("version"),
     "observed": observed or None,
     # What the panel's memory bar is a share of: a paired model's machines together.
     "ram_total_gib": nodes_ram_gib(manifest, profile),
@@ -3080,7 +3076,6 @@ def status_record(catalog, profile):
     "share_error": _read(share_error_path()),
     "last": last_model_id(),
     "ram_total_gib": round(gib(meminfo().get("MemTotal", 0)), 1),
-    "catalog_version": catalog.version,
     "best": None,
     # A Spark on the cable: none, available (not set up yet: address, host) or linked (host).
     "link": {"state": "linked", "host": profile["pair"]["host"]} if profile.get("pair") else link_state(),
@@ -3166,7 +3161,6 @@ def cmd_status(argv):
       tail = journal_tail(rid, 5)
       if tail:
         say("  " + tail.replace("\n", "\n  "))
-  say(f"Catalog {record['catalog_version']}")
   if record["best"] and record["best"] not in record["models"]:
     say(f"The recommendation for this machine is {record['best']}: omarchy agent local use best")
   return 0
@@ -3457,7 +3451,6 @@ def install_row(rid, record):
     "result": "",
     "port": None,
     "endpoint": "",
-    "catalog_version": None,
     "observed": None,
     "since_ms": record.get("since_ms"),
     "expected_load_seconds": record.get("expected_load_seconds"),
@@ -3480,7 +3473,7 @@ def publish_installing(rid, record):
     except (OSError, ValueError):
       status = None
     if not isinstance(status, dict) or not isinstance(status.get("models"), dict):
-      status = {"models": {}, "last": None, "ram_total_gib": round(gib(meminfo().get("MemTotal", 0)), 1), "catalog_version": None, "best": None}
+      status = {"models": {}, "last": None, "ram_total_gib": round(gib(meminfo().get("MemTotal", 0)), 1), "best": None}
     # An installed model's own row wins: setting up a recipe again leaves it listed as it is.
     if status["models"].get(rid, {}).get("unit", "installing") != "installing":
       return
@@ -3554,7 +3547,7 @@ def cmd_refresh(argv):
   refresh_list_cache(catalog, profile)
   write_status(catalog, profile)
   if not args.quiet:
-    say(f"Catalog {catalog.version}")
+    say("Refreshed what fits this machine")
   return 0
 
 
@@ -3752,7 +3745,6 @@ def shared_listing(record, catalog, profile, dns):
     "host": dns.split(".")[0],
     "dns": dns,
     "ram_total_gib": record["ram_total_gib"],
-    "catalog_version": record["catalog_version"],
     "models": models,
   }
 
@@ -3768,7 +3760,9 @@ def publish_shares(record, catalog, profile, force=False):
     try:
       dns = self_dns()
       have = serve_handlers(dns)
-      want = {f"{SHARE_ROOT}/{rid}": f"http://127.0.0.1:{port_for(rid)}" for rid in shares if rid in record["models"]}
+      want = {f"{SHARE_ROOT}/{rid}": f"http://127.0.0.1:{SHARE_PROXY_PORT}/{rid}" for rid in shares if rid in record["models"]}
+      if want:
+        ensure_share_proxy()
       for path, target in want.items():
         if (have.get(path) or {}).get("Proxy") != target:
           serve_set(path, target)
@@ -3785,6 +3779,7 @@ def publish_shares(record, catalog, profile, force=False):
           serve_off(LISTING_ROUTE)
         if os.path.exists(published_path()):
           os.unlink(published_path())
+        stop_share_proxy()
       if os.path.exists(share_error_path()):
         os.unlink(share_error_path())
     except LocalError as error:
@@ -3838,6 +3833,236 @@ def cmd_share(argv):
     say(f"{rid} is no longer shared")
   else:
     say(f"Sharing {rid} on your tailnet at https://{self_dns()}{SHARE_ROOT}/{rid}/v1")
+  return 0
+
+
+# ---------------------------------------------------------------- share proxy
+#
+# `tailscale serve` hands a shared model's requests to one loopback proxy at
+# /<recipe> instead of to the model's own port, so this machine can tell who
+# is using it: serve puts the caller's tailnet address in X-Forwarded-For. The
+# proxy forwards every request untouched, key check included, and streams the
+# answer back as it comes. A machine whose request the model accepted counts
+# as using it for ACTIVE_CLIENT_MS after its last one; clients.json holds the
+# count per shared model, rewritten only when a count changes.
+
+SHARE_PROXY_PORT = 11430
+SHARE_PROXY_UNIT = "omarchy-agent-local-share.service"
+ACTIVE_CLIENT_MS = 5 * 60 * 1000
+HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade"}
+
+
+def clients_path():
+  return os.path.join(state_dir(), "clients.json")
+
+
+def share_proxy_unit_path():
+  return os.path.join(home(), ".config", "systemd", "user", SHARE_PROXY_UNIT)
+
+
+def ensure_share_proxy():
+  """The proxy runs while anything is shared: written, reloaded and started on first need."""
+  text = "\n".join([
+    "[Unit]",
+    "Description=Omarchy local AI: count who uses the shared models",
+    "",
+    "[Service]",
+    "ExecStart=/usr/bin/env omarchy-agent-local share-proxy",
+    "Restart=on-failure",
+    "",
+  ])
+  path = share_proxy_unit_path()
+  if _read(path) != text.strip():
+    write_atomic(path, text)
+    systemctl("daemon-reload")
+  result = systemctl("start", SHARE_PROXY_UNIT)
+  if result.returncode != 0:
+    raise LocalError(f"Can't start the share proxy: {result.stderr.strip()}")
+
+
+def stop_share_proxy():
+  if os.path.exists(share_proxy_unit_path()):
+    systemctl("stop", SHARE_PROXY_UNIT)
+
+
+class ClientTracker:
+  """The machines using each shared model, by the time of their last accepted request."""
+
+  def __init__(self, path, window_ms=ACTIVE_CLIENT_MS, clock=lambda: int(time.time() * 1000)):
+    self.path = path
+    self.window_ms = window_ms
+    self.clock = clock
+    self.seen = {}
+    self.written = None
+    self.lock = threading.Condition()
+
+  def _prune(self, now):
+    for rid in list(self.seen):
+      self.seen[rid] = {client: at for client, at in self.seen[rid].items() if now - at < self.window_ms}
+      if not self.seen[rid]:
+        del self.seen[rid]
+
+  def _write(self):
+    counts = {rid: len(clients) for rid, clients in sorted(self.seen.items())}
+    if counts != self.written:
+      write_atomic(self.path, json.dumps({"models": counts}, sort_keys=True) + "\n")
+      self.written = counts
+
+  def saw(self, rid, client):
+    with self.lock:
+      now = self.clock()
+      self.seen.setdefault(rid, {})[client] = now
+      self._prune(now)
+      self._write()
+      self.lock.notify()
+
+  def expire(self):
+    """Drop machines past the window, and say how long until the next one lapses."""
+    with self.lock:
+      now = self.clock()
+      self._prune(now)
+      self._write()
+      times = [at for clients in self.seen.values() for at in clients.values()]
+      return (min(times) + self.window_ms - now) / 1000 if times else None
+
+  def run_expiry(self):
+    # Held across the deadline check and the wait, so a machine saw() adds in
+    # between can't slip past its notify. The condition's lock is reentrant.
+    with self.lock:
+      while True:
+        wait = self.expire()
+        self.lock.wait(timeout=None if wait is None else max(wait, 0.05))
+
+
+def proxy_client(headers, address):
+  forwarded = str(headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+  try:
+    return str(ipaddress.ip_address(forwarded))
+  except ValueError:
+    return address
+
+
+def make_share_proxy(tracker, ports=None, shares=None):
+  import http.client
+  import http.server
+  ports = ports or load_ports
+  shares = shares or shared_recipes
+
+  class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args):
+      pass
+
+    def _body(self):
+      """The request body as the model gets it: passed through in bounded
+      blocks as it arrives, never held whole, so a caller without the key
+      can't fill the proxy's memory before the model refuses it."""
+      if "chunked" in str(self.headers.get("Transfer-Encoding") or "").lower():
+        def chunks():
+          while True:
+            size = int(self.rfile.readline(1024).split(b";")[0].strip() or b"0", 16)
+            if size == 0:
+              while self.rfile.readline(1024).strip():
+                pass
+              return
+            while size > 0:
+              block = self.rfile.read(min(size, 65536))
+              if not block:
+                return
+              size -= len(block)
+              yield block
+            self.rfile.readline(1024)
+        return chunks(), True
+      length = int(self.headers.get("Content-Length") or 0)
+      if length <= 0:
+        return None, False
+      rfile = self.rfile
+
+      class Remaining:
+        def read(self, size=65536):
+          nonlocal length
+          block = rfile.read(min(size, length)) if length > 0 else b""
+          length -= len(block)
+          return block
+
+      return Remaining(), False
+
+    def _refuse(self, status):
+      # The body is left unread, so the connection can't be reused for another request.
+      self.close_connection = True
+      self.send_response(status)
+      self.send_header("Content-Length", "0")
+      self.send_header("Connection", "close")
+      self.end_headers()
+
+    def _forward(self):
+      rid, _, rest = self.path.lstrip("/").partition("/")
+      port = ports().get(rid)
+      if not ID_RE.match(rid) or rid not in shares() or not port:
+        return self._refuse(404)
+      body, chunked = self._body()
+      headers = {name: value for name, value in self.headers.items() if name.lower() not in HOP_HEADERS and name.lower() != "host"}
+      upstream = http.client.HTTPConnection("127.0.0.1", port, timeout=600)
+      try:
+        upstream.request(self.command, "/" + rest, body=body, headers=headers, encode_chunked=chunked)
+        answer = upstream.getresponse()
+      except OSError:
+        upstream.close()
+        return self._refuse(502)
+      # Only a request the model accepted counts: a wrong key or a bad path doesn't.
+      if answer.status < 400:
+        tracker.saw(rid, proxy_client(self.headers, self.client_address[0]))
+      try:
+        self.send_response(answer.status, answer.reason)
+        for name, value in answer.getheaders():
+          if name.lower() not in HOP_HEADERS and name.lower() != "content-length":
+            self.send_header(name, value)
+        length = answer.getheader("Content-Length")
+        if self.command == "HEAD":
+          self.send_header("Content-Length", length or "0")
+          self.end_headers()
+        elif length is not None:
+          self.send_header("Content-Length", length)
+          self.end_headers()
+          while chunk := answer.read1(65536):
+            self.wfile.write(chunk)
+        else:
+          # A streamed reply (server-sent events) goes out chunk by chunk as it arrives.
+          self.send_header("Transfer-Encoding", "chunked")
+          self.end_headers()
+          while chunk := answer.read1(65536):
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+            self.wfile.flush()
+          self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+      finally:
+        upstream.close()
+
+    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_HEAD = _forward
+
+  return Handler
+
+
+def cmd_share_proxy(argv):
+  import http.server
+  argparse.ArgumentParser(prog="omarchy agent local share-proxy").parse_args(argv)
+  tracker = ClientTracker(clients_path())
+  tracker.expire()
+  server = http.server.ThreadingHTTPServer(("127.0.0.1", SHARE_PROXY_PORT), make_share_proxy(tracker))
+  server.daemon_threads = True
+  threading.Thread(target=tracker.run_expiry, daemon=True).start()
+
+  def stop(*_):
+    raise SystemExit(0)
+
+  signal.signal(signal.SIGTERM, stop)
+  try:
+    server.serve_forever()
+  finally:
+    # Nobody counts as using a model once nothing is listening.
+    if os.path.exists(clients_path()):
+      os.unlink(clients_path())
   return 0
 
 
@@ -4033,7 +4258,11 @@ def survey_network(previous, now=None):
     state, listing, error = answers.get(host, ("offline", None, ""))
     if state == "online":
       hosts[host] = {"host": host, "dns": dns, "paired": paired, "state": "online", "error": "", "last_seen_ms": now, "ram_total_gib": listing["ram_total_gib"]}
+      # Only what its host runs, or is loading, is on offer: a model it stops
+      # leaves the list until it starts again.
       for model in listing["models"]:
+        if model["unit"] not in ("active", "activating"):
+          continue
         record = remote_record(host, dns, model, connected(remotes.get(host), model["recipe"]), listing["ram_total_gib"], now)
         models[record["id"]] = record
       continue
@@ -4060,10 +4289,8 @@ def survey_network(previous, now=None):
   }
 
 
-def write_network(transitions=None, forget=None):
-  """Survey the tailnet and rewrite network.json, which the panel watches.
-  `transitions` marks a remote start or stop at once, before the host's
-  listing says so."""
+def write_network(forget=None):
+  """Survey the tailnet and rewrite network.json, which the panel watches."""
   ensure_dir(state_dir())
   with open(os.path.join(state_dir(), "network.lock"), "w") as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
@@ -4072,13 +4299,6 @@ def write_network(transitions=None, forget=None):
       previous["hosts"].pop(forget, None)
       previous["models"] = {mid: m for mid, m in previous["models"].items() if not (isinstance(m, dict) and m.get("host") == forget)}
     network = survey_network(previous)
-    now = int(time.time() * 1000)
-    for mid, unit in (transitions or {}).items():
-      model = network["models"].get(mid)
-      if model and not model["offline"]:
-        model["unit"] = unit
-        model["since_ms"] = now
-        model["error"] = ""
     write_atomic(network_path(), json.dumps(network, indent=2) + "\n")
     return network
 
@@ -4196,26 +4416,6 @@ def cmd_forget(argv):
     unpair(host)
   write_network(forget=host)
   say(f"Forgot {host}")
-  return 0
-
-
-def cmd_remote(argv):
-  parser = argparse.ArgumentParser(prog="omarchy agent local remote", description="Start or stop a model on a paired host")
-  parser.add_argument("action", choices=("start", "stop"))
-  parser.add_argument("model", help="host/recipe")
-  args = parser.parse_args(argv)
-  host, rid = split_remote_id(args.model)
-  remote = load_remotes().get(host)
-  if not remote:
-    raise LocalError(f"{host} isn't paired. Run: omarchy agent local pair {host}")
-  write_network({args.model: "activating" if args.action == "start" else "deactivating"})
-  try:
-    result = subprocess.run(ssh_command(remote, args.action, rid), capture_output=True, text=True)
-  finally:
-    write_network()
-  if result.returncode != 0:
-    raise LocalError((result.stderr.strip().splitlines() or [f"{args.action} failed on {host}"])[-1].removeprefix("Error: "))
-  say(f"{rid} {'started' if args.action == 'start' else 'stopped'} on {host}")
   return 0
 
 
@@ -4584,7 +4784,6 @@ COMMANDS = {
   "network": cmd_network,
   "pair": cmd_pair,
   "forget": cmd_forget,
-  "remote": cmd_remote,
   "logs": cmd_logs,
   # Plumbing for the panel, omarchy agent, omarchy update and catalog
   # maintainers; they run but aren't listed.
@@ -4595,6 +4794,7 @@ COMMANDS = {
   "link": cmd_link,
   "link-worker": cmd_link_worker,
   "machine": cmd_machine,
+  "share-proxy": cmd_share_proxy,
 }
 
 SUMMARIES = {
@@ -4608,7 +4808,6 @@ SUMMARIES = {
   "network": "List the models shared on your tailnet, including hosts that are offline",
   "pair": "Pair with a machine over SSH to use the models it shares",
   "forget": "Unpair a machine and drop its models",
-  "remote": "Start or stop a model on a paired machine: remote start host/recipe",
   "logs": "Show a model's logs, and its other half's on a paired Spark",
   "link": "Show the Spark cabled to this one; 'link setup <peer>' prepares both",
   "machine": "Show the machines models run on over SSH; 'machine add <host>' prepares one",

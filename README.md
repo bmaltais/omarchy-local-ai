@@ -58,7 +58,7 @@ omarchy agent --local-model spark-1234/nemotron-3.5-bolt-tensorfold
 
 ## Catalog layout
 
-- `catalog.toml` — schema and release version (the single version source).
+- `catalog.toml` — the catalog schema.
 - `best.toml` — ordered recommendations per hardware class.
 - `recipes/<id>.toml` — runtime, pinned Hugging Face artifacts, measured context variants, memory peaks and sampling defaults.
 - `runtimes/<id>.toml` — image pinned by digest, input mappings, health probe and allowlisted run options.
@@ -75,7 +75,7 @@ omarchy agent --local-model spark-1234/nemotron-3.5-bolt-tensorfold
 
 ## Releases and packaging
 
-Update `version` in `catalog.toml`, validate and test, then tag the release `vX.Y.Z` matching that version. The `omarchy-pkgs` recipe builds the Arch package from that tag, installing the engine, catalog and docs together. Packaging is maintained in `omarchy-pkgs`; this repository is its source tree.
+Validate and test, then tag the release `vX.Y.Z`; nothing in the repo is bumped. The `omarchy-pkgs` recipe builds the Arch package from that tag, installing the engine, catalog and docs together. Packaging is maintained in `omarchy-pkgs`; this repository is its source tree.
 
 `bench/` and `tools/` do not need to ship in the Arch package. Measurement records still ship: recipe validation and the panel use them.
 
