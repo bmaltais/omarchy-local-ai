@@ -1,3 +1,2 @@
-# The catalog ships with the engine; releases version both together.
+# The recipe catalog: the engine reads it from the directory it ships in.
 schema = 1
-version = "0.6.1"
