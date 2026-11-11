@@ -1002,6 +1002,37 @@ with patch.object(a, "fetch_listing", return_value=("online", clean, "")):
   raises("a remote model that isn't running can't be launched", lambda: a.pi_overlay("box/odd-state"), "isn't running")
 raises("an unpaired host's model can't be launched", lambda: a.pi_overlay("plain/x"), "isn't paired")
 
+# Paired hosts' models join pi's extension, one provider per host with its
+# key, whether or not the host answers right now; unpaired ones don't.
+seen = {"box/big-model": a.remote_record("box", "box.tail.ts.net", clean["models"][0], True, 128, 1),
+        "box/odd-state": {**a.remote_record("box", "box.tail.ts.net", clean["models"][1], True, 128, 1), "offline": "offline"},
+        "plain/x": a.remote_record("plain", "plain.tail.ts.net", {**clean["models"][0], "recipe": "x"}, False, 64, 1)}
+a.write_atomic(a.network_path(), json.dumps({"hosts": {}, "models": seen}))
+Path(a.pi_extension_path()).parent.parent.mkdir(parents=True, exist_ok=True)
+with patch.object(a, "known_models", return_value=[]):
+  a.sync_pi_extension()
+  registered = open(a.pi_extension_path()).read()
+  check("pi's extension lists a paired host's models under its own provider and key, offline ones too",
+        registered.count("pi.registerProvider(") == 1 and '"omarchy-local-box"' in registered and '"big-model"' in registered and '"odd-state"' in registered
+        and "https://box.tail.ts.net/local-ai/big-model/v1" in registered and a.remote_key_path("box") in registered and "b" * 32 not in registered)
+  check("pi's extension leaves out an unpaired host's models", "plain" not in registered)
+  with patch.object(a, "fetch_listing", return_value=("online", clean, "")):
+    source = open(a.pi_overlay("box/big-model")[0]).read()
+  check("a remote pi overlay keeps the rest of its host's models, the launched one first",
+        source.index('"big-model"') < source.index('"odd-state"') and "omarchy-local\"," not in source)
+  # Qwen Code is launched with the endpoint and model, and reads the key itself.
+  with patch.object(a, "fetch_listing", return_value=("online", clean, "")):
+    path, provider, model = a.qwen_overlay("box/big-model")
+  qwen = json.loads(open(path).read())
+  check("a Qwen Code overlay carries the endpoint, model, limits and key file, never the key",
+        (provider, model) == ("omarchy-local-box", "big-model") and qwen["baseUrl"] == "https://box.tail.ts.net/local-ai/big-model/v1"
+        and qwen["model"] == "big-model" and qwen["maxTokens"] == 262144
+        and qwen["keyFile"] == a.remote_key_path("box") and qwen["contextWindow"] == 262144 and "b" * 32 not in open(path).read())
+  with patch.object(a, "survey_network", return_value={"hosts": {}, "models": {}}):
+    a.write_network()
+  check("a network write syncs pi's extension, dropping models it no longer sees", not os.path.exists(a.pi_extension_path()))
+check("the overlay command offers Qwen Code", "qwen" in a.OVERLAYS)
+
 # Sharing: routes follow shares.json, the listing never carries the key.
 handlers = {}
 def fake_tailscale(*args, timeout=10):
