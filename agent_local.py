@@ -3863,9 +3863,11 @@ class ClientTracker:
       return (min(times) + self.window_ms - now) / 1000 if times else None
 
   def run_expiry(self):
-    while True:
-      wait = self.expire()
-      with self.lock:
+    # Held across the deadline check and the wait, so a machine saw() adds in
+    # between can't slip past its notify. The condition's lock is reentrant.
+    with self.lock:
+      while True:
+        wait = self.expire()
         self.lock.wait(timeout=None if wait is None else max(wait, 0.05))
 
 
@@ -3890,34 +3892,57 @@ def make_share_proxy(tracker, ports=None, shares=None):
       pass
 
     def _body(self):
+      """The request body as the model gets it: passed through in bounded
+      blocks as it arrives, never held whole, so a caller without the key
+      can't fill the proxy's memory before the model refuses it."""
       if "chunked" in str(self.headers.get("Transfer-Encoding") or "").lower():
-        chunks = []
-        while True:
-          size = int(self.rfile.readline().split(b";")[0].strip() or b"0", 16)
-          if size == 0:
-            while self.rfile.readline().strip():
-              pass
-            return b"".join(chunks)
-          chunks.append(self.rfile.read(size))
-          self.rfile.readline()
+        def chunks():
+          while True:
+            size = int(self.rfile.readline(1024).split(b";")[0].strip() or b"0", 16)
+            if size == 0:
+              while self.rfile.readline(1024).strip():
+                pass
+              return
+            while size > 0:
+              block = self.rfile.read(min(size, 65536))
+              if not block:
+                return
+              size -= len(block)
+              yield block
+            self.rfile.readline(1024)
+        return chunks(), True
       length = int(self.headers.get("Content-Length") or 0)
-      return self.rfile.read(length) if length > 0 else None
+      if length <= 0:
+        return None, False
+      rfile = self.rfile
+
+      class Remaining:
+        def read(self, size=65536):
+          nonlocal length
+          block = rfile.read(min(size, length)) if length > 0 else b""
+          length -= len(block)
+          return block
+
+      return Remaining(), False
 
     def _refuse(self, status):
+      # The body is left unread, so the connection can't be reused for another request.
+      self.close_connection = True
       self.send_response(status)
       self.send_header("Content-Length", "0")
+      self.send_header("Connection", "close")
       self.end_headers()
 
     def _forward(self):
       rid, _, rest = self.path.lstrip("/").partition("/")
-      body = self._body()
       port = ports().get(rid)
       if not ID_RE.match(rid) or rid not in shares() or not port:
         return self._refuse(404)
+      body, chunked = self._body()
       headers = {name: value for name, value in self.headers.items() if name.lower() not in HOP_HEADERS and name.lower() != "host"}
       upstream = http.client.HTTPConnection("127.0.0.1", port, timeout=600)
       try:
-        upstream.request(self.command, "/" + rest, body=body, headers=headers)
+        upstream.request(self.command, "/" + rest, body=body, headers=headers, encode_chunked=chunked)
         answer = upstream.getresponse()
       except OSError:
         upstream.close()

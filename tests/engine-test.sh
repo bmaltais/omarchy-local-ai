@@ -1009,12 +1009,21 @@ import http.client
 import http.server
 import threading
 
+release = threading.Event()
+
 class FakeModel(http.server.BaseHTTPRequestHandler):
   protocol_version = "HTTP/1.1"
   def log_message(self, *args):
     pass
   def do_POST(self):
-    body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+    if self.headers.get("Transfer-Encoding") == "chunked":
+      body = b""
+      while size := int(self.rfile.readline().strip(), 16):
+        body += self.rfile.read(size)
+        self.rfile.readline()
+      self.rfile.readline()
+    else:
+      body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
     if self.headers.get("Authorization") != "Bearer k":
       self.send_response(401)
       self.send_header("Content-Length", "0")
@@ -1024,7 +1033,11 @@ class FakeModel(http.server.BaseHTTPRequestHandler):
     self.send_header("Content-Type", "text/event-stream")
     self.send_header("Transfer-Encoding", "chunked")
     self.end_headers()
-    for part in (b"data: " + body + b"\n\n", b"data: [DONE]\n\n"):
+    for index, part in enumerate((b"data: " + body + b"\n\n", b"data: [DONE]\n\n")):
+      # The second part waits until the first has reached the client, so a
+      # proxy that held the answer back until it ended would never finish.
+      if index:
+        release.wait(10)
       self.wfile.write(b"%x\r\n%s\r\n" % (len(part), part))
       self.wfile.flush()
     self.wfile.write(b"0\r\n\r\n")
@@ -1051,8 +1064,18 @@ def ask(path, key="k", client="100.64.0.2"):
 def counts():
   return json.loads(open(a.clients_path()).read())["models"]
 
+connection = http.client.HTTPConnection("127.0.0.1", proxy.server_address[1], timeout=10)
+connection.request("POST", "/shared/v1/chat/completions", body=iter([b"hel", b"lo"]), encode_chunked=True, headers={"Authorization": "Bearer k", "X-Forwarded-For": "100.64.0.2"})
+answer = connection.getresponse()
+first = answer.read1(65536)
+release.set()
+rest = answer.read()
+connection.close()
+check("the proxy streams each part of the answer as the model sends it", answer.status == 200 and first == b"data: hello\n\n" and rest == b"data: [DONE]\n\n", f"{answer.status} {first!r} {rest!r}")
+release.clear()
+release.set()
 status, body = ask("/shared/v1/chat/completions")
-check("the proxy streams the model's answer back unchanged", status == 200 and body == b"data: hello\n\ndata: [DONE]\n\n", f"{status} {body!r}")
+check("a request with a length passes its body through", status == 200 and body == b"data: hello\n\ndata: [DONE]\n\n", f"{status} {body!r}")
 check("an accepted request counts its machine", counts() == {"shared": 1})
 ask("/shared/v1/chat/completions")
 check("the same machine counts once", counts() == {"shared": 1})
