@@ -1026,6 +1026,7 @@ with patch.object(a, "known_models", return_value=[]):
   qwen = json.loads(open(path).read())
   check("a Qwen Code overlay carries the endpoint, model, limits and key file, never the key",
         (provider, model) == ("omarchy-local-box", "big-model") and qwen["baseUrl"] == "https://box.tail.ts.net/local-ai/big-model/v1"
+        and qwen["model"] == "big-model" and qwen["maxTokens"] == 262144
         and qwen["keyFile"] == a.remote_key_path("box") and qwen["contextWindow"] == 262144 and "b" * 32 not in open(path).read())
   with patch.object(a, "survey_network", return_value={"hosts": {}, "models": {}}):
     a.write_network()
