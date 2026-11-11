@@ -830,7 +830,6 @@ class Catalog:
     self.root = root
     with open(os.path.join(root, "catalog.toml"), "rb") as handle:
       self.meta = tomllib.load(handle)
-    self.version = _read(os.path.join(root, "VERSION")) or "dev"
     self.runtimes = _load_toml_dir(root, "runtimes")
     self.recipes = _load_toml_dir(root, "recipes")
     with open(os.path.join(root, "best.toml"), "rb") as handle:
@@ -2699,7 +2698,7 @@ def activate(manifest, recipe, runtime, gpu, key, catalog, profile):
 def _lookup_recipe(catalog, target):
   if target not in catalog.recipes:
     known = ", ".join(sorted(catalog.recipes)) or "none"
-    raise LocalError(f"No recipe '{target}' in catalog {catalog.version} (known: {known})")
+    raise LocalError(f"No recipe '{target}' (known: {known})")
   return catalog.recipes[target]
 
 
@@ -2813,7 +2812,6 @@ def detach_use(rid, args, recipe, measured_load=None):
 def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=None):
   recipe = catalog.recipes[rid]
   runtime = catalog.runtimes[recipe["runtime"]]
-  catalog_info = {"version": catalog.version}
   if runtime.get("tier") == "third-party":
     review = load_review(catalog, runtime)
     say(f"Runtime {recipe['runtime']} is third-party: {review.get('publisher', 'unknown publisher')}, license {review.get('license_url', 'unknown')}")
@@ -2839,7 +2837,6 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
     "schema": SCHEMA,
     "recipe_id": rid,
     "runtime_id": recipe["runtime"],
-    "catalog": catalog_info,
     "profile": profile,
     "gpu": gpu["family"],
     "variant": variant,
@@ -2916,7 +2913,7 @@ def cmd_list(argv):
     return 0
   gpu = profile["gpus"][0]["family"] if profile["gpus"] else "no GPU"
   paired = f" · linked to {profile['pair']['host']}" if profile.get("pair") else ""
-  say(f"Catalog {catalog.version} · this machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}{paired}")
+  say(f"This machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}{paired}")
   for row in rows:
     marks = [mark for mark, on in (("best", row["best"]), ("running", row["active"]), ("installed", row["installed"])) if on]
     tier = f" · third-party ({row['publisher']})" if row["tier"] == "third-party" else ""
@@ -2984,7 +2981,6 @@ def model_record(rid, manifest, profile):
     "result": props.get("Result", ""),
     "port": port_for(rid),
     "endpoint": endpoint(rid),
-    "catalog_version": manifest.get("catalog", {}).get("version"),
     "observed": observed or None,
     # What the panel's memory bar is a share of: a paired model's machines together.
     "ram_total_gib": nodes_ram_gib(manifest, profile),
@@ -3009,7 +3005,6 @@ def status_record(catalog, profile):
     "share_error": _read(share_error_path()),
     "last": last_model_id(),
     "ram_total_gib": round(gib(meminfo().get("MemTotal", 0)), 1),
-    "catalog_version": catalog.version,
     "best": None,
     # A Spark on the cable: none, available (not set up yet: address, host) or linked (host).
     "link": {"state": "linked", "host": profile["pair"]["host"]} if profile.get("pair") else link_state(),
@@ -3095,7 +3090,6 @@ def cmd_status(argv):
       tail = journal_tail(rid, 5)
       if tail:
         say("  " + tail.replace("\n", "\n  "))
-  say(f"Catalog {record['catalog_version']}")
   if record["best"] and record["best"] not in record["models"]:
     say(f"The recommendation for this machine is {record['best']}: omarchy agent local use best")
   return 0
@@ -3386,7 +3380,6 @@ def install_row(rid, record):
     "result": "",
     "port": None,
     "endpoint": "",
-    "catalog_version": None,
     "observed": None,
     "since_ms": record.get("since_ms"),
     "expected_load_seconds": record.get("expected_load_seconds"),
@@ -3409,7 +3402,7 @@ def publish_installing(rid, record):
     except (OSError, ValueError):
       status = None
     if not isinstance(status, dict) or not isinstance(status.get("models"), dict):
-      status = {"models": {}, "last": None, "ram_total_gib": round(gib(meminfo().get("MemTotal", 0)), 1), "catalog_version": None, "best": None}
+      status = {"models": {}, "last": None, "ram_total_gib": round(gib(meminfo().get("MemTotal", 0)), 1), "best": None}
     # An installed model's own row wins: setting up a recipe again leaves it listed as it is.
     if status["models"].get(rid, {}).get("unit", "installing") != "installing":
       return
@@ -3483,7 +3476,7 @@ def cmd_refresh(argv):
   refresh_list_cache(catalog, profile)
   write_status(catalog, profile)
   if not args.quiet:
-    say(f"Catalog {catalog.version}")
+    say("Refreshed what fits this machine")
   return 0
 
 
@@ -3681,7 +3674,6 @@ def shared_listing(record, catalog, profile, dns):
     "host": dns.split(".")[0],
     "dns": dns,
     "ram_total_gib": record["ram_total_gib"],
-    "catalog_version": record["catalog_version"],
     "models": models,
   }
 

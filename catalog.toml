@@ -1,3 +1,2 @@
-# The catalog ships with the engine. Its version is the package's, which
-# writes it to VERSION beside them; a checkout has none.
+# The recipe catalog: the engine reads it from the directory it ships in.
 schema = 1

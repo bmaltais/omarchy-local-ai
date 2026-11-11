@@ -21,7 +21,7 @@ The engine reads the catalog beside `agent_local.py`, following the installed en
 
 ## Catalog layout
 
-- `catalog.toml` — the catalog schema. The version comes from the package (`VERSION`, written at build).
+- `catalog.toml` — the catalog schema.
 - `best.toml` — ordered recommendations per hardware class.
 - `recipes/<id>.toml` — runtime, pinned Hugging Face artifacts, measured context variants, memory peaks and sampling defaults.
 - `runtimes/<id>.toml` — image pinned by digest, input mappings, health probe and allowlisted run options.
@@ -38,7 +38,7 @@ The engine reads the catalog beside `agent_local.py`, following the installed en
 
 ## Releases and packaging
 
-Validate and test, then tag the release `vX.Y.Z`; nothing in the repo is bumped. The `omarchy-pkgs` recipe builds the Arch package from that tag, installing the engine, catalog and docs together and writing its `pkgver` to `VERSION` beside them. Packaging is maintained in `omarchy-pkgs`; this repository is its source tree.
+Validate and test, then tag the release `vX.Y.Z`; nothing in the repo is bumped. The `omarchy-pkgs` recipe builds the Arch package from that tag, installing the engine, catalog and docs together. Packaging is maintained in `omarchy-pkgs`; this repository is its source tree.
 
 `bench/` and `tools/` do not need to ship in the Arch package. Measurement records still ship: recipe validation and the panel use them.
 

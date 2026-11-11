@@ -534,7 +534,7 @@ repo.mkdir()
 def write_toml(path, value):
   path.parent.mkdir(parents=True, exist_ok=True)
   path.write_text(bench.toml_dumps(value))
-write_toml(repo / "catalog.toml", {"schema": 1, "version": "0.1.0"})
+write_toml(repo / "catalog.toml", {"schema": 1})
 write_toml(repo / "best.toml", {"class": [entry]})
 write_toml(repo / "runtimes/server.toml", runtime)
 write_toml(repo / "recipes/model.toml", recipe)
@@ -542,13 +542,9 @@ write_toml(repo / "reviews/server.toml", {"image": runtime["image"], "publisher"
 write_toml(repo / "measurements/model.toml", {"ctx": 4096})
 os.environ["OMARCHY_LOCAL_AI_CATALOG"] = str(repo)
 check("catalog root can be overridden", a.load_catalog().root == str(repo))
-check("a catalog without the package's VERSION is a dev one", a.load_catalog().version == "dev")
-(repo / "VERSION").write_text("0.7.0\n")
-check("the catalog's version is the one its package wrote", a.load_catalog().version == "0.7.0")
-(repo / "VERSION").unlink()
 write_toml(repo / "catalog.toml", {"schema": 999})
 raises("invalid installed catalog is rejected", a.load_catalog, "failed validation")
-write_toml(repo / "catalog.toml", {"schema": 1, "version": "0.1.0"})
+write_toml(repo / "catalog.toml", {"schema": 1})
 # The package command follows /usr/bin-style symlinks to find its engine.
 link = root / "bin/omarchy-local-ai"
 link.parent.mkdir()
@@ -602,7 +598,7 @@ check("unit injects key through Podman secrets", f"Secret={a.SECRET},type=env,ta
 manifest = {"schema": 1, "recipe_id": "current", "recipe": recipe, "runtime": runtime,
             "runtime_id": "server", "image": runtime["image"], "variant": variant,
             "files": [], "roles": {"model": "model.gguf"}, "fileset": "a" * 16,
-            "gpu": gpu["family"], "profile": profile, "catalog": {"version": "0.1.0"},
+            "gpu": gpu["family"], "profile": profile,
             "observed": {"load_seconds": 12, "ram_used_gib": 16, "gpu_used_gib": 16}}
 path = a.save_model(manifest, started=False)
 check("a current manifest alone means installed", a.recipe_installed("current"))

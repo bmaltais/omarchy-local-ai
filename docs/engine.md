@@ -44,7 +44,7 @@ The real records are the examples and source of values:
 
 | Path | Rules |
 | --- | --- |
-| [catalog.toml](../catalog.toml) | Schema 1. The version comes from the package, in `VERSION` beside the engine. |
+| [catalog.toml](../catalog.toml) | The catalog schema, 1. |
 | [recipes/](../recipes/) | Name, summary, runtime, pinned artifacts, measured hardware, context variants, sampling and optional server arguments. Vendor names the panel logo; architecture is `dense` or `moe`; `input` is `["text"]` (the default) or `["text", "image"]`, which the agent overlays declare so agents can send screenshots. |
 | [runtimes/](../runtimes/) | Digest-pinned image, tier, port, command, standard input mappings, reserved options and nonempty `health.probe` argv. A paired runtime adds `listen` (its bind flags), `@PORT@` in its probe and a `[pair]` table: `nodes = 2`, `master_port`, the `state` path where each rank's own folder is mounted writable for the server's caches, and `env` for both ranks (any names but the link's `NCCL_SOCKET_IFNAME`, `NCCL_IB_HCA` and `NCCL_IB_GID_INDEX`, which the engine sets), whose values may hold `@RANK@`, `@WORLD@`, `@MASTER_ADDR@`, `@MASTER_PORT@` and `@RDMA_DEVICES@`. Both ranks run the runtime's command with the same arguments. |
 | [reviews/](../reviews/) | Third-party image digest, publisher, reviewer, date, license URL/hash and checked properties. |
@@ -171,8 +171,8 @@ Paths are relative to the user's home. JSON caches are atomically replaced.
 | `.config/containers/systemd/omarchy-agent-local-model-<recipe>.container` | Generated unit; shared `omarchy-agent-local.network` defines the internal network. |
 | `.config/omarchy/agent-local/key`, `overlays/` | Private API key and per-recipe client overlays. |
 
-`status.json` is `{models: {<recipe>: <model>}, last, ram_total_gib,
-catalog_version, best, link}`. `last` and `best` may be null. `link` is what the
+`status.json` is `{models: {<recipe>: <model>}, last, ram_total_gib, best,
+link}`. `last` and `best` may be null. `link` is what the
 ConnectX-7 cable shows: `{state: "none"}`, `{state: "linked", host}`, or, for another
 Spark answering on the cable's IPv6 link-local all-nodes address before `link setup`,
 `{state: "available", address, host}` (`host` from mDNS, may be null). `refresh` and
