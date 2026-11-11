@@ -66,4 +66,4 @@ top_p = 0.95
 top_k = 20
 
 [server]
-args = ["--max-tokens", "32768", "--vision"]
+args = ["--max-tokens", "65536", "--vision", "--vision-max-images", "50"]

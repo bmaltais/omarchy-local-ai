@@ -635,6 +635,21 @@ check("a recipe has to take text", any(".input" in e for e in a.validate_recipe(
 with patch.object(a, "resolve_model", return_value={"recipe_id": "model", "recipe": image_recipe, "variant": {"ctx": 4096}}):
   overlay = json.loads(open(a.opencode_overlay("model")[0]).read())["provider"][a.OVERLAY_PROVIDER]["models"]["model"]
   check("the OpenCode overlay declares image input", overlay["attachment"] and overlay["modalities"]["input"] == ["text", "image"])
+check("agents default to a 16k reply cap", a.max_output_tokens({"recipe": recipe, "variant": {"ctx": 131072}}) == 16384)
+capped = {**copy.deepcopy(recipe), "server": {"args": ["--max-tokens", "32768", "--vision"]}}
+check("agents get the server's reply cap", a.max_output_tokens({"recipe": capped, "variant": {"ctx": 131072}}) == 32768)
+check("a variant's reply cap counts too", a.max_output_tokens({"recipe": recipe, "variant": {"ctx": 131072, "args": ["--max-tokens=65536"]}}) == 65536)
+shipped = tomllib.load(open(os.path.join(os.environ["ENGINE_ROOT"], "recipes", "qwen3.8-27b-tensorfold.toml"), "rb"))
+check("shipped recipes give agents a 64k reply cap", all(a.max_output_tokens({"recipe": shipped, "variant": v}) == 65536 for v in shipped["variant"]))
+# Agents re-send every screenshot they have read, and tensorfold takes only 4 images per request by default.
+recipe_dir = os.path.join(os.environ["ENGINE_ROOT"], "recipes")
+seeing = [tomllib.load(open(os.path.join(recipe_dir, name), "rb"))["server"]["args"] for name in sorted(os.listdir(recipe_dir)) if "tensorfold" in name]
+seeing = [args for args in seeing if "--vision" in args]
+check("tensorfold recipes that take images allow 50 per request", seeing and all("--vision-max-images" in args and args[args.index("--vision-max-images") + 1] == "50" for args in seeing))
+check("the reply cap never exceeds the context", a.max_output_tokens({"recipe": capped, "variant": {"ctx": 8192}}) == 8192)
+with patch.object(a, "resolve_model", return_value={"recipe_id": "model", "recipe": capped, "variant": {"ctx": 131072}}):
+  check("the pi overlay carries the server's reply cap", '"maxTokens": 32768' in open(a.pi_overlay("model")[0]).read())
+  check("the OpenCode overlay carries the server's reply cap", json.loads(open(a.opencode_overlay("model")[0]).read())["provider"][a.OVERLAY_PROVIDER]["models"]["model"]["limit"]["output"] == 32768)
 
 # Setups saved while memory is busy still owe authentication/model-ID checks.
 cat = a.load_catalog()
@@ -834,5 +849,204 @@ installing, published = mirrored({"unit": "activating", "port": 11500, "endpoint
 row = published.call_args.args[1] if published.called else {}
 check("a remote setup that's loading shows as loading here, at this machine's port", row.get("unit") == "activating" and row.get("expected_load_seconds") == 50
       and row.get("endpoint") == a.endpoint(bolt) and row.get("error") == "" and not installing.called)
+
+# ---- tailnet sharing
+
+ts_status = {
+  "BackendState": "Running",
+  "Self": {"DNSName": "me.tail.ts.net.", "OS": "linux", "Online": True},
+  "Peer": {
+    "a": {"DNSName": "box.tail.ts.net.", "OS": "linux", "Online": True},
+    "b": {"DNSName": "away.tail.ts.net.", "OS": "linux", "Online": False},
+    "c": {"DNSName": "phone.tail.ts.net.", "OS": "android", "Online": True},
+    "d": {"DNSName": "plain.tail.ts.net.", "OS": "linux", "Online": True},
+    "e": {"DNSName": "flaky.tail.ts.net.", "OS": "linux", "Online": True},
+  },
+}
+listing = {"schema": 1, "host": "box", "dns": "box.tail.ts.net", "ram_total_gib": 121.9, "models": [
+  {"recipe": "big-model", "name": "Big\x1b[31m Model", "vendor": "qwen", "architecture": "moe", "ctx": 262144, "max_tokens": 10 ** 9, "input": ["text", "image", "audio"], "unit": "active",
+   "observed": {"ram_used_gib": 80, "evil": "x"}, "since_ms": None, "decode_tok_s": 40},
+  {"recipe": "../escape", "name": "bad"},
+  {"recipe": "odd-state", "unit": "rebooting", "architecture": "<b>moe</b>"},
+]}
+clean = a.clean_listing(listing, "box.tail.ts.net")
+check("a peer's listing keeps only recipe ids it can put in a path", [m["recipe"] for m in clean["models"]] == ["big-model", "odd-state"])
+check("a peer's listing loses control characters and unknown inputs", clean["models"][0]["name"] == "Big[31m Model" and clean["models"][0]["input"] == ["text", "image"])
+check("a peer's listing keeps only known states and measurements", clean["models"][1]["unit"] == "inactive" and "evil" not in clean["models"][0]["observed"])
+check("a peer's listing keeps a known architecture and drops any other", clean["models"][0]["architecture"] == "moe" and clean["models"][1]["architecture"] == "")
+check("a peer's reply cap is kept within its context, and a missing one is the default",
+      clean["models"][0]["max_tokens"] == 262144 and clean["models"][1]["max_tokens"] == a.DEFAULT_MAX_OUTPUT_TOKENS)
+raises("a listing of another schema is refused", lambda: a.clean_listing({"schema": 2, "models": []}, "box"), "Not an Omarchy")
+check("a number too big for a float is no number", a._number(10 ** 400) is None)
+class Huge:
+  status = 200
+  def __enter__(self): return self
+  def __exit__(self, *args): return False
+  def read(self, size=-1):
+    return (b'{"schema": 1, "models": [' + b" " * (2 * a.HTTP_MAX_BYTES))[:size if size >= 0 else None]
+with patch.object(a.urllib.request, "urlopen", return_value=Huge()):
+  state, huge, _ = a.fetch_listing("big.tail.ts.net")
+check("a peer's oversized listing is read only up to the cap and left unreachable", state == "unreachable" and huge is None)
+with patch.object(a, "http_status", return_value=(200, b"[" * 100000 + b"]" * 100000)):
+  state, deep, _ = a.fetch_listing("deep.tail.ts.net")
+check("a peer's deeply nested listing leaves only that peer unreachable", state == "unreachable" and deep is None)
+with patch.object(a.urllib.request, "urlopen", side_effect=__import__("http.client").client.BadStatusLine("garbage")):
+  state, bad, _ = a.fetch_listing("bad.tail.ts.net")
+check("a peer's malformed HTTP answer leaves only that peer unreachable", state == "unreachable" and bad is None)
+
+answers = {
+  "box.tail.ts.net": ("online", clean, ""),
+  "plain.tail.ts.net": ("not_sharing", None, ""),
+  "flaky.tail.ts.net": ("unreachable", None, "HTTP 502"),
+}
+previous = {"hosts": {
+  "away": {"host": "away", "dns": "away.tail.ts.net", "last_seen_ms": 1_000_000, "ram_total_gib": 64},
+  "flaky": {"host": "flaky", "dns": "flaky.tail.ts.net", "last_seen_ms": 900_000},
+  "gone": {"host": "gone", "dns": "gone.tail.ts.net", "last_seen_ms": 2_000_000 - a.FORGET_UNPAIRED_MS},
+}, "models": {
+  "away/small-model": {"id": "away/small-model", "host": "away", "recipe": "small-model", "name": "Small", "unit": "active", "since_ms": 5},
+  "flaky/mid-model": {"id": "flaky/mid-model", "host": "flaky", "recipe": "mid-model", "name": "Mid", "unit": "active"},
+  "gone/old-model": {"id": "gone/old-model", "host": "gone", "recipe": "old-model", "unit": "active"},
+}}
+now = 2_000_000
+with patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
+  net = a.survey_network(previous, now=now)
+check("the survey lists a sharing peer's models by host/recipe", net["models"]["box/big-model"]["endpoint"] == "https://box.tail.ts.net/local-ai/big-model/v1" and net["models"]["box/big-model"]["offline"] == "")
+check("the survey skips this machine, phones and peers sharing nothing", set(net["hosts"]) == {"box", "away", "flaky"})
+check("sharing needs HTTPS certificates on the tailnet", net["can_share"] is False)
+with patch.object(a, "tailscale_status", return_value={**ts_status, "CertDomains": ["me.tail.ts.net"]}), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
+  check("a tailnet with MagicDNS and HTTPS can share", a.survey_network(previous, now=now)["can_share"] is True)
+check("a host that went offline keeps its models, marked offline", net["models"]["away/small-model"]["offline"] == "offline" and net["models"]["away/small-model"]["unit"] == "inactive" and net["hosts"]["away"]["state"] == "offline")
+check("an online host that stopped answering is marked unreachable", net["models"]["flaky/mid-model"]["offline"] == "unreachable" and net["hosts"]["flaky"]["error"] == "HTTP 502")
+check("offline hosts keep their last-seen time", net["hosts"]["away"]["last_seen_ms"] == 1_000_000 and net["hosts"]["box"]["last_seen_ms"] == now)
+check("an unpaired host unseen for a week is dropped", "gone/old-model" not in net["models"])
+with patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
+  later = a.survey_network(net, now=now + a.FORGET_UNPAIRED_MS)
+check("an unpaired offline host is forgotten after a week", "away/small-model" not in later["models"] and "box/big-model" in later["models"])
+
+# Pairing records survive; a paired host stays listed however long it's away.
+a.ensure_dir(a.remotes_dir(), 0o700)
+a.write_atomic(a.remote_key_path("away"), "k" * 32, mode=0o600)
+a.write_atomic(os.path.join(a.remotes_dir(), "away.json"), json.dumps({"host": "away", "dns": "away.tail.ts.net", "ssh": "away"}))
+with patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
+  later = a.survey_network(net, now=now + 10 * a.FORGET_UNPAIRED_MS)
+check("a paired offline host keeps its models however long it's away", later["models"]["away/small-model"]["paired"] and later["models"]["away/small-model"]["offline"] == "offline")
+with patch.object(a, "tailscale_status", return_value=None), patch.object(a, "fetch_listing") as fetch:
+  alone = a.survey_network(net, now=now)
+check("without tailscaled, paired hosts show offline and nothing is fetched", not fetch.called and alone["models"]["away/small-model"]["offline"] == "offline" and not alone["tailnet"])
+with patch.object(a, "tailscale_status", return_value=None), patch.object(a, "fetch_listing") as fetch:
+  blind = a.survey_network(previous, now=now)
+check("without tailscaled, an unpaired host seen this week stays, offline", blind["models"].get("flaky/mid-model", {}).get("offline") == "offline" and "gone/old-model" not in blind["models"], repr(sorted(blind["models"])))
+a.write_atomic(a.network_path(), json.dumps(later))
+with patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
+  a.cmd_forget(["away"])
+forgotten = a.load_network()
+check("forgetting a host drops its key and its models at once", not os.path.exists(a.remote_key_path("away")) and "away/small-model" not in forgotten["models"] and "box/big-model" in forgotten["models"])
+
+# Pairing is per model: a host's key connects only the models it names.
+def pair_away(**record):
+  a.write_atomic(a.remote_key_path("away"), "k" * 32, mode=0o600)
+  a.write_atomic(os.path.join(a.remotes_dir(), "away.json"), json.dumps({"host": "away", "dns": "away.tail.ts.net", "ssh": "away", **record}))
+def away_paired():
+  with patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
+    return {mid: m["paired"] for mid, m in a.survey_network(later, now=now)["models"].items() if m["host"] == "away"}
+pair_away()
+check("a host paired whole connects every model it shares", away_paired() == {"away/small-model": True})
+pair_away(models=["other-model"])
+check("a host paired for one model leaves its others unpaired", away_paired() == {"away/small-model": False})
+raises("a model that isn't connected can't be used", lambda: a.resolve_remote("away/small-model"), "isn't paired")
+a.write_atomic(a.network_path(), json.dumps(later))
+with patch.object(a.subprocess, "run", side_effect=AssertionError("no SSH")), patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
+  a.cmd_pair(["away.tail.ts.net", "small-model"])
+check("pairing another model of a paired host needs no SSH", a.load_remotes()["away"]["models"] == ["other-model", "small-model"] and away_paired() == {"away/small-model": True})
+with patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
+  a.cmd_forget(["away/small-model"])
+check("disconnecting a model keeps the host's others and its key", a.load_remotes()["away"]["models"] == ["other-model"] and os.path.exists(a.remote_key_path("away")) and a.load_network()["models"]["away/small-model"]["paired"] is False)
+with patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
+  a.cmd_forget(["away/small-model"])
+check("disconnecting a model that isn't connected leaves the host paired", a.load_remotes()["away"]["models"] == ["other-model"])
+# A host paired whole: disconnecting one model needs no list of the others,
+# so a model it shares later, or an empty survey, can't disconnect more.
+pair_away()
+a.write_atomic(a.network_path(), json.dumps({"hosts": {}, "models": {}}))
+with patch.object(a, "tailscale_status", return_value=None), patch.object(a, "fetch_listing"):
+  a.cmd_forget(["away/small-model"])
+whole = a.load_remotes()["away"]
+check("disconnecting a model of a host paired whole keeps the key and every other model, even with no survey",
+      os.path.exists(a.remote_key_path("away")) and not a.connected(whole, "small-model") and a.connected(whole, "new-model"))
+a.write_atomic(a.network_path(), json.dumps(later))
+with patch.object(a.subprocess, "run", side_effect=AssertionError("no SSH")), patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
+  a.cmd_pair(["away", "small-model"])
+check("pairing it again reconnects it", a.connected(a.load_remotes()["away"], "small-model"))
+pair_away(models=["small-model"])
+with patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
+  a.cmd_forget(["away/small-model"])
+check("disconnecting the only model of a one-at-a-time pairing unpairs the host", "away" not in a.load_remotes() and not os.path.exists(a.remote_key_path("away")))
+
+# The same host reached by another SSH name keeps what it connects.
+pair_away(models=["other-model"])
+export = json.dumps({"host": "away", "dns": "away.tail.ts.net", "key": "n" * 32})
+with patch.object(a.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, export + "\n")), patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
+  a.cmd_pair(["alice@away", "small-model"])
+again = a.load_remotes()["away"]
+check("pairing a host again under another name adds to its models", again["models"] == ["other-model", "small-model"] and again["ssh"] == "alice@away")
+a.write_atomic(a.remote_key_path("away"), "k" * 32, mode=0o600)
+a.write_atomic(os.path.join(a.remotes_dir(), "away.json"), json.dumps({"host": "away", "dns": "away.tail.ts.net", "ssh": "away"}))
+a.write_atomic(a.network_path(), json.dumps(later))
+with patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
+  marked = a.write_network({"box/big-model": "deactivating", "away/small-model": "activating"})
+check("a remote stop shows at once; an offline model can't be marked", marked["models"]["box/big-model"]["unit"] == "deactivating" and marked["models"]["away/small-model"]["unit"] == "inactive")
+raises("a network model is named host/recipe", lambda: a.split_remote_id("box/../x"), "host/recipe")
+raises("an SSH target can't smuggle options", lambda: a.ssh_command({"ssh": "-oProxyCommand=x", "dns": ""}, "start", "m"), "Not an SSH target")
+check("remote commands quote their arguments", a.ssh_command({"ssh": "box", "dns": "box.tail.ts.net"}, "start", "big-model")[-2:] == ["box", "omarchy-agent-local start big-model"])
+
+# A paired, running remote model becomes an overlay with its own provider.
+a.write_atomic(a.remote_key_path("box"), "b" * 32, mode=0o600)
+a.write_atomic(os.path.join(a.remotes_dir(), "box.json"), json.dumps({"host": "box", "dns": "box.tail.ts.net", "ssh": "box"}))
+with patch.object(a, "fetch_listing", return_value=("online", clean, "")):
+  path, provider, model = a.pi_overlay("box/big-model")
+  source = open(path).read()
+  check("a remote pi overlay points at the host's tailnet endpoint and key", provider == "llamacpp-box" and model == "big-model" and "https://box.tail.ts.net/local-ai/big-model/v1" in source and a.remote_key_path("box") in source and "b" * 32 not in source)
+  oc = json.loads(open(a.opencode_overlay("box/big-model")[0]).read())["provider"]["llamacpp-box"]
+  check("a remote OpenCode overlay keeps the model's context and inputs", oc["models"]["big-model"]["limit"]["context"] == 262144 and oc["models"]["big-model"]["attachment"])
+  raises("a remote model that isn't running can't be launched", lambda: a.pi_overlay("box/odd-state"), "isn't running")
+raises("an unpaired host's model can't be launched", lambda: a.pi_overlay("plain/x"), "isn't paired")
+
+# Sharing: routes follow shares.json, the listing never carries the key.
+handlers = {}
+def fake_tailscale(*args, timeout=10):
+  if args[:2] == ("serve", "status"):
+    return SimpleNamespace(returncode=0, stdout=json.dumps({"Web": {"me.tail.ts.net:443": {"Handlers": dict(handlers)}}}), stderr="")
+  path, target = args[-2], args[-1]
+  if target == "off":
+    handlers.pop(path, None)
+  else:
+    handlers[path] = {"Text": target[5:]} if target.startswith("text:") else {"Proxy": target}
+  return SimpleNamespace(returncode=0, stdout="", stderr="")
+share_model = dict(manifest, recipe_id="current")
+a.save_model(share_model, started=False)
+with patch.object(a, "known_models", return_value=["current"]), patch.object(a, "unit_props", return_value={"ActiveState": "active"}), patch.object(a, "free_memory", return_value=(64, 48)), \
+     patch.object(a, "tailscale", side_effect=fake_tailscale), patch.object(a, "tailscale_status", return_value=ts_status):
+  record = a.write_status(cat, profile)
+  check("nothing touches Tailscale Serve until a model is shared", handlers == {} and not record["models"]["current"]["shared"])
+  a.save_shares(["current"])
+  record = a.write_status(cat, profile)
+  served = json.loads(handlers["/local-ai/models.json"]["Text"])
+  check("a shared model is proxied to its loopback port", handlers["/local-ai/current"] == {"Proxy": f"http://127.0.0.1:{a.port_for('current')}"} and record["models"]["current"]["shared"])
+  check("the listing names the model and its state, never the key", served["models"][0]["recipe"] == "current" and served["models"][0]["unit"] == "active" and "key" not in served and "key" not in served["models"][0])
+  handlers["/other"] = {"Proxy": "http://127.0.0.1:9"}
+  a.save_shares([])
+  a.write_status(cat, profile)
+  check("unsharing removes only our routes", handlers == {"/other": {"Proxy": "http://127.0.0.1:9"}} and not os.path.exists(a.published_path()))
+def refuse(*args, timeout=10):
+  if args[:2] == ("serve", "status"):
+    return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+  return SimpleNamespace(returncode=1, stdout="", stderr="sending serve config: 401 Unauthorized: must be root, or be an operator")
+with patch.object(a, "known_models", return_value=["current"]), patch.object(a, "unit_props", return_value={"ActiveState": "active"}), patch.object(a, "free_memory", return_value=(64, 48)), \
+     patch.object(a, "tailscale", side_effect=refuse), patch.object(a, "tailscale_status", return_value=ts_status):
+  a.save_shares(["current"])
+  record = a.write_status(cat, profile)
+  check("a refused share is reported with the fix", record["share_error"] == a.OPERATOR_HINT)
+a.save_shares([])
 
 PY

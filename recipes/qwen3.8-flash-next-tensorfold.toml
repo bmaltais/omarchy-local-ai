@@ -39,4 +39,4 @@ top_k = 20
 # On CUDA the cache gets what the weights and the stream leave, up to the 8 GiB asked for: 5.6 to 7 GiB
 # on a Spark, which keeps conversations up to about 190K tokens; longer ones prefill again.
 [server]
-args = ["--parallel", "1", "--prompt-cache-gib", "8", "--max-tokens", "32768", "--vision"]
+args = ["--parallel", "1", "--prompt-cache-gib", "8", "--max-tokens", "65536", "--vision", "--vision-max-images", "50"]

@@ -263,6 +263,18 @@ endpoint, context and recipe ID, with a file reference or command to read the
 key. Overlays are per recipe so simultaneous launches cannot overwrite each
 other's configuration. The generated files contain no literal key.
 
+## Tailnet sharing
+
+`share <recipe>` lets the other machines of the user's tailnet use a model, and `share <recipe> --off` stops. The container, its loopback port and its key check are unchanged: `tailscale serve` proxies `https://<host>.<tailnet>.ts.net/local-ai/<recipe>` to the loopback port, reachable only on the tailnet, and the model still refuses a request without the key. Beside the models, a `text:` route at `/local-ai/models.json` lists the shared models with their state, context, reply cap, inputs, memory and measured speeds. It never contains the key. Every status write republishes the listing when it changed, so remote machines see starts and stops as they happen. Changing Serve needs the user to be Tailscale's operator (`sudo tailscale set --operator=$USER`); a refusal is recorded as `share_error` in `status.json` with that fix. Removing a model unshares it.
+
+`pair <host>` runs `omarchy-agent-local share --export` on the host over SSH, which prints its tailnet name and key, and stores them in `.config/omarchy/agent-local/remotes/<host>.{json,key}` (mode 0600). SSH is the only way a key leaves its machine. `forget <host>` deletes both and drops the host's models.
+
+`network` asks the local tailscaled for its online Linux peers, fetches each one's `models.json` in parallel (4s timeout) and writes `network.json`: `{schema, updated_ms, tailnet, self, hosts, models}`. Models are keyed `host/recipe` and carry the local model fields plus `host`, `dns`, `paired`, `endpoint`, `ram_total_gib`, `last_seen_ms` and `offline`. A host that drops off keeps its models, with `offline` set to `offline` (Tailscale says so) or `unreachable` (online but not answering) and `last_seen_ms` from its last answer. Paired hosts are kept until forgotten; unpaired ones for a week. An online host serving no listing shares nothing and its models go. Listings are untrusted input: only known states, recipe IDs and inputs survive, and text loses control characters.
+
+`remote start|stop <host>/<recipe>` runs the host's own `start` or `stop` over SSH for a paired host, marking the transition in `network.json` first. `overlay pi|opencode <host>/<recipe>` writes the same overlays for a paired host's running model, with provider `llamacpp-<host>`, the tailnet endpoint and the stored key file, so `omarchy agent --local-model <host>/<recipe>` launches against it.
+
+The agents panel watches `network.json` and runs `network --write` when it opens and every 20 seconds while it stays open. Each network model gets a line beside the local ones: pair while unpaired, start/stop and launch once paired, and an offline line with the last-seen time while its host is away.
+
 Maintainers run [tools/bench](../tools/bench) from a checkout against a running
 model. It imports the checkout engine and uses [bench/context.txt](../bench/context.txt)
 for the long prompt. Measurements remain catalog evidence; the benchmark tool
