@@ -4012,6 +4012,8 @@ def cmd_pair(argv):
     raise LocalError("Not a host name")
   say(f"Pairing with {target} over SSH")
   result = subprocess.run(ssh_command({"ssh": target, "dns": ""}, "share", "--export", interactive=True), stdout=subprocess.PIPE, text=True)
+  if result.returncode == 255:
+    raise LocalError(f"Can't connect to {target} over SSH. Turn on SSHD there in Setup > Security")
   if result.returncode != 0:
     raise LocalError(f"Can't reach omarchy-agent-local on {target} over SSH")
   try:
