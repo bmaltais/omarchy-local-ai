@@ -3046,13 +3046,14 @@ def write_status(catalog, profile, transitions=None, pending=None, publish=True)
       if error != record["share_error"]:
         record["share_error"] = error
         write_atomic(os.path.join(state_dir(), "status.json"), json.dumps(record, indent=2) + "\n")
-  # Every setup, removal, start and refresh passes through here, so pi's
-  # extension follows them; a failure to write it never fails theirs.
-  try:
-    sync_pi_extension()
-  except OSError:
-    pass
-  return record
+    # Every setup, removal, start and refresh passes through here, so pi's
+    # extension follows them, under the same lock so an older writer can't put
+    # back a model a newer one removed. A failure to write it never fails theirs.
+    try:
+      sync_pi_extension()
+    except OSError:
+      pass
+    return record
 
 
 def cmd_status(argv):

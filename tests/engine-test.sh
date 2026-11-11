@@ -653,8 +653,18 @@ with patch.object(a, "known_models", return_value=["alpha", "beta"]), patch.obje
 with patch.object(a, "known_models", return_value=[]):
   a.sync_pi_extension()
   check("pi's extension goes with the last model", not pi_ext.exists())
-with patch.object(a, "status_record", return_value={"models": {}, "share_error": ""}), patch.object(a, "publish_shares"), patch.object(a, "sync_pi_extension", side_effect=OSError("read-only")) as sync:
-  check("a status write syncs pi's extension and survives it failing", "models" in a.write_status(a.load_catalog(), profile) and sync.called)
+import fcntl
+def sync_while_locked():
+  # Another writer can't take the status lock while pi's extension is written.
+  with open(os.path.join(a.state_dir(), "status.lock"), "w") as probe:
+    try:
+      fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+      raise AssertionError("pi's extension was written outside the status lock")
+    except BlockingIOError:
+      pass
+  raise OSError("read-only")
+with patch.object(a, "status_record", return_value={"models": {}, "share_error": ""}), patch.object(a, "publish_shares"), patch.object(a, "sync_pi_extension", side_effect=sync_while_locked) as sync:
+  check("a status write syncs pi's extension under its lock and survives it failing", "models" in a.write_status(a.load_catalog(), profile) and sync.called)
 check("agents default to a 16k reply cap", a.max_output_tokens({"recipe": recipe, "variant": {"ctx": 131072}}) == 16384)
 capped = {**copy.deepcopy(recipe), "server": {"args": ["--max-tokens", "32768", "--vision"]}}
 check("agents get the server's reply cap", a.max_output_tokens({"recipe": capped, "variant": {"ctx": 131072}}) == 32768)
