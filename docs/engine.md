@@ -158,30 +158,24 @@ container, files and, when no other paired recipe uses it, its image; while the 
 can't be reached it fails before deleting anything, so it can run again, unless
 given `--local-only` for a peer that's gone for good.
 
-## Remote machines
+## Machines
 
-`remote add <host>` prepares a machine reached over SSH to run models for this one: the
-SSH key and host setup of `link setup` (`HOST_SETUP`, as root through sudo there), a copy of
+`machine add <host>` prepares a machine reached over SSH to run models for this one: the
+SSH key and host setup of `link setup` (`HOST_SETUP`, as root through sudo there), a symlink
+`/usr/local/bin/omarchy-agent-local` (the commands `pair` and `remote` run there over SSH), and a copy of
 this engine and catalog in `~/.local/share/omarchy-local-ai` (rsync, `.git` left out, sent again
-before each `use` there) and this
-machine's API key, written to the remote's key file and Podman secret. It records the host and
-its machine profile in `remotes.json`.
+before each `use` there). It records the host and its machine profile in `machines.json`, then
+pairs with it, or says to install Tailscale there when it isn't.
 
-`recipe_listing` marks what this machine can't run but a remote can as available, with that
-remote's variant, measurements and `remote` host. `use` places a recipe on the remote named by
-`--on`, else on the remote it was set up on, else, when this machine can't run it, on the first
-remote that can. The remote's engine sets it up, admits it and starts it as on any machine,
-through `use --as-remote` over SSH, whose progress the panel's row mirrors. A setup there that
-can't start yet records the remote's reason here. Here its manifest is the remote's, plus `remote: {host, port}`, and its
-unit (`~/.config/systemd/user/omarchy-agent-local-model-<recipe>.service`, not Quadlet) runs
-`start <recipe>` there as `ExecStartPre`, then forwards the model's port here to the remote's
-loopback port with `ssh -N -L`, ready once the port accepts connections. Its `ExecStopPost`
-runs `stop <recipe>` there only when the unit stopped cleanly. ssh reconnects in a loop inside
-the unit when the connection drops, leaving the model running there; the unit has no `Restart=`,
-so a start the remote refuses (its memory taken) fails once, with the remote's reason. The API stays on
-loopback on both machines and only SSH crosses the network. Start admission, memory figures and
-fit are the remote's; `logs` adds the remote's logs; `remove` removes the model there first and,
-while the remote can't be reached, fails before deleting anything here unless `--local-only`.
+`recipe_listing` marks what this machine can't run but a machine can as available, with that
+machine's variant, measurements and `machine` host. `use` places a recipe on the machine named by
+`--on`, else, when this machine can't run it and hasn't set it up, on the first machine that can.
+The machine's engine sets it up, admits it and starts it as on any machine, through
+`use --as-remote` over SSH, whose download progress the panel's setup row mirrors. Then
+`share <recipe>` runs there and this machine pairs with that one model (`pair <host> <recipe>`),
+so it appears in `network.json` as `<host>/<recipe>`, started, stopped and launched against as any
+paired machine's model. Memory, fit and logs are the machine's own. If sharing fails (no Tailscale
+there), the setup row fails with the commands that finish it.
 
 ## State and panel API
 
@@ -196,7 +190,7 @@ Paths are relative to the user's home. JSON caches are atomically replaced.
 | `.local/state/omarchy/agent-local/loads/`, `stops/`, `removal_rate` | Measured progress timings. |
 | `.local/state/omarchy/agent-local/errors/`, `removing/` | Per-model error and removal prediction. |
 | `.local/state/omarchy/agent-local/installing/<recipe>.json` | A first setup in progress or failed: name, vendor, phase, bytes, speed, start, error and the `use` process id. |
-| `.local/state/omarchy/agent-local/remotes.json` | Remotes by SSH name, with the machine profile each reported. |
+| `.local/state/omarchy/agent-local/machines.json` | Machines by SSH name, with the machine profile each reported. |
 | `.local/state/omarchy/agent-local/pair.json`, `pair/<recipe>.env` | The detected peer (address, host name, home, RAM); a paired unit's link environment, written at each start. |
 | `.local/state/omarchy/agent-local/lock`, `status.lock` | Lifecycle admission and status snapshot locks. |
 | `.local/share/omarchy/agent-local/blobs/`, `models/` | Shared blob store and immutable file sets. |

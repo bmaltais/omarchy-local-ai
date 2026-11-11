@@ -983,7 +983,7 @@ def _resolve_class(catalog, profile, gpu, ctx=None):
   raise LocalError(f"No recommended recipe fits this machine: {details}")
 
 
-def recipe_listing(catalog, profile, running=(), remotes=True):
+def recipe_listing(catalog, profile, running=(), machines=True):
   rows = []
   try:
     gpu = choose_gpu(profile)
@@ -1027,11 +1027,11 @@ def recipe_listing(catalog, profile, running=(), remotes=True):
       "prefill_tok_s": measured.get("long", {}).get("prefill_tok_s"),
     })
   # What this machine can't run but a remote can is offered there, measured on the remote.
-  for host, there in (load_remotes() if remotes else {}).items():
-    for row, far in zip(rows, recipe_listing(catalog, there, running, remotes=False)):
+  for host, there in (load_machines() if machines else {}).items():
+    for row, far in zip(rows, recipe_listing(catalog, there, running, machines=False)):
       if not row["available"] and far["available"]:
-        row.update(far, summary=f"{far['summary']} Runs on {host}.", remote=host, best=far["best"] and best_id is None)
-      elif not row["available"] and not row.get("remote"):
+        row.update(far, summary=f"{far['summary']} Runs on {host}.", machine=host, best=far["best"] and best_id is None)
+      elif not row["available"] and not row.get("machine"):
         row["reason"] += f"; on {host}: {far['reason']}"
   return rows
 
@@ -1704,7 +1704,7 @@ def journal_tail(rid, lines=15, since_ms=None):
   return result.stdout.strip()
 
 
-def read_key():
+def ensure_key():
   path = key_path()
   if not os.path.isfile(path):
     ensure_dir(config_dir(), 0o700)
@@ -1712,11 +1712,7 @@ def read_key():
     write_atomic(path, secrets.token_urlsafe(32), mode=0o600)
   os.chmod(path, 0o600)
   with open(path) as handle:
-    return handle.read().strip()
-
-
-def ensure_key():
-  key = read_key()
+    key = handle.read().strip()
   # The secret is the bare key: a trailing newline from the file would reach the
   # server through --api-key or its key variable and never match a Bearer header.
   # Podman 4 (DGX OS) refuses --replace for a secret that doesn't exist yet.
@@ -2016,8 +2012,6 @@ def ram_used_gib(manifest, before, after, peer_before, peer_after):
 
 def nodes_ram_gib(manifest, profile):
   """Total memory of the machines a model runs on, which its memory use is shown against."""
-  if manifest.get("remote"):
-    return round(manifest["profile"]["ram_gib"], 1)
   total = profile.get("ram_gib") or gib(meminfo().get("MemTotal", 0))
   if manifest.get("pair"):
     # The peer the model was set up with, which is the one it starts on: a link made to another
@@ -2771,14 +2765,14 @@ def cmd_use(argv):
   parser.add_argument("--seed", help="reuse matching files from this directory before downloading")
   parser.add_argument("--unqualified", action="store_true", help="run a recipe not measured on this machine class")
   parser.add_argument("--detach", action="store_true", help="set it up in the background; the agents panel shows its progress")
-  parser.add_argument("--on", metavar="HOST", help="run it on this remote (default: a remote only for what this machine can't run)")
+  parser.add_argument("--on", metavar="HOST", help="run it on this machine (default: a machine only for what this one can't run)")
   parser.add_argument("--as-remote", action="store_true", help=argparse.SUPPRESS)
   args = parser.parse_args(argv)
   catalog = load_catalog()
   profile = machine_profile()
-  host = remote_placement(catalog, args.target, profile, args.on)
+  host = machine_placement(catalog, args.target, profile, args.on)
   if host:
-    return remote_use(host, args, catalog)
+    return machine_use(host, args, catalog)
   gpu = choose_gpu(profile, args.gpu) if args.gpu else None
   if args.target == "best":
     rid, variant, skipped = resolve_best(catalog, profile, gpu, args.ctx)
@@ -2991,8 +2985,8 @@ def cmd_list(argv):
     return 0
   gpu = profile["gpus"][0]["family"] if profile["gpus"] else "no GPU"
   paired = f" · linked to {profile['pair']['host']}" if profile.get("pair") else ""
-  remotes = "".join(f" · remote {host}: {', '.join(g['family'] for g in there.get('gpus', [])) or 'no GPU'}, {there.get('ram_class')} GB"
-                    for host, there in load_remotes().items())
+  machines = "".join(f" · machine {host}: {', '.join(g['family'] for g in there.get('gpus', [])) or 'no GPU'}, {there.get('ram_class')} GB"
+                     for host, there in load_machines().items())
   say(f"Catalog {catalog.version} · this machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}{paired}{remotes}")
   for row in rows:
     marks = [mark for mark, on in (("best", row["best"]), ("running", row["active"]), ("installed", row["installed"])) if on]
@@ -3012,9 +3006,6 @@ def _unix_ms(value):
 def start_fit(manifest, profile):
   """Whether a stopped model fits in the memory free right now: (fits, reason).
   Rewritten with every start and stop, the moments free memory changes."""
-  if manifest.get("remote"):
-    # Admitted by the remote's own start, against its free memory.
-    return True, ""
   variant = manifest["variant"]
   try:
     gpu = choose_gpu(profile, manifest.get("gpu"))
@@ -3225,8 +3216,6 @@ def _start(args, catalog, profile):
   if unit_active(rid):
     say(f"{rid} is already running at {endpoint(rid)}")
     return 0
-  if manifest.get("remote"):
-    return remote_start(manifest, catalog, profile)
   gpu = choose_gpu(profile, manifest["gpu"])
   # Shown as loading from the click on; the memory checks below take seconds.
   clear_error(rid)
@@ -3329,7 +3318,6 @@ def cmd_remove(argv):
       deleting = time.time()
       if manifest:
         pair_remove(manifest, args.local_only)
-        remote_remove(manifest, args.local_only)
       result = _remove_files(rid)
       if size_gib > 1:
         write_atomic(os.path.join(state_dir(), "removal_rate"), f"{(time.time() - deleting) / size_gib:.4f}\n")
@@ -3348,9 +3336,6 @@ def cmd_remove(argv):
   refresh_list_cache(catalog, profile)
   write_status(catalog, profile)
   freed, images = result
-  if (manifest or {}).get("remote"):
-    say(f"Removed {rid} in {time.time() - started:.0f}s")
-    return 0
   say(f"Removed {rid} in {time.time() - started:.0f}s: {gib(freed):.1f} GiB of weights no other recipe uses" + (f", {len(images)} image(s)" if images else ""))
   return 0
 
@@ -3522,7 +3507,7 @@ def _remove_files(rid, setup_image=None):
   if ports.pop(rid, None) is not None:
     write_atomic(ports_path(), json.dumps(ports, indent=2, sort_keys=True) + "\n")
   manifest = load_model(rid)
-  removed_images = {manifest["image"]} if manifest and not manifest.get("remote") else set()
+  removed_images = {manifest["image"]} if manifest else set()
   if isinstance(setup_image, str) and IMAGE_RE.match(setup_image):
     removed_images.add(setup_image)
   shutil.rmtree(os.path.join(data_dir(), "models", rid), ignore_errors=True)
@@ -4411,42 +4396,41 @@ def cmd_logs(argv):
     say(f"== {rid}: rank 1 on {setup['host']}")
     result = pair_ssh(setup["peer"], f"podman logs --tail {int(args.lines)} {shlex.quote(worker_name(rid))} 2>&1", check=False, timeout=30)
     say((result.stdout or result.stderr).strip() or "(no log there)")
-  remote = (load_model(rid) or {}).get("remote")
-  if remote:
-    say(f"== {rid}: on {remote['host']}")
-    result = remote_engine(remote["host"], "logs", rid, "-n", str(int(args.lines)), check=False, timeout=30)
-    say((result.stdout or result.stderr).strip() or "(no log there)")
   return 0
 
 
-# ---------------------------------------------------------------- remote machines
+# ---------------------------------------------------------------- machines
 #
-# A machine reached over SSH (a DGX Spark on DGX OS, say) runs the models this one can't.
-# `remote add` prepares it as `link setup` prepares a peer and copies this engine there, which
-# then sets up, admits and runs each model as on any machine, on its own loopback. Here the
-# model is a unit of the usual name that starts it there, tunnels this machine's port for it
-# to the remote's, and stops it there when stopped: the panel, overlays and agents see a model
-# running here, with this machine's key, which `remote add` gave the remote.
+# A machine reached over SSH (a DGX Spark on DGX OS, say) can run the models this one can't.
+# `machine add` prepares it and copies this engine there. `use` then has that engine set a model
+# up, shares it on the tailnet and pairs it here: from then on it is one of the network's models,
+# which `remote start|stop`, the agents panel and `--local-model <host>/<recipe>` already handle.
 
-REMOTE_ENGINE = "~/.local/share/omarchy-local-ai/omarchy-local-ai"
+MACHINE_ENGINE = "~/.local/share/omarchy-local-ai/omarchy-local-ai"
+
+# What a machine needs beyond a linked peer's setup: the engine on the PATH of the commands
+# `pair` and `remote` run there over SSH (they call omarchy-agent-local).
+MACHINE_SETUP_TAIL = r'''
+ln -sf "$2" /usr/local/bin/omarchy-agent-local
+'''
 
 
-def remotes_path():
-  return os.path.join(state_dir(), "remotes.json")
+def machines_path():
+  return os.path.join(state_dir(), "machines.json")
 
 
-def load_remotes():
-  """Each remote set up, by its SSH name, with the machine profile it reported to `remote add`."""
+def load_machines():
+  """Each machine set up, by its SSH name, with the machine profile it reported to `machine add`."""
   try:
-    with open(remotes_path()) as handle:
-      remotes = json.load(handle)
+    with open(machines_path()) as handle:
+      machines = json.load(handle)
   except (OSError, ValueError):
     return {}
-  return remotes if isinstance(remotes, dict) else {}
+  return machines if isinstance(machines, dict) else {}
 
 
-def remote_engine(host, *argv, **kwargs):
-  return pair_ssh(host, f"{REMOTE_ENGINE} {shlex.join(argv)}", **kwargs)
+def machine_engine(host, *argv, **kwargs):
+  return pair_ssh(host, f"{MACHINE_ENGINE} {shlex.join(argv)}", **kwargs)
 
 
 def runs_on(catalog, target, profile):
@@ -4460,25 +4444,22 @@ def runs_on(catalog, target, profile):
     return False
 
 
-def remote_placement(catalog, target, profile, on=None):
-  """Where a `use` runs: the remote named, else the one a model was set up on, else the first
-  remote that runs what this machine can't. None is here."""
-  remotes = load_remotes()
+def machine_placement(catalog, target, profile, on=None):
+  """Where a `use` runs: the machine named, else the first one that runs what this machine can't.
+  None is here."""
+  machines = load_machines()
   if on:
-    if on not in remotes:
-      raise LocalError(f"{on} isn't set up as a remote: omarchy agent local remote add {on}")
+    if on not in machines:
+      raise LocalError(f"{on} isn't set up as a machine: omarchy agent local machine add {on}")
     return on
-  installed = load_model(target) if ID_RE.match(target) else None
-  if installed:
-    return (installed.get("remote") or {}).get("host")
-  if not remotes or runs_on(catalog, target, profile):
+  if not machines or (ID_RE.match(target) and load_model(target)) or runs_on(catalog, target, profile):
     return None
-  return next((host for host, there in remotes.items() if runs_on(catalog, target, there)), None)
+  return next((host for host, there in machines.items() if runs_on(catalog, target, there)), None)
 
 
 def sync_engine(host):
-  """The remote runs this engine and catalog, copied again before each setup there (rsync sends
-  only what changed), so both machines agree on recipes and on how the remote is driven."""
+  """The machine runs this engine and catalog, copied again before each setup there (rsync sends
+  only what changed), so both agree on recipes and on how the machine is driven."""
   engine = os.path.dirname(os.path.realpath(__file__))
   pair_ssh(host, "mkdir -p ~/.local/share/omarchy-local-ai")
   copy = subprocess.run(["rsync", "-a", "--delete", "--exclude=.git", "--exclude=__pycache__", "-e", shlex.join(pair_ssh_argv()),
@@ -4487,17 +4468,9 @@ def sync_engine(host):
     raise LocalError(f"Copying the engine to {host} failed: {copy.stderr.strip()[-400:]}", short=f"Can't reach {host}")
 
 
-def remote_error(host, rid):
-  """Why the remote last failed to start a model, as it recorded it, or empty."""
-  try:
-    return pair_ssh(host, f"cat ~/.local/state/omarchy/agent-local/errors/{shlex.quote(rid)}", check=False, timeout=10).stdout.strip()
-  except LocalError:
-    return ""
-
-
 def mirror_installing(host, rid, done):
-  """Copies the remote's row for a model being set up into this machine's status, for the panel:
-  its download progress while it downloads, then loading, with the remote's expected load time."""
+  """Copies the machine's download progress for a model being set up into this machine's status,
+  for the panel's setup row."""
   while not done.wait(2):
     try:
       there = json.loads(pair_ssh(host, "cat ~/.local/state/omarchy/agent-local/status.json", check=False, timeout=10).stdout)["models"][rid]
@@ -4505,62 +4478,15 @@ def mirror_installing(host, rid, done):
       continue
     if there.get("unit") == "installing" and there.get("install", {}).get("phase") in ("waiting", "downloading"):
       update_installing(rid, **{key: there["install"][key] for key in ("phase", "done_bytes", "total_bytes", "rate_bytes_s") if key in there["install"]})
-    elif there.get("unit") == "activating":
-      publish_row(rid, {**there, "port": port_for(rid), "endpoint": endpoint(rid), "error": ""})
 
 
-def publish_row(rid, row):
-  """Replaces this model's row in status.json, until the next full status write."""
-  ensure_dir(state_dir())
-  path = os.path.join(state_dir(), "status.json")
-  with open(os.path.join(state_dir(), "status.lock"), "w") as lock:
-    fcntl.flock(lock, fcntl.LOCK_EX)
-    try:
-      with open(path) as handle:
-        status = json.load(handle)
-    except (OSError, ValueError):
-      return
-    if isinstance(status, dict) and isinstance(status.get("models"), dict):
-      status["models"][rid] = row
-      write_atomic(path, json.dumps(status, indent=2) + "\n")
-
-
-def remote_unit_path(rid):
-  return os.path.join(home(), ".config", "systemd", "user", unit_name(rid))
-
-
-def render_remote_unit(rid, host, port):
-  ssh = pair_ssh_argv()
-  there = lambda *argv: f"{REMOTE_ENGINE} {shlex.join(argv)}"
-  # ssh reconnects in a loop when the network drops, without stopping the model there. No
-  # Restart=: that would also retry a start the remote refused (its memory taken), forever.
-  # A stop kills the loop, which systemd counts as success; only then is the model stopped there.
-  tunnel = f"while :; do {shlex.join(ssh + ['-N', '-o', 'ExitOnForwardFailure=yes', '-L', f'127.0.0.1:{port_for(rid)}:127.0.0.1:{port}', host])}; sleep 5; done"
-  ready = f"for i in {{1..100}}; do (exec 3<>/dev/tcp/127.0.0.1/{port_for(rid)}) 2>/dev/null && exit 0; sleep 0.1; done; exit 1"
-  stop = f'[ "$SERVICE_RESULT" = success ] && exec {shlex.join(ssh + [host, there("stop", rid)])}; exit 0'
-  return "\n".join([
-    f"# Generated by omarchy-agent-local use; changes are overwritten.",
-    "[Unit]",
-    f"Description=Omarchy local model {rid} on {host}",
-    "",
-    "[Service]",
-    "TimeoutStartSec=20m",
-    "ExecStartPre=/usr/bin/env " + " ".join(_quote(arg) for arg in ssh + [host, there("start", rid)]),
-    f"ExecStart=/bin/bash -c {_quote(tunnel)}",
-    f"ExecStartPost=/bin/bash -c {_quote(ready)}",
-    f"ExecStartPost=-{hook_command()} status --write --started {rid}",
-    f"ExecStopPost=-/bin/bash -c {_quote(stop)}",
-    f"ExecStopPost=-{hook_command()} status --write --stopped {rid}",
-  ]) + "\n"
-
-
-def remote_use(host, args, catalog):
-  """`use` on a remote: its engine sets the model up and starts it, then the tunnel starts here."""
-  there = load_remotes()[host]
-  rid = resolve_best(catalog, there, None, args.ctx)[0] if args.target == "best" else args.target
+def machine_use(host, args, catalog):
+  """`use` on a machine: its engine sets the model up and starts it, then shares it, and this one pairs with it."""
+  rid = resolve_best(catalog, load_machines()[host], None, args.ctx)[0] if args.target == "best" else args.target
   recipe = _lookup_recipe(catalog, rid)
   if args.detach:
     return detach_use(rid, argparse.Namespace(**{**vars(args), "on": host}), recipe)
+  # The panel's setup row for it exists here only while nothing else is set up under this name.
   fresh = load_model(rid) is None
   if fresh:
     if installing_idle(rid):
@@ -4569,10 +4495,6 @@ def remote_use(host, args, catalog):
   try:
     with Lock():
       say(f"Setting up {rid} on {host}")
-      if not fresh:
-        # Set up again: loading from now on, as a local setup shows its restart.
-        clear_error(rid)
-        write_status(catalog, machine_profile(), {rid: "activating"})
       sync_engine(host)
       flags = (["--ctx", str(args.ctx)] if args.ctx else []) + (["--unqualified"] if args.unqualified else [])
       done = threading.Event()
@@ -4580,132 +4502,74 @@ def remote_use(host, args, catalog):
       if fresh:
         mirror.start()
       try:
-        setup = subprocess.run(pair_ssh_argv(tty=sys.stdin.isatty()) + [host, f"{REMOTE_ENGINE} {shlex.join(['use', rid, *flags, '--as-remote'])}"])
+        setup = subprocess.run(pair_ssh_argv(tty=sys.stdin.isatty()) + [host, f"{MACHINE_ENGINE} {shlex.join(['use', rid, *flags, '--as-remote'])}"])
       finally:
         done.set()
         if fresh:
           mirror.join()
       if setup.returncode != 0:
         raise LocalError(f"Setting up {rid} on {host} failed (see above)", short=f"Setup failed on {host}")
-      manifest = json.loads(pair_ssh(host, f"cat ~/.local/state/omarchy/agent-local/models/{shlex.quote(rid)}.json").stdout)
-      model = json.loads(remote_engine(host, "status", "--json").stdout)["models"][rid]
-      manifest["remote"] = {"host": host, "port": model["port"]}
-      running = model["unit"] == "active"
-      ensure_dir(os.path.dirname(remote_unit_path(rid)))
-      write_atomic(remote_unit_path(rid), render_remote_unit(rid, host, model["port"]))
-      systemctl("daemon-reload", check=True)
-      save_model(manifest, started=running)
-      clear_installing(rid)
-      if not running:
-        record_error(rid, f"On {host}: {remote_error(host, rid) or model.get('fit_reason') or 'not started'}")
-      profile = machine_profile()
-      if running:
-        systemctl("reset-failed", unit_name(rid))
-        result = systemctl("start", unit_name(rid))
-        if result.returncode != 0:
-          record_error(rid, f"Tunnel to {host} failed")
-          raise LocalError(f"The tunnel to {host} didn't start: {result.stderr.strip()}\n{journal_tail(rid)}", short=f"Tunnel to {host} failed")
-      refresh_list_cache(catalog, profile)
-      write_status(catalog, profile)
+      shared = machine_engine(host, "share", rid, check=False, timeout=60)
+      if shared.returncode != 0:
+        raise LocalError(f"{rid} is set up on {host} but not shared: {(shared.stderr.strip().splitlines() or ['share failed'])[-1]}\n"
+                         f"It reaches this machine over the tailnet: once Tailscale runs there, run: ssh {host} omarchy-agent-local share {rid}, then: omarchy agent local pair {host} {rid}",
+                         short=f"Not shared by {host}")
+      if fresh:
+        clear_installing(rid)
+      cmd_pair([host, rid])
   except Exception as error:
     if fresh and load_model(rid) is None and owns_installing(rid):
       fail_installing(rid, getattr(error, "short", None) or (str(error).splitlines() or ["Setup failed"])[0])
-    elif not fresh:
-      record_error(rid, getattr(error, "short", None) or (str(error).splitlines() or ["Setup failed"])[0])
-      write_status(catalog, machine_profile())
     raise
-  say("")
-  if running:
-    say(f"Running {rid} on {host}, here at {endpoint(rid)} (model id {rid}, key in {key_path()})")
-    say(f"Launch an agent against it with: omarchy agent --local-model {rid}")
-  else:
-    smaller = [variant["ctx"] for variant in recipe.get("variant", []) if variant["ctx"] < manifest["variant"]["ctx"]]
-    say(f"Installed {rid} on {host}, which can't start it now. Press play in the agents panel once it has room, or run: omarchy agent local start {rid}")
-    if smaller:
-      say(f"A smaller context needs less memory: omarchy agent local use {rid} --ctx {max(smaller)}")
   return 0
 
 
-def remote_start(manifest, catalog, profile):
-  rid, host = manifest["recipe_id"], manifest["remote"]["host"]
-  clear_error(rid)
-  started = time.time()
-  write_status(catalog, profile, {rid: "activating"})
-  systemctl("reset-failed", unit_name(rid))
-  result = systemctl("start", unit_name(rid))
-  write_atomic(os.path.join(state_dir(), "last"), rid + "\n")
-  if result.returncode != 0:
-    # The remote's own reason, such as its memory being taken. Prefixed, a memory refusal still
-    # shows: play stays enabled, since only the remote knows when it has room again.
-    reason = remote_error(host, rid)
-    record_error(rid, f"On {host}: {reason}" if reason else f"Didn't start on {host}: omarchy agent local logs {rid} shows why")
-    write_status(catalog, profile)
-    raise LocalError(f"{rid} didn't start on {host}: {result.stderr.strip()}\n{journal_tail(rid)}")
-  write_atomic(load_seconds_path(rid), f"{time.time() - started:.1f}\n")
-  write_status(catalog, profile)
-  say(f"Started {rid} on {host}, here at {endpoint(rid)}")
-  return 0
-
-
-def remote_remove(manifest, local_only=False):
-  """Removes the model from its remote, then its tunnel unit; like pair_remove, fails before
-  anything here is deleted while the remote can't be reached, unless local_only."""
-  remote = manifest.get("remote")
-  if not remote:
-    return
-  rid = manifest["recipe_id"]
-  try:
-    removed = remote_engine(remote["host"], "remove", rid, timeout=900).stdout.strip().splitlines()
-    # What it freed is there: this machine kept none of its weights.
-    say(f"On {remote['host']}: {removed[-1] if removed else 'removed'}")
-  except LocalError as error:
-    if not local_only:
-      raise LocalError(f"Can't reach {remote['host']} to remove {rid} there ({error.short}). Run remove again once it's back, "
-                       f"or with --local-only if it's gone for good", short=f"{remote['host']} unreachable")
-    say(f"Leaving {rid} on {remote['host']}, which can't be reached: {error.short}")
-  if os.path.exists(remote_unit_path(rid)):
-    os.unlink(remote_unit_path(rid))
-
-
-def cmd_remote(argv):
+def cmd_machine(argv):
   if argv[:1] == ["add"]:
-    return cmd_remote_add(argv[1:])
-  argparse.ArgumentParser(prog="omarchy agent local remote").parse_args(argv)
-  remotes = load_remotes()
-  if not remotes:
-    say("No remote machine yet. Set one up with: omarchy agent local remote add <user@host>")
-  for host, there in remotes.items():
+    return cmd_machine_add(argv[1:])
+  argparse.ArgumentParser(prog="omarchy agent local machine").parse_args(argv)
+  machines = load_machines()
+  if not machines:
+    say("No machine yet. Set one up with: omarchy agent local machine add <user@host>")
+  for host, there in machines.items():
     say(f"{host}: {', '.join(gpu['family'] for gpu in there.get('gpus', [])) or 'no GPU'}, {there.get('ram_class')} GB")
   return 0
 
 
-def cmd_remote_add(argv):
-  parser = argparse.ArgumentParser(prog="omarchy agent local remote add",
+def cmd_machine_add(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local machine add",
                                    description="Prepare a machine reached over SSH, such as a DGX Spark on DGX OS, to run models for this one. Safe to run again.")
   parser.add_argument("host", help="the machine as SSH reaches it, e.g. user@spark-1234.local")
   args = parser.parse_args(argv)
   host = args.host
   if not PEER_RE.match(host) or host.startswith("-"):
-    raise LocalError("Name the machine as SSH reaches it, e.g.: omarchy agent local remote add user@spark-1234.local")
-  say("SSH key to the remote")
+    raise LocalError("Name the machine as SSH reaches it, e.g.: omarchy agent local machine add user@spark-1234.local")
+  say("SSH key to the machine")
   ssh_login(host)
   say(f"Preparing {host} (sudo there asks for its password)")
-  root_script(HOST_SETUP.replace("@CDI_COMPAT@", CDI_COMPAT), pair_ssh(host, "id -un").stdout.strip(), peer=host)
+  there_home = pair_ssh(host, "echo $HOME").stdout.strip()
+  root_script(HOST_SETUP.replace("@CDI_COMPAT@", CDI_COMPAT) + MACHINE_SETUP_TAIL, pair_ssh(host, "id -un").stdout.strip(),
+              f"{there_home}/.local/share/omarchy-local-ai/omarchy-local-ai", peer=host)
   say("Copying this engine and catalog there")
   sync_engine(host)
-  # One key for both: this machine's overlays read its key file, the remote's servers check it.
-  pair_ssh(host, "umask 077 && mkdir -p ~/.config/omarchy/agent-local && cat > ~/.config/omarchy/agent-local/key", input=read_key())
-  pair_ssh(host, "cd ~/.local/share/omarchy-local-ai && python3 -c 'import agent_local; agent_local.ensure_key()'")
-  there = json.loads(remote_engine(host, "profile").stdout)
-  remotes = load_remotes()
-  remotes[host] = there
+  there = json.loads(machine_engine(host, "profile").stdout)
+  machines = load_machines()
+  machines[host] = there
   ensure_dir(state_dir())
-  write_atomic(remotes_path(), json.dumps(remotes, indent=2) + "\n")
+  write_atomic(machines_path(), json.dumps(machines, indent=2) + "\n")
   catalog, profile = load_catalog(), machine_profile()
   refresh_list_cache(catalog, profile)
   write_status(catalog, profile)
   say(f"{host} is ready: {', '.join(gpu['family'] for gpu in there['gpus']) or 'no GPU'}, {there['ram_class']} GB. What it runs and this machine can't is listed here now.")
-  say("Models already running there keep their previous key until they restart.")
+  # Its models reach this machine through the tailnet, as any paired machine's do.
+  if pair_ssh(host, "command -v tailscale", check=False).returncode != 0:
+    say(f"Tailscale isn't installed on {host}: install it and log in to your tailnet there, so models set up on it can be shared.")
+  else:
+    say(f"Pairing with {host}")
+    try:
+      cmd_pair([host])
+    except LocalError as error:
+      say(f"Not paired yet: {error.short}")
   return 0
 
 
@@ -4730,7 +4594,7 @@ COMMANDS = {
   "overlay": cmd_overlay,
   "link": cmd_link,
   "link-worker": cmd_link_worker,
-  "remote": cmd_remote,
+  "machine": cmd_machine,
 }
 
 SUMMARIES = {
@@ -4747,7 +4611,7 @@ SUMMARIES = {
   "remote": "Start or stop a model on a paired machine: remote start host/recipe",
   "logs": "Show a model's logs, and its other half's on a paired Spark",
   "link": "Show the Spark cabled to this one; 'link setup <peer>' prepares both",
-  "remote": "Show the machines models run on over SSH; 'remote add <host>' prepares one",
+  "machine": "Show the machines models run on over SSH; 'machine add <host>' prepares one",
 }
 
 

@@ -814,41 +814,54 @@ with patch.object(a, "load_catalog", return_value=cat) as load, patch.object(a, 
   check("refresh loads catalog and machine profile once", load.call_count == machine.call_count == 1)
 
 
-# A remote runs what this machine can't: listed, placed and tunnelled to here.
+# A machine over SSH runs what this machine can't: listed, placed and paired with here.
 cat = a.load_catalog_dir(os.environ["ENGINE_ROOT"])
 here = {"platform": "x86", "ram_class": 64, "ram_gib": 62.0, "gpus": []}
 dgx = {"platform": "aarch64-gb10", "ram_class": 128, "ram_gib": 121.6, "gpus": [spark]}
 bolt = "nemotron-3.5-bolt-tensorfold"
-with patch.object(a, "load_remotes", return_value={"me@dgx": dgx}):
+with patch.object(a, "load_machines", return_value={"me@dgx": dgx}):
   rows = {row["id"]: row for row in a.recipe_listing(cat, here)}
-  check("a recipe only the remote runs is listed as available there", rows[bolt]["available"] and rows[bolt]["remote"] == "me@dgx" and "me@dgx" in rows[bolt]["summary"])
-  check("what the remote can't run either stays unavailable", not rows["qwen3.8-27b-gufo"]["available"] and "remote" not in rows["qwen3.8-27b-gufo"]
+  check("a recipe only the machine runs is listed as available there", rows[bolt]["available"] and rows[bolt]["machine"] == "me@dgx" and "me@dgx" in rows[bolt]["summary"])
+  check("what the machine can't run either stays unavailable", not rows["qwen3.8-27b-gufo"]["available"] and "machine" not in rows["qwen3.8-27b-gufo"]
       and rows["qwen3.8-27b-gufo"]["reason"].endswith("; on me@dgx: runtime gufo can't run on nvidia-gb10"))
-  check("use places a recipe this machine can't run on the remote", a.remote_placement(cat, bolt, here) == "me@dgx" and a.remote_placement(cat, "best", here) == "me@dgx")
-  check("use keeps what this machine runs here", a.remote_placement(cat, bolt, dgx) is None)
-  raises("use --on names a remote that's set up", lambda: a.remote_placement(cat, bolt, here, on="other"), "isn't set up as a remote")
-remote_text = a.render_remote_unit(bolt, "me@dgx", 11435)
-check("the tunnel unit starts the model there before forwarding this machine's port to it",
-      f"me@dgx\" \"~/.local/share/omarchy-local-ai/omarchy-local-ai start {bolt}\"" in remote_text and f"-L 127.0.0.1:{a.port_for(bolt)}:127.0.0.1:11435 me@dgx; sleep 5; done" in remote_text)
-check("a start the remote refuses fails once, not retried forever", "Restart=" not in remote_text)
-check("only a stop, not a dropped connection, stops the model there", '[ \\"$$SERVICE_RESULT\\" = success ] && exec' in remote_text and f"omarchy-local-ai stop {bolt}" in remote_text)
-remote_manifest = {"recipe_id": bolt, "remote": {"host": "me@dgx", "port": 11435}, "profile": dgx, "variant": {"peak_ram_gib": 999, "peak_gpu_gib": 999}}
-check("a remote model is admitted by the remote, against its memory", a.start_fit(remote_manifest, here) == (True, "") and a.nodes_ram_gib(remote_manifest, here) == 121.6)
+  check("use places a recipe this machine can't run on the machine", a.machine_placement(cat, bolt, here) == "me@dgx" and a.machine_placement(cat, "best", here) == "me@dgx")
+  check("use keeps what this machine runs here", a.machine_placement(cat, bolt, dgx) is None)
+  raises("use --on names a machine that's set up", lambda: a.machine_placement(cat, bolt, here, on="other"), "isn't set up as a machine")
 
 def mirrored(row):
-  """Runs one round of mirror_installing against a remote whose status shows this row."""
+  """Runs one round of mirror_installing against a machine whose status shows this row."""
   done = __import__("threading").Event()
   status = json.dumps({"models": {bolt: row}})
   with patch.object(a, "pair_ssh", side_effect=lambda *_, **__: (done.set(), SimpleNamespace(stdout=status))[1]), \
-       patch.object(a, "update_installing") as installing, patch.object(a, "publish_row") as published:
+       patch.object(a, "update_installing") as installing:
     a.mirror_installing("me@dgx", bolt, SimpleNamespace(wait=lambda _: done.is_set()))
-  return installing, published
-installing, published = mirrored({"unit": "installing", "install": {"phase": "downloading", "done_bytes": 5, "total_bytes": 10, "rate_bytes_s": 2}})
-check("a remote setup's download progress reaches this machine's record", installing.call_args.kwargs == {"phase": "downloading", "done_bytes": 5, "total_bytes": 10, "rate_bytes_s": 2} and not published.called)
-installing, published = mirrored({"unit": "activating", "port": 11500, "endpoint": "http://127.0.0.1:11500/v1", "expected_load_seconds": 50, "error": "old"})
-row = published.call_args.args[1] if published.called else {}
-check("a remote setup that's loading shows as loading here, at this machine's port", row.get("unit") == "activating" and row.get("expected_load_seconds") == 50
-      and row.get("endpoint") == a.endpoint(bolt) and row.get("error") == "" and not installing.called)
+  return installing
+installing = mirrored({"unit": "installing", "install": {"phase": "downloading", "done_bytes": 5, "total_bytes": 10, "rate_bytes_s": 2}})
+check("a machine's download progress reaches this machine's setup row", installing.call_args.kwargs == {"phase": "downloading", "done_bytes": 5, "total_bytes": 10, "rate_bytes_s": 2})
+check("a machine's model that's loading adds nothing to this machine's record", not mirrored({"unit": "activating", "expected_load_seconds": 50}).called)
+
+def machine_use_run(share_code, args=None):
+  """Runs machine_use for bolt on me@dgx, with every SSH step and pairing replaced; returns what was called."""
+  calls = []
+  def ssh(host, *argv, **kwargs):
+    command = " ".join(argv)
+    calls.append(command)
+    return SimpleNamespace(returncode=share_code if command.startswith("share ") else 0, stdout="", stderr="no tailscale")
+  with patch.object(a, "load_machines", return_value={"me@dgx": dgx}), patch.object(a, "load_model", return_value=None), patch.object(a, "installing_idle", return_value=True), \
+       patch.object(a, "begin_installing"), patch.object(a, "update_installing"), patch.object(a, "clear_installing") as cleared, patch.object(a, "fail_installing") as failed, \
+       patch.object(a, "owns_installing", return_value=True), patch.object(a, "sync_engine"), patch.object(a, "pair_ssh", side_effect=ssh), patch.object(a, "machine_engine", side_effect=ssh), \
+       patch.object(a, "mirror_installing"), patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0)), patch.object(a, "Lock"), patch.object(a, "cmd_pair") as pair:
+    ns = SimpleNamespace(target=bolt, ctx=None, unqualified=False, detach=False, **(args or {}))
+    try:
+      a.machine_use("me@dgx", ns, cat)
+      error = None
+    except a.LocalError as caught:
+      error = caught
+  return calls, pair, cleared, failed, error
+calls, pair, cleared, failed, error = machine_use_run(0)
+check("a setup on a machine is shared there and paired with here, for that one model", error is None and f"share {bolt}" in calls and pair.call_args.args == (["me@dgx", bolt],) and cleared.called and not failed.called)
+calls, pair, cleared, failed, error = machine_use_run(1)
+check("a machine that can't share leaves the setup row failed, with the fix", error is not None and "Tailscale" in str(error) and f"pair me@dgx {bolt}" in str(error) and failed.called and not pair.called)
 
 # ---- tailnet sharing
 

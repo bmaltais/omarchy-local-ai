@@ -44,15 +44,17 @@ Point any OpenAI-compatible client at `http://127.0.0.1:11435/v1` with that key;
 
 ## Run models on another machine
 
-An Omarchy machine can run models on another one over SSH, a DGX Spark on DGX OS for example, as if they ran on it: the agents panel lists, starts, stops and removes them, and `omarchy agent --local-model` launches agents against them.
+An Omarchy machine can set up models on another one over SSH, a DGX Spark on DGX OS for example, and use them as it uses any machine's shared models. The other machine and this one need Tailscale: the models reach this machine through the tailnet, as `share` and `pair` do.
 
 ```bash
-omarchy agent local remote add user@spark-1234.local   # once: asks for its password and sudo once
-omarchy agent local list                               # what only the remote runs is listed, "Runs on user@spark-1234.local"
-omarchy agent local use nemotron-3.5-bolt-tensorfold   # set up there, reached here
+omarchy agent local machine add user@spark-1234.local   # once: asks for its password and sudo once
+omarchy agent local list                                # what only the machine runs is listed, "Runs on user@spark-1234.local"
+omarchy agent local use nemotron-3.5-bolt-tensorfold   # set up, shared and paired
+omarchy agent local remote start spark-1234/nemotron-3.5-bolt-tensorfold
+omarchy agent --local-model spark-1234/nemotron-3.5-bolt-tensorfold
 ```
 
-`remote add` gives the remote this machine's SSH key, the same host setup `link setup` gives a peer, a copy of this engine and catalog (in `~/.local/share/omarchy-local-ai`, refreshed before each setup there) and this machine's API key. `use` sends what this machine can't run to the remote (`--on <host>` sends anything), whose engine sets it up and starts it on its own loopback. Here the model is a unit that starts it there, forwards its usual port here to the remote's over SSH, and stops it there when stopped. A dropped connection reconnects without stopping the model.
+`machine add` gives the machine this machine's SSH key, the same host setup `link setup` gives a peer, a copy of this engine and catalog (in `~/.local/share/omarchy-local-ai`, refreshed before each setup there) and `omarchy-agent-local` on its PATH, then pairs with it. `use` sends what this machine can't run to the machine (`--on <host>` sends anything), whose engine sets it up and starts it, then shares it on the tailnet; this machine pairs with that model. From then on it is one of the network's models: the agents panel lists it, and `remote start|stop`, `forget` and `--local-model <host>/<recipe>` work as for any paired machine's. To remove one, run `ssh <host> omarchy-agent-local remove <recipe>`.
 
 ## Catalog layout
 
