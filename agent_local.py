@@ -4236,7 +4236,13 @@ def write_network(forget=None):
       previous["models"] = {mid: m for mid, m in previous["models"].items() if not (isinstance(m, dict) and m.get("host") == forget)}
     network = survey_network(previous)
     write_atomic(network_path(), json.dumps(network, indent=2) + "\n")
-    return network
+  # Pairing, forgetting and every survey pass through here, so pi's extension
+  # follows paired hosts' models as status writes make it follow local ones.
+  try:
+    sync_pi_extension()
+  except OSError:
+    pass
+  return network
 
 
 def split_remote_id(value):
@@ -4388,21 +4394,25 @@ def overlay_target(rid=None):
   """The running model an overlay points at: a local recipe, or host/recipe
   on a paired machine of the tailnet."""
   if rid and "/" in rid:
-    model = resolve_remote(rid)
-    return {
-      "provider": f"{OVERLAY_PROVIDER}-{model['host']}",
-      "provider_name": f"Omarchy model on {model['host']}",
-      "base_url": model["endpoint"],
-      "key_path": remote_key_path(model["host"]),
-      "model": model["recipe"],
-      "name": model["name"],
-      "ctx": model["ctx"],
-      # A host that doesn't publish its cap yet gets the old default.
-      "max_tokens": model.get("max_tokens") or DEFAULT_MAX_OUTPUT_TOKENS,
-      "input": model["input"],
-      "file": f"{model['host']}--{model['recipe']}",
-    }
+    return remote_target(resolve_remote(rid))
   return local_target(resolve_model(rid, running_only=True))
+
+
+def remote_target(model):
+  """A paired host's model, from its listing or network.json, as an overlay target."""
+  return {
+    "provider": f"{OVERLAY_PROVIDER}-{model['host']}",
+    "provider_name": f"Omarchy model on {model['host']}",
+    "base_url": model["endpoint"],
+    "key_path": remote_key_path(model["host"]),
+    "model": model["recipe"],
+    "name": model["name"],
+    "ctx": model["ctx"],
+    # A host that doesn't publish its cap yet gets the old default.
+    "max_tokens": model.get("max_tokens") or DEFAULT_MAX_OUTPUT_TOKENS,
+    "input": model["input"],
+    "file": f"{model['host']}--{model['recipe']}",
+  }
 
 
 def local_target(manifest):
@@ -4435,20 +4445,19 @@ def pi_model(target):
   }
 
 
-def pi_provider_source(header, name, provider_name, key, targets):
-  """A pi extension registering these models under one provider, each at its own endpoint."""
-  provider = {
-    "name": provider_name,
-    "apiKey": "!cat -- " + shlex.quote(key),
-    "api": "openai-completions",
-    "models": [pi_model(target) for target in targets],
-  }
-  return (
-    f"// {header}\n"
-    "export default function (pi) {\n"
-    f"  pi.registerProvider({json.dumps(name)}, {json.dumps(provider, indent=2)});\n"
-    "}\n"
-  )
+def pi_provider_source(header, targets):
+  """A pi extension registering these models, each at its own endpoint, under
+  their providers: this machine's, and one per paired host with its key."""
+  providers = {}
+  for target in targets:
+    providers.setdefault(target["provider"], {
+      "name": target["provider_name"],
+      "apiKey": "!cat -- " + shlex.quote(target["key_path"]),
+      "api": "openai-completions",
+      "models": [],
+    })["models"].append(pi_model(target))
+  registrations = "".join(f"  pi.registerProvider({json.dumps(name)}, {json.dumps(provider, indent=2)});\n" for name, provider in providers.items())
+  return f"// {header}\nexport default function (pi) {{\n{registrations}}}\n"
 
 
 def local_targets():
@@ -4463,39 +4472,57 @@ def local_targets():
   return targets
 
 
+def remote_targets():
+  """Every paired host's connected model this machine has seen, as overlay
+  targets, whether or not its host answers right now: like a stopped local
+  model, it keeps its place in the picker."""
+  remotes = load_remotes()
+  targets = []
+  for model in load_network()["models"].values():
+    try:
+      if model.get("paired") and model["host"] in remotes:
+        targets.append(remote_target(model))
+    except (KeyError, TypeError, AttributeError):
+      pass
+  return sorted(targets, key=lambda target: (target["provider"], target["model"]))
+
+
 def pi_extension_path():
   return os.path.join(home(), ".pi", "agent", "extensions", "omarchy-local.ts")
 
 
 def sync_pi_extension():
-  """Keep pi's own extension listing every model set up here, so plain `pi`,
-  its /model picker and a default of omarchy-local/<recipe> reach each one at
-  its current port with the current key, with nothing written by hand. Only
-  where pi has made its folder; it goes when the last model does."""
+  """Keep pi's own extension listing every model set up here and every paired
+  host's, so plain `pi`, its /model picker and a default of
+  omarchy-local/<recipe> or omarchy-local-<host>/<recipe> reach each one at
+  its current endpoint with the current key, with nothing written by hand.
+  Only where pi has made its folder; it goes when the last model does."""
   if not os.path.isdir(os.path.join(home(), ".pi", "agent")):
     return
-  path = pi_extension_path()
-  targets = local_targets()
-  if not targets:
-    if os.path.exists(path):
-      os.unlink(path)
-    return
-  source = pi_provider_source("Generated by omarchy-agent-local for every model set up on this machine; rewritten as they change.",
-                              OVERLAY_PROVIDER, "Omarchy local model", key_path(), targets)
-  if _read(path) != source.strip():
-    write_atomic(path, source)
+  # Status and network writes both sync, so collecting and writing hold a
+  # lock of their own: an older list can't land over a newer one.
+  ensure_dir(state_dir())
+  with open(os.path.join(state_dir(), "pi.lock"), "w") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    path = pi_extension_path()
+    targets = local_targets() + remote_targets()
+    if not targets:
+      if os.path.exists(path):
+        os.unlink(path)
+      return
+    source = pi_provider_source("Generated by omarchy-agent-local for every model set up here or paired on the tailnet; rewritten as they change.", targets)
+    if _read(path) != source.strip():
+      write_atomic(path, source)
 
 
 def pi_overlay(rid=None):
-  """A pi extension for a launch on a running model. A local one lists every
-  model set up, as pi's own extension does, so loading it over that one leaves
-  the /model picker whole; the launch picks this one with --model."""
+  """A pi extension for a launch on a running model. It lists the rest of its
+  provider's models too, as pi's own extension does, so loading it over that
+  one leaves the /model picker whole; the launch picks this one with --model."""
   target = overlay_target(rid)
-  targets = [target]
-  if target["provider"] == OVERLAY_PROVIDER:
-    targets += [other for other in local_targets() if other["model"] != target["model"]]
-  source = pi_provider_source("Generated by omarchy-agent-local overlay for `omarchy agent --local`; rewritten on every launch.",
-                              target["provider"], target["provider_name"], target["key_path"], targets)
+  siblings = local_targets() if target["provider"] == OVERLAY_PROVIDER else remote_targets()
+  targets = [target] + [other for other in siblings if other["provider"] == target["provider"] and other["model"] != target["model"]]
+  source = pi_provider_source("Generated by omarchy-agent-local overlay for `omarchy agent --local`; rewritten on every launch.", targets)
   # One file per model: launches of two models close together must not
   # swap each other's overlay before their agents read it.
   path = os.path.join(config_dir(), "overlays", f"pi-{target['file']}.ts")
@@ -4549,12 +4576,33 @@ def opencode_overlay(rid=None):
   return path, target["provider"], target["model"]
 
 
+def qwen_overlay(rid=None):
+  """What Qwen Code is launched with: it takes an OpenAI-compatible endpoint
+  from flags and its key from the environment, so this is the endpoint, the
+  model and where the key is, for the launcher to read. No key in it."""
+  target = overlay_target(rid)
+  overlay = {
+    "baseUrl": target["base_url"],
+    "model": target["model"],
+    "name": target["name"],
+    "keyFile": target["key_path"],
+    "contextWindow": target["ctx"],
+    "maxTokens": target["max_tokens"],
+  }
+  path = os.path.join(config_dir(), "overlays", f"qwen-{target['file']}.json")
+  write_atomic(path, json.dumps(overlay, indent=2) + "\n")
+  return path, target["provider"], target["model"]
+
+
+OVERLAYS = {"pi": lambda rid: pi_overlay(rid), "opencode": lambda rid: opencode_overlay(rid), "qwen": lambda rid: qwen_overlay(rid)}
+
+
 def cmd_overlay(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local overlay")
-  parser.add_argument("agent", choices=("opencode", "pi"))
+  parser.add_argument("agent", choices=tuple(OVERLAYS))
   parser.add_argument("recipe", nargs="?", help="the running model, or host/recipe on a paired machine (default: the last one started here)")
   args = parser.parse_args(argv)
-  for line in (pi_overlay if args.agent == "pi" else opencode_overlay)(args.recipe):
+  for line in OVERLAYS[args.agent](args.recipe):
     print(line)
   return 0
 
