@@ -158,7 +158,7 @@ Paths are relative to the user's home. JSON caches are atomically replaced.
 
 | Path | Purpose |
 | --- | --- |
-| `.local/state/omarchy/agent-local/models/<recipe>.json` | One current resolved manifest: schema, recipe/runtime IDs and definitions, catalog version, profile, GPU, variant, image, files, roles, required fileset, creation time, optional observations and unchecked flag. Its existence means installed. |
+| `.local/state/omarchy/agent-local/models/<recipe>.json` | One current resolved manifest: schema, recipe/runtime IDs and definitions, profile, GPU, variant, image, files, roles, required fileset, creation time, optional observations and unchecked flag. Its existence means installed. |
 | `.local/state/omarchy/agent-local/status.json` | Current model state and recommendation; shape below. |
 | `.local/state/omarchy/agent-local/list.json` | Array of recipe cards; shape below. |
 | `.local/state/omarchy/agent-local/ports.json`, `last` | Stable port assignments and last started recipe. |
@@ -182,7 +182,7 @@ to `/etc/NetworkManager/dispatcher.d/`: when a ConnectX-7 port comes up it runs
 `link notify` for each logged-in user, which announces a newly available Spark once,
 with a notification whose action opens `link setup` in a terminal. Each model contains:
 
-- Identity: `recipe`, `name`, `vendor`, `runtime`, `image`, `ctx`, `catalog_version`.
+- Identity: `recipe`, `name`, `vendor`, `runtime`, `image`, `ctx`.
 - Connection: `port`, `endpoint` (including `/v1`).
 - State: `unit`, `sub_state`, `result`, `error`, `fits`, `fit_reason`.
 - Progress: `since_ms`, `expected_load_seconds`, `expected_stop_seconds`,
