@@ -4195,7 +4195,11 @@ def survey_network(previous, now=None):
     state, listing, error = answers.get(host, ("offline", None, ""))
     if state == "online":
       hosts[host] = {"host": host, "dns": dns, "paired": paired, "state": "online", "error": "", "last_seen_ms": now, "ram_total_gib": listing["ram_total_gib"]}
+      # Only what its host runs, or is loading, is on offer: a model it stops
+      # leaves the list until it starts again.
       for model in listing["models"]:
+        if model["unit"] not in ("active", "activating"):
+          continue
         record = remote_record(host, dns, model, connected(remotes.get(host), model["recipe"]), listing["ram_total_gib"], now)
         models[record["id"]] = record
       continue
