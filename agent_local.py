@@ -4226,10 +4226,8 @@ def survey_network(previous, now=None):
   }
 
 
-def write_network(transitions=None, forget=None):
-  """Survey the tailnet and rewrite network.json, which the panel watches.
-  `transitions` marks a remote start or stop at once, before the host's
-  listing says so."""
+def write_network(forget=None):
+  """Survey the tailnet and rewrite network.json, which the panel watches."""
   ensure_dir(state_dir())
   with open(os.path.join(state_dir(), "network.lock"), "w") as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
@@ -4238,13 +4236,6 @@ def write_network(transitions=None, forget=None):
       previous["hosts"].pop(forget, None)
       previous["models"] = {mid: m for mid, m in previous["models"].items() if not (isinstance(m, dict) and m.get("host") == forget)}
     network = survey_network(previous)
-    now = int(time.time() * 1000)
-    for mid, unit in (transitions or {}).items():
-      model = network["models"].get(mid)
-      if model and not model["offline"]:
-        model["unit"] = unit
-        model["since_ms"] = now
-        model["error"] = ""
     write_atomic(network_path(), json.dumps(network, indent=2) + "\n")
     return network
 
@@ -4362,26 +4353,6 @@ def cmd_forget(argv):
     unpair(host)
   write_network(forget=host)
   say(f"Forgot {host}")
-  return 0
-
-
-def cmd_remote(argv):
-  parser = argparse.ArgumentParser(prog="omarchy agent local remote", description="Start or stop a model on a paired host")
-  parser.add_argument("action", choices=("start", "stop"))
-  parser.add_argument("model", help="host/recipe")
-  args = parser.parse_args(argv)
-  host, rid = split_remote_id(args.model)
-  remote = load_remotes().get(host)
-  if not remote:
-    raise LocalError(f"{host} isn't paired. Run: omarchy agent local pair {host}")
-  write_network({args.model: "activating" if args.action == "start" else "deactivating"})
-  try:
-    result = subprocess.run(ssh_command(remote, args.action, rid), capture_output=True, text=True)
-  finally:
-    write_network()
-  if result.returncode != 0:
-    raise LocalError((result.stderr.strip().splitlines() or [f"{args.action} failed on {host}"])[-1].removeprefix("Error: "))
-  say(f"{rid} {'started' if args.action == 'start' else 'stopped'} on {host}")
   return 0
 
 
@@ -4576,7 +4547,6 @@ COMMANDS = {
   "network": cmd_network,
   "pair": cmd_pair,
   "forget": cmd_forget,
-  "remote": cmd_remote,
   "logs": cmd_logs,
   # Plumbing for the panel, omarchy agent, omarchy update and catalog
   # maintainers; they run but aren't listed.
@@ -4600,7 +4570,6 @@ SUMMARIES = {
   "network": "List the models shared on your tailnet, including hosts that are offline",
   "pair": "Pair with a machine over SSH to use the models it shares",
   "forget": "Unpair a machine and drop its models",
-  "remote": "Start or stop a model on a paired machine: remote start host/recipe",
   "logs": "Show a model's logs, and its other half's on a paired Spark",
   "link": "Show the Spark cabled to this one; 'link setup <peer>' prepares both",
 }

@@ -943,13 +943,9 @@ again = a.load_remotes()["away"]
 check("pairing a host again under another name adds to its models", again["models"] == ["other-model", "small-model"] and again["ssh"] == "alice@away")
 a.write_atomic(a.remote_key_path("away"), "k" * 32, mode=0o600)
 a.write_atomic(os.path.join(a.remotes_dir(), "away.json"), json.dumps({"host": "away", "dns": "away.tail.ts.net", "ssh": "away"}))
-a.write_atomic(a.network_path(), json.dumps(later))
-with patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
-  marked = a.write_network({"box/big-model": "deactivating", "away/small-model": "activating"})
-check("a remote stop shows at once; an offline model can't be marked", marked["models"]["box/big-model"]["unit"] == "deactivating" and marked["models"]["away/small-model"]["unit"] == "inactive")
 raises("a network model is named host/recipe", lambda: a.split_remote_id("box/../x"), "host/recipe")
-raises("an SSH target can't smuggle options", lambda: a.ssh_command({"ssh": "-oProxyCommand=x", "dns": ""}, "start", "m"), "Not an SSH target")
-check("remote commands quote their arguments", a.ssh_command({"ssh": "box", "dns": "box.tail.ts.net"}, "start", "big-model")[-2:] == ["box", "omarchy-agent-local start big-model"])
+raises("an SSH target can't smuggle options", lambda: a.ssh_command({"ssh": "-oProxyCommand=x", "dns": ""}, "share", "--export"), "Not an SSH target")
+check("remote commands quote their arguments", a.ssh_command({"ssh": "box", "dns": "box.tail.ts.net"}, "share", "--export")[-2:] == ["box", "omarchy-agent-local share --export"])
 
 # A paired, running remote model becomes an overlay with its own provider.
 a.write_atomic(a.remote_key_path("box"), "b" * 32, mode=0o600)
