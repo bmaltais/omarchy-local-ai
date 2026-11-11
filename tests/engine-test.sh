@@ -622,6 +622,39 @@ check("a recipe has to take text", any(".input" in e for e in a.validate_recipe(
 with patch.object(a, "resolve_model", return_value={"recipe_id": "model", "recipe": image_recipe, "variant": {"ctx": 4096}}):
   overlay = json.loads(open(a.opencode_overlay("model")[0]).read())["provider"][a.OVERLAY_PROVIDER]["models"]["model"]
   check("the OpenCode overlay declares image input", overlay["attachment"] and overlay["modalities"]["input"] == ["text", "image"])
+
+# pi's own extension lists every model set up, each at its own port, and
+# follows them: none without pi's folder, gone with the last model.
+def pi_registered(path):
+  text = open(path).read()
+  name, _, rest = text.split("pi.registerProvider(", 1)[1].partition(", ")
+  return json.loads(name), json.loads(rest.rsplit(");", 1)[0])
+pi_set_up = {"alpha": {"recipe_id": "alpha", "recipe": image_recipe, "variant": {"ctx": 4096}},
+             "beta": {"recipe_id": "beta", "recipe": {**copy.deepcopy(recipe), "name": "Beta"}, "variant": {"ctx": 8192}}}
+pi_ext = Path(a.pi_extension_path())
+with patch.object(a, "known_models", return_value=["alpha", "beta"]), patch.object(a, "load_model", side_effect=pi_set_up.get):
+  a.sync_pi_extension()
+  check("no pi folder, no pi extension", not pi_ext.exists() and not pi_ext.parent.parent.exists())
+  pi_ext.parent.parent.mkdir(parents=True)
+  a.sync_pi_extension()
+  name, provider = pi_registered(pi_ext)
+  urls = {m["id"]: m["baseUrl"] for m in provider["models"]}
+  check("pi's extension registers the omarchy-local provider", name == "omarchy-local" == a.OVERLAY_PROVIDER)
+  check("pi's extension lists every model set up at its own port", urls == {"alpha": a.endpoint("alpha"), "beta": a.endpoint("beta")} and urls["alpha"] != urls["beta"], repr(urls))
+  check("pi's extension reads the key from its file", provider["apiKey"] == "!cat -- " + shlex.quote(a.key_path()))
+  check("pi's extension carries each model's context and input", [(m["contextWindow"], m["input"]) for m in provider["models"]] == [(4096, ["text", "image"]), (8192, ["text"])])
+  with patch.object(a, "resolve_model", return_value=pi_set_up["beta"]):
+    path, overlay_name, overlay_model = a.pi_overlay("beta")
+  name, provider = pi_registered(path)
+  check("a local launch overlay is the same provider, the launched model first and the rest after", (name, overlay_name, overlay_model) == ("omarchy-local", "omarchy-local", "beta") and [m["id"] for m in provider["models"]] == ["beta", "alpha"])
+  mtime = pi_ext.stat().st_mtime_ns
+  a.sync_pi_extension()
+  check("an unchanged list leaves pi's extension alone", pi_ext.stat().st_mtime_ns == mtime)
+with patch.object(a, "known_models", return_value=[]):
+  a.sync_pi_extension()
+  check("pi's extension goes with the last model", not pi_ext.exists())
+with patch.object(a, "status_record", return_value={"models": {}, "share_error": ""}), patch.object(a, "publish_shares"), patch.object(a, "sync_pi_extension", side_effect=OSError("read-only")) as sync:
+  check("a status write syncs pi's extension and survives it failing", "models" in a.write_status(a.load_catalog(), profile) and sync.called)
 check("agents default to a 16k reply cap", a.max_output_tokens({"recipe": recipe, "variant": {"ctx": 131072}}) == 16384)
 capped = {**copy.deepcopy(recipe), "server": {"args": ["--max-tokens", "32768", "--vision"]}}
 check("agents get the server's reply cap", a.max_output_tokens({"recipe": capped, "variant": {"ctx": 131072}}) == 32768)
@@ -953,8 +986,8 @@ a.write_atomic(os.path.join(a.remotes_dir(), "box.json"), json.dumps({"host": "b
 with patch.object(a, "fetch_listing", return_value=("online", clean, "")):
   path, provider, model = a.pi_overlay("box/big-model")
   source = open(path).read()
-  check("a remote pi overlay points at the host's tailnet endpoint and key", provider == "llamacpp-box" and model == "big-model" and "https://box.tail.ts.net/local-ai/big-model/v1" in source and a.remote_key_path("box") in source and "b" * 32 not in source)
-  oc = json.loads(open(a.opencode_overlay("box/big-model")[0]).read())["provider"]["llamacpp-box"]
+  check("a remote pi overlay points at the host's tailnet endpoint and key", provider == "omarchy-local-box" and model == "big-model" and "https://box.tail.ts.net/local-ai/big-model/v1" in source and a.remote_key_path("box") in source and "b" * 32 not in source)
+  oc = json.loads(open(a.opencode_overlay("box/big-model")[0]).read())["provider"]["omarchy-local-box"]
   check("a remote OpenCode overlay keeps the model's context and inputs", oc["models"]["big-model"]["limit"]["context"] == 262144 and oc["models"]["big-model"]["attachment"])
   raises("a remote model that isn't running can't be launched", lambda: a.pi_overlay("box/odd-state"), "isn't running")
 raises("an unpaired host's model can't be launched", lambda: a.pi_overlay("plain/x"), "isn't paired")
