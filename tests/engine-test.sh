@@ -1251,4 +1251,130 @@ check("once everyone is idle nothing counts and nothing is pending", tracker.exp
 proxy.shutdown()
 model.shutdown()
 
+
+# ---------------------------------------------------------------- user recipes
+import contextlib
+import io
+
+curated_id = "qwen3.8-27b-gufo"
+curated_text = Path(os.environ["ENGINE_ROOT"], "recipes", curated_id + ".toml").read_text()
+mine = Path(os.environ["HOME"]) / "mine"
+mine.mkdir()
+os.environ["OMARCHY_LOCAL_AI_CATALOG"] = os.environ["ENGINE_ROOT"]
+
+
+def write_mine(rid, text):
+  path = mine / f"{rid}.toml"
+  path.write_text(text)
+  return str(path)
+
+
+def run(command, *argv):
+  out, err = io.StringIO(), io.StringIO()
+  with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+    try:
+      code = command(list(argv))
+    except a.LocalError as error:
+      code = 1
+      err.write(str(error))
+  return code, out.getvalue(), err.getvalue()
+
+
+def variants_as(text, source):
+  return re.sub(r"(\[\[variant\]\]\n)", rf'\1source = "{source}"\n', text)
+
+
+good = write_mine("my-model", curated_text)
+check("the user recipe folder lives in the state dir beside models and machines", a.user_recipes_dir() == os.path.join(a.state_dir(), "recipes"))
+code, out, err = run(a.cmd_recipe, "validate", good)
+check("recipe validate accepts a good file and installs nothing", code == 0 and not os.path.exists(a.user_recipes_dir()), out + err)
+code, _, _ = run(a.cmd_recipe, "add", good)
+check("recipe add installs the file under its id", code == 0 and os.path.isfile(os.path.join(a.user_recipes_dir(), "my-model.toml")))
+cat = a.load_catalog()
+check("the catalog loads curated recipes, then user ones", "my-model" in cat.recipes and curated_id in cat.recipes and cat.user == {"my-model"} and cat.curated.isdisjoint(cat.user))
+code, out, _ = run(a.cmd_recipe, "list", "--json")
+with patch.object(a, "machine_profile", return_value=profile), patch.object(a, "running_models", return_value=set()), patch.object(a, "load_machines", return_value={}):
+  code, out, err = run(a.cmd_recipe, "list", "--json")
+rows = {row["id"]: row for row in json.loads(out)}
+check("recipe list --json marks user recipes true and curated false", code == 0 and rows["my-model"]["user"] is True and rows[curated_id]["user"] is False, out + err)
+check("a user recipe survives an engine update: it is not in the engine's folder", not Path(os.environ["ENGINE_ROOT"], "recipes", "my-model.toml").exists() and a.load_catalog().user == {"my-model"})
+
+# a clash with a curated id never shadows
+clash = write_mine(curated_id, curated_text)
+for command in ("validate", "add"):
+  code, out, err = run(a.cmd_recipe, command, clash)
+  check(f"recipe {command} rejects an id that clashes with a curated recipe, naming it", code == 1 and f"clashes with the curated recipe '{curated_id}'" in out + err, out + err)
+shadow = Path(a.user_recipes_dir(), f"{curated_id}.toml")
+shadow.write_text(curated_text.replace("name =", 'name = "Shadow" #', 1))
+shadowed = a.load_catalog()
+check("a user file with a curated id is skipped and never shadows", shadowed.recipes[curated_id].get("name") != "Shadow" and curated_id in shadowed.user_errors and curated_id not in shadowed.user)
+shadow.unlink()
+
+# an invalid recipe gets the errors validate_recipe gives a curated one
+broken = curated_text.replace('revision = "', 'revision = "z', 1)
+bad = write_mine("bad-one", broken)
+expected = a.validate_recipe("bad-one", tomllib.loads(broken), a.load_catalog().runtimes, os.environ["ENGINE_ROOT"], user=True)
+code, out, _ = run(a.cmd_recipe, "validate", bad)
+check("an invalid recipe is rejected with every error validate_recipe gives", code == 1 and expected and out.splitlines() == expected, out)
+code, _, _ = run(a.cmd_recipe, "add", bad)
+check("recipe add of an invalid recipe installs nothing", code == 1 and not os.path.exists(os.path.join(a.user_recipes_dir(), "bad-one.toml")))
+looser = tomllib.loads(curated_text)
+looser["server"] = {"args": ["--host", "0.0.0.0"]}
+check("a user recipe has no looser tier: reserved args are still refused", any("reserved" in e for e in a.validate_recipe("x", looser, a.load_catalog().runtimes, os.environ["ENGINE_ROOT"], user=True)))
+code, out, _ = run(a.cmd_recipe, "validate", write_mine("not-toml", "this is = = broken"))
+check("recipe validate reports a file that isn't TOML", code == 1 and "not valid TOML" in out, out)
+code, out, _ = run(a.cmd_recipe, "validate", str(mine / "missing.toml"))
+check("recipe validate reports a missing file", code == 1 and "can't be read" in out, out)
+Path(a.user_recipes_dir(), "hand-broken.toml").write_text(broken)
+tolerant = a.load_catalog()
+check("a hand-placed invalid user recipe is skipped without breaking the catalog", "hand-broken" in tolerant.user_errors and "hand-broken" not in tolerant.recipes and "my-model" in tolerant.recipes)
+Path(a.user_recipes_dir(), "hand-broken.toml").unlink()
+
+# a measured file is the catalog's evidence: a user recipe may omit it, a curated one may not
+no_measured = re.sub(r', measured = "[^"]*"|\nmeasured = "[^"]*"', "", curated_text)
+check("the fixture drops the measured file", "measured" not in no_measured)
+check("a user recipe may omit a hardware entry's measured file", not a.validate_recipe("x", tomllib.loads(no_measured), a.load_catalog().runtimes, os.environ["ENGINE_ROOT"], user=True))
+check("a curated recipe still needs it", any("measured" in e for e in a.validate_recipe("x", tomllib.loads(no_measured), a.load_catalog().runtimes, os.environ["ENGINE_ROOT"])))
+
+# remove
+code, out, err = run(a.cmd_recipe, "remove", curated_id)
+check("recipe remove refuses a curated recipe", code == 1 and "curated" in err, err)
+code, _, err = run(a.cmd_recipe, "remove", "nothing-here")
+check("recipe remove refuses an unknown id", code == 1 and "No recipe of yours" in err, err)
+Path(a.models_dir()).mkdir(parents=True, exist_ok=True)
+Path(a.model_manifest_path("my-model")).write_text(json.dumps({"recipe": {"name": "My model"}}))
+code, _, err = run(a.cmd_recipe, "remove", "my-model")
+check("recipe remove of an in-use recipe fails naming the model", code == 1 and "my-model (My model)" in err and os.path.isfile(os.path.join(a.user_recipes_dir(), "my-model.toml")), err)
+code, _, err = run(a.cmd_recipe, "add", good)
+check("recipe add over an in-use recipe fails naming the model too", code == 1 and "my-model (My model)" in err, err)
+os.unlink(a.model_manifest_path("my-model"))
+code, _, err = run(a.cmd_recipe, "remove", "my-model")
+check("recipe remove of an unused recipe succeeds", code == 0 and not os.path.exists(os.path.join(a.user_recipes_dir(), "my-model.toml")) and "my-model" not in a.load_catalog().recipes, err)
+
+# variant sources
+for source, ok in (("measured", True), ("estimated", True), ("drafted", True), ("guessed", False)):
+  errors = a.validate_recipe("x", tomllib.loads(variants_as(curated_text, source)), a.load_catalog().runtimes, os.environ["ENGINE_ROOT"], user=True)
+  check(f"a variant source of '{source}' is {'accepted' if ok else 'rejected'}", (not errors) == ok, "\n".join(errors))
+check("a variant without a source is measured", a.fits(variant, profile, gpu)[0] and a.fits(dict(variant, source="measured"), profile, gpu)[0])
+drafted_fit = a.fits(dict(variant, source="drafted"), profile, gpu, "model")
+check("a drafted variant never counts as fitting", not drafted_fit[0] and "draft" in drafted_fit[1])
+estimated = dict(variant, source="estimated")
+check("an estimated variant doesn't fit before it is confirmed", not a.fits(estimated, profile, gpu, "model")[0] and not a.fits(estimated, profile, gpu)[0])
+est_add = write_mine("est-model", variants_as(curated_text, "estimated"))
+run(a.cmd_recipe, "add", est_add)
+code, out, err = run(a.cmd_recipe, "confirm", "est-model")
+est_cat = a.load_catalog()
+est_variants = est_cat.recipes["est-model"]["variant"]
+check("recipe confirm records the estimated variants once", code == 0 and all(a.variant_key(v) in a.load_confirmed()["est-model"] for v in est_variants), out + err)
+small = dict(est_variants[0], peak_ram_gib=1, peak_gpu_gib=1)
+Path(a.confirmed_path()).write_text(json.dumps({"est-model": [a.variant_key(small)]}))
+check("a confirmed estimated variant fits, one with other numbers doesn't", a.fits(small, profile, gpu, "est-model")[0] and not a.fits(dict(small, peak_ram_gib=2), profile, gpu, "est-model")[0])
+picked, reason = a.pick_variant({"variant": [dict(small, source="drafted")]}, profile, gpu, rid="est-model")
+check("pick_variant skips a drafted variant and says why", picked is None and "draft" in reason, reason)
+code, _, _ = run(a.cmd_recipe, "confirm", curated_id)
+check("recipe confirm only takes a user recipe's estimated variants", code == 1)
+run(a.cmd_recipe, "remove", "est-model")
+check("recipe remove drops the recipe's confirmation", "est-model" not in a.load_confirmed())
+check("recipe with no subcommand prints usage and fails", run(a.cmd_recipe)[0] == 1)
+
 PY

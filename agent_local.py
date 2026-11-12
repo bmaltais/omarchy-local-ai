@@ -110,6 +110,15 @@ def data_dir():
   return os.path.join(home(), ".local", "share", "omarchy", "agent-local")
 
 
+def user_recipes_dir():
+  """Recipes the user added: kept in the state folder, so an engine update or reinstall leaves them."""
+  return os.path.join(state_dir(), "recipes")
+
+
+def confirmed_path():
+  return os.path.join(state_dir(), "recipes-confirmed.json")
+
+
 def config_dir():
   return os.path.join(home(), ".config", "omarchy", "agent-local")
 
@@ -645,9 +654,15 @@ def validate_pair_runtime(where, runtime, run):
 
 ARCHITECTURES = ("dense", "moe")
 INPUTS = ("text", "image")
+# Where a variant's numbers came from. Only the engine's own measuring run writes `measured`; a
+# `drafted` variant (numbers made up or copied) never counts as fitting, and an `estimated` one
+# only after the user has confirmed it once (`recipe confirm`).
+VARIANT_SOURCES = ("measured", "estimated", "drafted")
 
 
-def validate_recipe(rid, recipe, runtimes, root=None):
+def validate_recipe(rid, recipe, runtimes, root=None, user=False):
+  """A user recipe goes through the same rules as a curated one. The one difference: it may omit
+  a hardware entry's `measured` file, which is bench evidence the catalog ships and the user cannot."""
   errors = []
   where = f"recipes/{rid}"
   if not ID_RE.match(rid):
@@ -679,6 +694,8 @@ def validate_recipe(rid, recipe, runtimes, root=None):
       errors.append(f"{where}.hardware[{index}]: needs gpu and ram_class (one of {RAM_CLASSES})")
       continue
     measured = entry.get("measured")
+    if user and measured is None:
+      continue
     if _safe_relpath(measured, f"{where}.hardware[{index}].measured", errors) and root and not os.path.isfile(os.path.join(root, measured)):
       errors.append(f"{where}.hardware[{index}].measured: {measured} is missing")
   artifacts = recipe.get("artifacts", [])
@@ -738,6 +755,8 @@ def validate_recipe(rid, recipe, runtimes, root=None):
         errors.append(f"{at}.{field}: must be a positive number")
     if variant.get("ctx") and runtime and "ctx" not in inputs:
       errors.append(f"{at}: runtime '{runtime_id}' has no ctx input")
+    if variant.get("source", "measured") not in VARIANT_SOURCES:
+      errors.append(f"{at}.source: must be one of {', '.join(VARIANT_SOURCES)}")
   sampling = recipe.get("sampling", {})
   if not isinstance(sampling, dict):
     errors.append(f"{where}.sampling: must be a table")
@@ -835,15 +854,51 @@ def _load_toml_dir(root, sub):
   return items
 
 
+def _user_recipes(directory, curated, runtimes, root):
+  """The recipes in the user's folder: ({id: recipe}, {id: [errors]}). One that fails to load,
+  validate or clashes with a curated id is left out, so a bad file never breaks the rest."""
+  recipes, rejected = {}, {}
+  if not os.path.isdir(directory):
+    return recipes, rejected
+  for name in sorted(os.listdir(directory)):
+    if not name.endswith(".toml"):
+      continue
+    rid = name[:-5]
+    try:
+      with open(os.path.join(directory, name), "rb") as handle:
+        recipe = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+      rejected[rid] = [f"recipes/{rid}: can't be read: {error}"]
+      continue
+    errors = user_recipe_errors(rid, recipe, curated, runtimes, root)
+    if errors:
+      rejected[rid] = errors
+    else:
+      recipes[rid] = recipe
+  return recipes, rejected
+
+
+def user_recipe_errors(rid, recipe, curated, runtimes, root):
+  """Why a recipe can't be a user recipe: a curated id is never shadowed, and the rest is validate_recipe."""
+  if rid in curated:
+    return [f"recipes/{rid}: id clashes with the curated recipe '{rid}'; a user recipe never shadows one, pick another id"]
+  return validate_recipe(rid, recipe, runtimes, root, user=True)
+
+
 class Catalog:
-  def __init__(self, root):
+  def __init__(self, root, user_dir=None):
     self.root = root
     with open(os.path.join(root, "catalog.toml"), "rb") as handle:
       self.meta = tomllib.load(handle)
     self.runtimes = _load_toml_dir(root, "runtimes")
     self.recipes = _load_toml_dir(root, "recipes")
+    self.curated = set(self.recipes)
     with open(os.path.join(root, "best.toml"), "rb") as handle:
       self.best = tomllib.load(handle)
+    # Curated first, then the user's.
+    user, self.user_errors = _user_recipes(user_dir, self.curated, self.runtimes, root) if user_dir else ({}, {})
+    self.recipes.update(user)
+    self.user = set(user)
 
   def errors(self):
     errors = []
@@ -852,14 +907,14 @@ class Catalog:
     for rid, runtime in self.runtimes.items():
       errors += validate_runtime(rid, runtime, self.root)
     for rid, recipe in self.recipes.items():
-      errors += validate_recipe(rid, recipe, self.runtimes, self.root)
+      errors += validate_recipe(rid, recipe, self.runtimes, self.root, user=rid in self.user)
     errors += validate_best(self.best, self.recipes)
     return errors
 
 
-def load_catalog_dir(root):
+def load_catalog_dir(root, user_dir=None):
   try:
-    return Catalog(root)
+    return Catalog(root, user_dir)
   except (OSError, tomllib.TOMLDecodeError) as error:
     raise LocalError(f"Catalog at {root} can't be read: {error}")
 
@@ -867,9 +922,12 @@ def load_catalog_dir(root):
 # ---------------------------------------------------------------- installed catalog
 
 
+def catalog_root():
+  return os.environ.get("OMARCHY_LOCAL_AI_CATALOG", os.path.dirname(os.path.realpath(__file__)))
+
+
 def load_catalog():
-  root = os.environ.get("OMARCHY_LOCAL_AI_CATALOG", os.path.dirname(os.path.realpath(__file__)))
-  catalog = load_catalog_dir(root)
+  catalog = load_catalog_dir(catalog_root(), user_recipes_dir())
   errors = catalog.errors()
   if errors:
     raise LocalError("Catalog failed validation:\n  " + "\n  ".join(errors))
@@ -897,8 +955,28 @@ def qualified(recipe, profile, gpu):
   )
 
 
-def fits(variant, profile, gpu):
+def variant_key(variant):
+  return f"{variant['ctx']}/{variant['peak_ram_gib']:g}/{variant['peak_gpu_gib']:g}"
+
+
+def load_confirmed():
+  """The estimated variants the user confirmed, by recipe id. A key holds the numbers, so a
+  recipe added again with other estimates asks again."""
+  try:
+    with open(confirmed_path()) as handle:
+      confirmed = json.load(handle)
+  except (OSError, ValueError):
+    return {}
+  return confirmed if isinstance(confirmed, dict) else {}
+
+
+def fits(variant, profile, gpu, rid=None):
   """Static fit of a variant on this machine: (ok, reason)."""
+  source = variant.get("source", "measured")
+  if source == "drafted":
+    return False, "its numbers are a draft, not measured; measure it before it counts as fitting"
+  if source == "estimated" and (rid is None or variant_key(variant) not in load_confirmed().get(rid, [])):
+    return False, f"its numbers are estimated; confirm them once with: omarchy agent local recipe confirm {rid or '<id>'}"
   if variant["peak_gpu_gib"] > gpu["memory_gib"]:
     return False, f"needs {variant['peak_gpu_gib']:g} GiB GPU-addressable memory, this GPU has {gpu['memory_gib']:.0f}"
   if variant["peak_ram_gib"] + RESERVE_GIB > profile["ram_gib"]:
@@ -906,7 +984,7 @@ def fits(variant, profile, gpu):
   return True, ""
 
 
-def pick_variant(recipe, profile, gpu, ctx=None):
+def pick_variant(recipe, profile, gpu, ctx=None, rid=None):
   # The largest context first, and at the same context the larger setup (more streams, a bigger
   # prompt cache) where it fits, so a smaller machine falls back to the variant sized for it.
   variants = sorted(recipe.get("variant", []), key=lambda v: (v["ctx"], v["peak_ram_gib"]), reverse=True)
@@ -916,7 +994,7 @@ def pick_variant(recipe, profile, gpu, ctx=None):
       raise LocalError(f"No measured variant with ctx {ctx} (have: {', '.join(str(v['ctx']) for v in recipe.get('variant', []))})")
   reasons = []
   for variant in variants:
-    ok, reason = fits(variant, profile, gpu)
+    ok, reason = fits(variant, profile, gpu, rid)
     if ok:
       return variant, ""
     reasons.append(reason)
@@ -931,7 +1009,7 @@ def compatibility(catalog, rid, profile, gpu, ctx=None):
   if not qualified(recipe, profile, gpu):
     classes = ", ".join(f"{hw.get('gpu')} {hw.get('ram_class')} GB" for hw in recipe.get("hardware", []))
     return None, f"not measured on {gpu['family']} {profile['ram_class']} GB (measured: {classes})"
-  return pick_variant(recipe, profile, gpu, ctx)
+  return pick_variant(recipe, profile, gpu, ctx, rid)
 
 
 def match_class(best, profile, gpu):
@@ -1013,6 +1091,7 @@ def recipe_listing(catalog, profile, running=(), machines=True):
       "publisher": review.get("publisher", ""),
       "vendor": recipe.get("vendor", ""),
       "architecture": recipe.get("architecture", ""),
+      "user": rid in catalog.user,
       "installed": recipe_installed(rid),
       "available": variant is not None,
       "reason": "" if variant else reason,
@@ -1020,6 +1099,7 @@ def recipe_listing(catalog, profile, running=(), machines=True):
       "active": rid in running,
       # What the card shows: the measured footprint, context and speed at a
       # long prompt on this machine class.
+      "source": variant.get("source", "measured") if variant else None,
       "memory_gib": variant["peak_ram_gib"] if variant else None,
       "context": variant["ctx"] if variant else None,
       "decode_tok_s": measured.get("long", {}).get("decode_tok_s"),
@@ -2786,7 +2866,7 @@ def cmd_use(argv):
     if variant is None:
       if not args.unqualified:
         raise LocalError(f"{rid} isn't qualified for this machine: {reason}\nRun with --unqualified to try anyway.")
-      variant, fit_reason = pick_variant(catalog.recipes[rid], profile, gpu, args.ctx)
+      variant, fit_reason = pick_variant(catalog.recipes[rid], profile, gpu, args.ctx, rid)
       if variant is None:
         raise LocalError(f"{rid} doesn't fit: {fit_reason}")
       say(f"Warning: {reason}")
@@ -2975,6 +3055,8 @@ def cmd_list(argv):
   args = parser.parse_args(argv)
   profile = machine_profile()
   catalog = load_catalog()
+  for errors in catalog.user_errors.values():
+    print("Skipped a recipe of yours:\n  " + "\n  ".join(errors), file=sys.stderr)
   rows = recipe_listing(catalog, profile, running_models())
   write_list_cache(rows)
   if args.json:
@@ -2986,7 +3068,7 @@ def cmd_list(argv):
                      for host, there in load_machines().items())
   say(f"This machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}{paired}{machines}")
   for row in rows:
-    marks = [mark for mark, on in (("best", row["best"]), ("running", row["active"]), ("installed", row["installed"])) if on]
+    marks = [mark for mark, on in (("yours", row["user"]), ("best", row["best"]), ("running", row["active"]), ("installed", row["installed"])) if on]
     tier = f" · third-party ({row['publisher']})" if row["tier"] == "third-party" else ""
     say(f"{'●' if row['available'] else '○'} {row['id']}{' [' + ', '.join(marks) + ']' if marks else ''}")
     say(f"    {row['name']} on {row['runtime']}{tier} — {row['summary']}")
@@ -3582,6 +3664,124 @@ def cmd_validate(argv):
   if errors:
     return 1
   say(f"Catalog valid: {len(catalog.recipes)} recipe(s), {len(catalog.runtimes)} runtime(s)")
+  return 0
+
+
+# ---------------------------------------------------------------- user recipes
+#
+# `recipe add` puts a recipe the user wrote in their own folder (user_recipes_dir), where the
+# catalog loads it after the curated ones. It passes the rules a curated recipe does.
+
+
+def _read_recipe_file(path):
+  """The file's recipe, or LocalError saying why not (this is also what `validate` prints)."""
+  rid = os.path.basename(path)[:-5] if path.endswith(".toml") else ""
+  if not rid:
+    raise LocalError(f"{path}: a recipe file is named <id>.toml")
+  try:
+    with open(path, "rb") as handle:
+      return rid, tomllib.load(handle)
+  except OSError as error:
+    raise LocalError(f"{path}: can't be read: {error}")
+  except tomllib.TOMLDecodeError as error:
+    raise LocalError(f"{path}: not valid TOML: {error}")
+
+
+def _check_recipe_file(path):
+  """(id, recipe); raises LocalError listing every error the file has."""
+  rid, recipe = _read_recipe_file(path)
+  root = catalog_root()
+  curated = load_catalog_dir(root)
+  errors = user_recipe_errors(rid, recipe, curated.recipes, curated.runtimes, root)
+  if errors:
+    raise LocalError("\n".join(errors))
+  return rid, recipe
+
+
+def _model_using(rid):
+  """The model set up here from this recipe, as 'id (name)', else None. Models are named by recipe id."""
+  manifest = load_model(rid)
+  if manifest is None and load_installing(rid) is None:
+    return None
+  name = (manifest or {}).get("recipe", {}).get("name")
+  return f"{rid} ({name})" if name else rid
+
+
+def cmd_recipe(argv):
+  subcommands = {"validate": cmd_recipe_validate, "add": cmd_recipe_add, "remove": cmd_recipe_remove,
+                 "confirm": cmd_recipe_confirm, "list": cmd_list}
+  if not argv or argv[0] in ("-h", "--help") or argv[0] not in subcommands:
+    print("Usage: omarchy agent local recipe <validate FILE | add FILE | remove ID | confirm ID | list [--json]>",
+          file=sys.stderr if argv and argv[0] not in ("-h", "--help") else sys.stdout)
+    return 0 if argv and argv[0] in ("-h", "--help") else 1
+  return subcommands[argv[0]](argv[1:])
+
+
+def cmd_recipe_validate(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local recipe validate", description="Check a recipe file and print every error, one per line. Changes nothing.")
+  parser.add_argument("file")
+  args = parser.parse_args(argv)
+  try:
+    rid, _ = _check_recipe_file(args.file)
+  except LocalError as error:
+    print(error)
+    return 1
+  say(f"Recipe {rid} is valid")
+  return 0
+
+
+def cmd_recipe_add(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local recipe add", description="Validate a recipe file, then install it under its id (the file name without .toml).")
+  parser.add_argument("file")
+  args = parser.parse_args(argv)
+  rid, _ = _check_recipe_file(args.file)
+  with Lock():
+    using = _model_using(rid)
+    if using:
+      raise LocalError(f"Recipe {rid} is used by the model {using} set up here; remove it first with: omarchy agent local remove {rid}")
+    with open(args.file) as handle:
+      write_atomic(os.path.join(user_recipes_dir(), f"{rid}.toml"), handle.read())
+  say(f"Added recipe {rid}")
+  return 0
+
+
+def cmd_recipe_remove(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local recipe remove", description="Remove a recipe you added. A model set up from it must be removed first.")
+  parser.add_argument("id")
+  args = parser.parse_args(argv)
+  rid = args.id
+  if not ID_RE.match(rid):
+    raise LocalError("Not a recipe id")
+  path = os.path.join(user_recipes_dir(), f"{rid}.toml")
+  if not os.path.isfile(path):
+    raise LocalError(f"No recipe of yours named '{rid}'" + (" (it is a curated recipe, which can't be removed)" if rid in load_catalog_dir(catalog_root()).recipes else ""))
+  with Lock():
+    using = _model_using(rid)
+    if using:
+      raise LocalError(f"Recipe {rid} is used by the model {using} set up here; remove it first with: omarchy agent local remove {rid}")
+    os.unlink(path)
+    confirmed = load_confirmed()
+    if confirmed.pop(rid, None) is not None:
+      write_atomic(confirmed_path(), json.dumps(confirmed, indent=2) + "\n")
+  say(f"Removed recipe {rid}")
+  return 0
+
+
+def cmd_recipe_confirm(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local recipe confirm", description="Accept the estimated numbers of a recipe's variants, so they count as fitting. Drafted variants can't be confirmed.")
+  parser.add_argument("id")
+  args = parser.parse_args(argv)
+  catalog = load_catalog()
+  if args.id not in catalog.user:
+    raise LocalError(f"No recipe of yours named '{args.id}'")
+  estimated = [v for v in catalog.recipes[args.id].get("variant", []) if v.get("source", "measured") == "estimated"]
+  if not estimated:
+    raise LocalError(f"Recipe {args.id} has no estimated variant to confirm")
+  with Lock():
+    confirmed = load_confirmed()
+    confirmed[args.id] = sorted({variant_key(v) for v in estimated})
+    write_atomic(confirmed_path(), json.dumps(confirmed, indent=2) + "\n")
+  say(f"Confirmed {len(estimated)} estimated variant(s) of {args.id}")
   return 0
 
 
@@ -4915,6 +5115,7 @@ COMMANDS = {
   "link": cmd_link,
   "link-worker": cmd_link_worker,
   "machine": cmd_machine,
+  "recipe": cmd_recipe,
   "share-proxy": cmd_share_proxy,
 }
 
@@ -4932,6 +5133,7 @@ SUMMARIES = {
   "logs": "Show a model's logs, and its other half's on a paired Spark",
   "link": "Show the Spark cabled to this one; 'link setup <peer>' prepares both",
   "machine": "Show the machines models run on over SSH; 'machine add <host>' prepares one",
+  "recipe": "Add your own recipes: validate FILE, add FILE, remove ID, confirm ID, list --json",
 }
 
 
