@@ -196,6 +196,7 @@ Paths are relative to the user's home. JSON caches are atomically replaced.
 | `.local/share/omarchy/agent-local/blobs/`, `models/` | Shared blob store and immutable file sets. |
 | `.config/containers/systemd/omarchy-agent-local-model-<recipe>.container` | Generated unit; shared `omarchy-agent-local.network` defines the internal network. |
 | `.config/omarchy/agent-local/key`, `overlays/` | Private API key and per-recipe client overlays. |
+| `.pi/agent/extensions/omarchy-local.ts` | Pi's standing providers for every model set up or paired, where pi is installed. |
 
 `status.json` is `{models: {<recipe>: <model>}, last, ram_total_gib, best,
 link}`. `last` and `best` may be null. `link` is what the
@@ -246,16 +247,32 @@ catalog without changing running models.
 
 ## Client integration
 
-`overlay pi|opencode [recipe]` requires a running model and prints three lines:
-overlay path, provider ID (`llamacpp`) and recipe/model ID. With no recipe it
+`overlay pi|opencode|qwen [recipe]` requires a running model and prints three lines:
+overlay path, provider ID (`omarchy-local`) and recipe/model ID. With no recipe it
 prefers the last started running model, then another running model. Omarchy's
 `omarchy agent --local` and `--local-model <recipe>` consume this output.
 
 Pi receives a generated TypeScript extension registering the provider; OpenCode
-receives a JSON provider configuration. Both use the model's stable loopback
+receives a JSON provider configuration; Qwen Code, which takes an
+OpenAI-compatible endpoint from flags and its key from the environment,
+receives a JSON file with `baseUrl`, `model`, `name`, `keyFile`,
+`contextWindow` and `maxTokens` for the launcher to read. Both use the model's stable loopback
 endpoint, context and recipe ID, with a file reference or command to read the
 key. Overlays are per recipe so simultaneous launches cannot overwrite each
 other's configuration. The generated files contain no literal key.
+
+Pi also gets a standing extension, `~/.pi/agent/extensions/omarchy-local.ts`,
+which pi loads on every start. It registers the same `omarchy-local` provider
+with every model set up here, each at its own endpoint, and an
+`omarchy-local-<host>` provider with its stored key for each paired host's
+connected models in `network.json`, offline ones included. So plain `pi`, its
+model picker and a default of `omarchy-local/<recipe>` or
+`omarchy-local-<host>/<recipe>` work with no hand-written `models.json`. Every
+status and network write rewrites it when the list has changed, under
+`pi.lock`, and removes it with the last model. It is only written where
+`~/.pi/agent` already exists. A pi overlay lists the rest of its provider's
+models after the launched one, so loading it over the standing extension
+leaves the picker whole.
 
 ## Tailnet sharing
 
@@ -267,7 +284,7 @@ The share proxy (`share-proxy`, run as the `omarchy-agent-local-share.service` u
 
 `network` asks the local tailscaled for its online Linux peers, fetches each one's `models.json` in parallel (4s timeout) and writes `network.json`: `{schema, updated_ms, tailnet, self, hosts, models}`. Models are keyed `host/recipe` and carry the local model fields plus `host`, `dns`, `paired`, `endpoint`, `ram_total_gib`, `last_seen_ms` and `offline`. A host that drops off keeps its models, with `offline` set to `offline` (Tailscale says so) or `unreachable` (online but not answering) and `last_seen_ms` from its last answer. Paired hosts are kept until forgotten; unpaired ones for a week. An online host serving no listing shares nothing and its models go. Listings are untrusted input: only known states, recipe IDs and inputs survive, and text loses control characters.
 
-`overlay pi|opencode <host>/<recipe>` writes the same overlays for a paired host's running model, with provider `llamacpp-<host>`, the tailnet endpoint and the stored key file, so `omarchy agent --local-model <host>/<recipe>` launches against it.
+`overlay pi|opencode <host>/<recipe>` writes the same overlays for a paired host's running model, with provider `omarchy-local-<host>`, the tailnet endpoint and the stored key file, so `omarchy agent --local-model <host>/<recipe>` launches against it.
 
 The agents panel watches `network.json` and runs `network --write` when it opens and every 20 seconds while it stays open. Each network model gets a line beside the local ones: pair while unpaired, start/stop and launch once paired, and an offline line with the last-seen time while its host is away.
 
