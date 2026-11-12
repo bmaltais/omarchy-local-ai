@@ -994,7 +994,7 @@ check("an address stays whole as a machine's name", a.short_host("dhh@100.90.162
 # The agents panel pairs with no terminal (stdin here is the test script), so
 # ssh must ask nothing: a prompt would wait forever. A new host's key is taken.
 with patch.object(a.subprocess, "run", return_value=subprocess.CompletedProcess([], 255, "", "Host key verification failed.\n")) as run:
-  raises("pairing with a host whose key changed says how to forget the old one", lambda: a.cmd_pair(["alice@new"]), "ssh-keygen -R alice@new")
+  raises("pairing with a host whose key changed says how to forget the old one, by host alone", lambda: a.cmd_pair(["alice@new.tail1234.ts.net"]), "ssh-keygen -R new.tail1234.ts.net")
 check("pairing without a terminal asks ssh for no prompts and takes a new host's key", {"BatchMode=yes", "StrictHostKeyChecking=accept-new"} <= set(run.call_args[0][0]), repr(run.call_args[0][0]))
 a.write_atomic(a.remote_key_path("away"), "k" * 32, mode=0o600)
 a.write_atomic(os.path.join(a.remotes_dir(), "away.json"), json.dumps({"host": "away", "dns": "away.tail.ts.net", "ssh": "away"}))

@@ -4325,7 +4325,8 @@ def cmd_pair(argv):
   if result.returncode == 255 and "Permission denied" in result.stderr:
     raise LocalError(f"{name} refused this machine's SSH keys\nStart the SSH agent that holds your key (like 1Password's), or authorize a key on {target} in Setup > Security")
   if result.returncode == 255 and "Host key verification failed" in result.stderr:
-    raise LocalError(f"{name}'s SSH host key has changed\nIf it was reinstalled, forget its old key with: ssh-keygen -R {target}")
+    # known_hosts keys a host by its name or address, never the login.
+    raise LocalError(f"{name}'s SSH host key has changed\nIf it was reinstalled, forget its old key with: ssh-keygen -R {target.rsplit('@', 1)[-1]}")
   if result.returncode == 255:
     raise LocalError(f"Can't reach {name} over SSH\nTurn on SSHD on {target} in Setup > Security")
   if result.returncode != 0:
