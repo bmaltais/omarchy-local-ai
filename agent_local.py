@@ -4305,9 +4305,9 @@ def cmd_pair(argv):
   result = subprocess.run(ssh_command({"ssh": target, "dns": ""}, "share", "--export", interactive=True), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
   sys.stderr.write(result.stderr)
   if result.returncode == 255 and "Permission denied" in result.stderr:
-    raise LocalError(f"{target} turned down this machine's SSH keys. Start the SSH agent that holds your key (like 1Password's), or authorize a key there in Setup > Security")
+    raise LocalError(f"{target} turned down this machine's SSH keys.\nStart the SSH agent that holds your key (like 1Password's), or authorize a key there in Setup > Security")
   if result.returncode == 255:
-    raise LocalError(f"Can't connect to {target} over SSH. Turn on SSHD there in Setup > Security")
+    raise LocalError(f"Can't connect to {target} over SSH.\nTurn on SSHD there in Setup > Security")
   if result.returncode != 0:
     raise LocalError(f"Can't reach omarchy-agent-local on {target} over SSH")
   try:
@@ -4701,7 +4701,12 @@ def main(argv):
   try:
     return COMMANDS[command](argv)
   except LocalError as error:
-    print(f"Error: {error}", file=sys.stderr)
+    # On a terminal the error ends output from ssh, podman and the like, so it
+    # gets a line of space and a red label to stand apart from it.
+    if sys.stderr.isatty():
+      print(f"\n\033[1;31mError:\033[0m {error}", file=sys.stderr)
+    else:
+      print(f"Error: {error}", file=sys.stderr)
     return 1
   except KeyboardInterrupt:
     return 130
