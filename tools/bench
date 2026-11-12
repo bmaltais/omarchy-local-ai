@@ -1,19 +1,16 @@
 #!/usr/bin/python3
 """Maintainer benchmark: run from a checkout against an already running model."""
 import argparse
-import json
 import os
 import re
 import subprocess
 import sys
-import threading
 import time
-import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, ROOT)
 from agent_local import (LocalError, resolve_model, key_path, choose_gpu, machine_profile,
-                         free_memory, say, meminfo, gib, _read, endpoint, write_atomic)
+                         MemorySampler, say, meminfo, gib, _read, write_atomic, toml_dumps, run_bench)
 
 
 # The machine the numbers came from. On AMD the kernel carries the GPU driver; an NVIDIA driver
@@ -48,99 +45,6 @@ def system_name():
   return " ".join(part for part in (vendor, product) if part)
 
 
-def _toml_value(value):
-  if isinstance(value, bool):
-    return "true" if value else "false"
-  if isinstance(value, (int, float)):
-    return repr(value)
-  if isinstance(value, str):
-    return json.dumps(value, ensure_ascii=False)
-  if isinstance(value, list):
-    return "[" + ", ".join(_toml_value(item) for item in value) + "]"
-  if isinstance(value, dict):
-    return "{ " + ", ".join(f"{_toml_key(k)} = {_toml_value(v)}" for k, v in value.items() if v is not None) + " }"
-  raise TypeError(f"cannot write {type(value).__name__} to TOML")
-
-
-def _toml_key(key):
-  return key if re.match(r"^[A-Za-z0-9_-]+$", key) else json.dumps(key)
-
-
-def toml_dumps(data, prefix=""):
-  scalars, tables, arrays = [], [], []
-  for key, value in data.items():
-    if value is None:
-      continue
-    if isinstance(value, dict):
-      tables.append((key, value))
-    elif isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
-      arrays.append((key, value))
-    else:
-      scalars.append(f"{_toml_key(key)} = {_toml_value(value)}")
-  out = "\n".join(scalars)
-  for key, value in tables:
-    name = f"{prefix}{_toml_key(key)}"
-    out += f"\n\n[{name}]\n" + toml_dumps(value, name + ".")
-  for key, items in arrays:
-    name = f"{prefix}{_toml_key(key)}"
-    for item in items:
-      out += f"\n\n[[{name}]]\n" + toml_dumps(item, name + ".")
-  return out.strip("\n") + ("\n" if prefix == "" else "")
-
-
-BENCH_SHORT = "Write a bash function that prints the 20 largest files under a directory, human-readable sizes, handling spaces in names. Just the code."
-BENCH_LONG_QUESTION = "Above are shell scripts from a Linux desktop project. Pick the one with the most fragile error handling, name it, and rewrite its worst function to be robust. Show the code."
-# An agent's everyday edit: the reply is mostly a copy of the file, which is
-# where speculative decoding and prompt lookup pay off.
-BENCH_EDIT_QUESTION = "Rename the function `ensure_dir` to `make_dir` everywhere in the file above. Reply with the complete updated file and nothing else."
-
-
-def bench_request(prompt, model, key, max_tokens=512):
-  body = {
-    "model": model,
-    "messages": [{"role": "user", "content": prompt}],
-    "max_tokens": max_tokens,
-    "temperature": 0,
-    "stream": True,
-    "stream_options": {"include_usage": True},
-    "chat_template_kwargs": {"enable_thinking": False},
-  }
-  request = urllib.request.Request(
-    f"{endpoint(model)}/chat/completions",
-    data=json.dumps(body).encode(),
-    headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-  )
-  start = time.monotonic()
-  first = None
-  usage = None
-  chunks = 0
-  with urllib.request.urlopen(request, timeout=1800) as response:
-    for raw in response:
-      line = raw.decode(errors="replace").strip()
-      if not line.startswith("data:") or line[5:].strip() == "[DONE]":
-        continue
-      event = json.loads(line[5:])
-      usage = event.get("usage") or usage
-      for choice in event.get("choices", []):
-        delta = choice.get("delta", {})
-        if delta.get("content") or delta.get("reasoning_content"):
-          first = first or time.monotonic()
-          chunks += 1
-  end = time.monotonic()
-  prompt_tokens = (usage or {}).get("prompt_tokens")
-  completion = (usage or {}).get("completion_tokens", chunks)
-  ttft = (first or end) - start
-  decode = end - (first or end)
-  return {
-    "prompt_tokens": prompt_tokens,
-    "completion_tokens": completion,
-    "ttft_s": round(ttft, 2),
-    "prefill_tok_s": round(prompt_tokens / ttft, 1) if prompt_tokens and ttft else None,
-    "decode_tok_s": round((completion - 1) / decode, 1) if decode > 0 and completion > 1 else None,
-    "total_s": round(end - start, 2),
-  }
-
-
 def cmd_bench(argv):
   parser = argparse.ArgumentParser(prog="tools/bench")
   parser.add_argument("recipe", nargs="?", help="the running model (default: the last one started)")
@@ -156,30 +60,12 @@ def cmd_bench(argv):
     key = handle.read().strip()
   rid = active["recipe_id"]
   gpu = choose_gpu(machine_profile(), active["gpu"])
-  low_ram = [free_memory(gpu)[0]]
-  stop = threading.Event()
-
-  def sample():
-    while not stop.is_set():
-      low_ram.append(free_memory(gpu)[0])
-      stop.wait(0.5)
-
-  sampler = threading.Thread(target=sample, daemon=True)
+  sampler = MemorySampler(gpu)
   sampler.start()
   try:
-    say(f"Benchmarking {rid}: short prompt, ~32K-token prompt and a code edit (greedy, thinking off, 512 tokens out)")
-    bench_request("Say ok.", rid, key, max_tokens=8)
-    short = bench_request(BENCH_SHORT, rid, key)
-    say(f"  short: decode {short['decode_tok_s']} tok/s, first token {short['ttft_s']}s")
-    long = bench_request(context + "\n\n" + BENCH_LONG_QUESTION, rid, key)
-    say(f"  long ({long['prompt_tokens']} tokens): first token {long['ttft_s']}s, prefill {long['prefill_tok_s']} tok/s, decode {long['decode_tok_s']} tok/s")
-    with open(os.path.join(ROOT, "bench", "edit.py.txt"), encoding="utf-8") as handle:
-      code = handle.read()
-    edit = bench_request("```python\n" + code + "```\n\n" + BENCH_EDIT_QUESTION, rid, key)
-    say(f"  edit ({edit['prompt_tokens']} tokens): decode {edit['decode_tok_s']} tok/s")
+    short, long, edit = run_bench(rid, key, context, after_request=sampler.sample)
   finally:
-    stop.set()
-    sampler.join()
+    sampler.stop()
   mem = meminfo()
   pins = []
   for f in active["files"]:
@@ -203,7 +89,7 @@ def cmd_bench(argv):
     },
     "memory": {
       "observed_at_load_gib": (active.get("observed") or {}).get("ram_used_gib"),
-      "min_available_during_bench_gib": round(min(low_ram), 1),
+      "min_available_during_bench_gib": round(sampler.low_ram, 1),
       "total_gib": round(gib(mem.get("MemTotal", 0)), 1),
     },
     "load_seconds": (active.get("observed") or {}).get("load_seconds"),
