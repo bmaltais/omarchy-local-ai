@@ -153,8 +153,8 @@ check("an N1x laptop has a unified NVIDIA GPU of its own family", n1x["ram_class
 spark = dict(recipe, hardware=[{"gpu": "nvidia-gb10", "ram_class": 128, "measured": "measurements/model.toml"}])
 check("an N1x runs what a GB10 with the same memory runs", a.qualified(spark, n1x, n1x["gpus"][0]) and a.match_class({"class": [dict(entry, gpu="nvidia-gb10", ram_class=128)]}, n1x, n1x["gpus"][0]) is not None)
 check("best treats the N1x and GB10 as one class", any("same selectors" in e for e in a.validate_best({"class": [dict(entry, gpu="nvidia-gb10", ram_class=128, recipes=["spark"]), dict(entry, gpu="nvidia-n1x", ram_class=128, recipes=["spark"])]}, {"spark": spark})))
-check("GPU peak exceeding capacity does not fit", not a.fits(dict(variant, peak_gpu_gib=49), profile, gpu)[0])
-check("RAM fit preserves desktop reserve", not a.fits(dict(variant, peak_ram_gib=57), profile, gpu)[0])
+check("GPU peak exceeding capacity does not fit", not a.fits(dict(variant, peak_gpu_gib=49), profile, gpu, "model")[0])
+check("RAM fit preserves desktop reserve", not a.fits(dict(variant, peak_ram_gib=57), profile, gpu, "model")[0])
 with patch.object(a, "free_memory", return_value=(1, 1)), patch.object(a, "top_memory_users", return_value="browser (12 GiB), editor (4 GiB)"), patch.object(a.time, "sleep"):
   raises("headroom failure lists largest memory users", lambda: a.check_headroom(variant, gpu), "browser (12 GiB), editor (4 GiB)")
 
@@ -1284,7 +1284,7 @@ def variants_as(text, source):
   return re.sub(r"(\[\[variant\]\]\n)", rf'\1source = "{source}"\n', text)
 
 
-good = write_mine("my-model", curated_text)
+good = write_mine("my-model", variants_as(curated_text, "estimated"))
 check("the user recipe folder lives in the state dir beside models and machines", a.user_recipes_dir() == os.path.join(a.state_dir(), "recipes"))
 code, out, err = run(a.cmd_recipe, "validate", good)
 check("recipe validate accepts a good file and installs nothing", code == 0 and not os.path.exists(a.user_recipes_dir()), out + err)
@@ -1311,7 +1311,7 @@ check("a user file with a curated id is skipped and never shadows", shadowed.rec
 shadow.unlink()
 
 # an invalid recipe gets the errors validate_recipe gives a curated one
-broken = curated_text.replace('revision = "', 'revision = "z', 1)
+broken = variants_as(curated_text, "estimated").replace('revision = "', 'revision = "z', 1)
 bad = write_mine("bad-one", broken)
 expected = a.validate_recipe("bad-one", tomllib.loads(broken), a.load_catalog().runtimes, os.environ["ENGINE_ROOT"], user=True)
 code, out, _ = run(a.cmd_recipe, "validate", bad)
@@ -1355,11 +1355,11 @@ check("recipe remove of an unused recipe succeeds", code == 0 and not os.path.ex
 for source, ok in (("measured", True), ("estimated", True), ("drafted", True), ("guessed", False)):
   errors = a.validate_recipe("x", tomllib.loads(variants_as(curated_text, source)), a.load_catalog().runtimes, os.environ["ENGINE_ROOT"], user=True)
   check(f"a variant source of '{source}' is {'accepted' if ok else 'rejected'}", (not errors) == ok, "\n".join(errors))
-check("a variant without a source is measured", a.fits(variant, profile, gpu)[0] and a.fits(dict(variant, source="measured"), profile, gpu)[0])
+check("a variant without a source is measured", a.fits(variant, profile, gpu, "model")[0] and a.fits(dict(variant, source="measured"), profile, gpu, "model")[0])
 drafted_fit = a.fits(dict(variant, source="drafted"), profile, gpu, "model")
 check("a drafted variant never counts as fitting", not drafted_fit[0] and "draft" in drafted_fit[1])
 estimated = dict(variant, source="estimated")
-check("an estimated variant doesn't fit before it is confirmed", not a.fits(estimated, profile, gpu, "model")[0] and not a.fits(estimated, profile, gpu)[0])
+check("an estimated variant doesn't fit before it is confirmed", not a.fits(estimated, profile, gpu, "model")[0])
 est_add = write_mine("est-model", variants_as(curated_text, "estimated"))
 run(a.cmd_recipe, "add", est_add)
 code, out, err = run(a.cmd_recipe, "confirm", "est-model")
@@ -1369,8 +1369,81 @@ check("recipe confirm records the estimated variants once", code == 0 and all(a.
 small = dict(est_variants[0], peak_ram_gib=1, peak_gpu_gib=1)
 Path(a.confirmed_path()).write_text(json.dumps({"est-model": [a.variant_key(small)]}))
 check("a confirmed estimated variant fits, one with other numbers doesn't", a.fits(small, profile, gpu, "est-model")[0] and not a.fits(dict(small, peak_ram_gib=2), profile, gpu, "est-model")[0])
-picked, reason = a.pick_variant({"variant": [dict(small, source="drafted")]}, profile, gpu, rid="est-model")
+picked, reason = a.pick_variant({"variant": [dict(small, source="drafted")]}, profile, gpu, None, "est-model")
 check("pick_variant skips a drafted variant and says why", picked is None and "draft" in reason, reason)
+# every path a user recipe reaches counts a confirmed estimated variant as fitting
+big = dict(profile, ram_class=128, ram_gib=128)
+est_recipe = est_cat.recipes["est-model"]
+Path(a.confirmed_path()).write_text(json.dumps({"est-model": sorted({a.variant_key(v) for v in est_recipe["variant"]})}))
+est_gpu = a.recipe_gpu(big, est_recipe)
+check("a confirmed estimated variant fits through fits", a.fits(est_recipe["variant"][0], big, est_gpu, "est-model")[0])
+check("a confirmed estimated variant fits through pick_variant", a.pick_variant(est_recipe, big, est_gpu, None, "est-model")[0] is not None)
+check("a confirmed estimated variant fits through compatibility", a.compatibility(est_cat, "est-model", big, est_gpu)[0] is not None)
+est_cat.best = {"class": [{"gpu": est_gpu["family"], "ram_class": 128, "recipes": ["est-model"]}]}
+check("a confirmed estimated variant fits through resolve_best", a.resolve_best(est_cat, big, est_gpu)[0] == "est-model")
+with patch.object(a, "machine_profile", return_value=big), patch.object(a, "running_models", return_value=set()), patch.object(a, "load_machines", return_value={}):
+  code, out, err = run(a.cmd_recipe, "list", "--json")
+check("a confirmed estimated variant is available through recipe list", {r["id"]: r for r in json.loads(out)}["est-model"]["available"] is True, out + err)
+check("a confirmed estimated variant runs here through runs_on", a.runs_on(est_cat, "est-model", big))
+Path(a.confirmed_path()).write_text("{}")
+check("an unconfirmed estimated variant fits through none of them", a.compatibility(est_cat, "est-model", big, est_gpu)[0] is None and not a.runs_on(est_cat, "est-model", big))
+try:
+  a.fits(estimated, profile, gpu)
+except TypeError:
+  check("fits can't be called without a rid", True)
+else:
+  check("fits can't be called without a rid", False)
+
+# a confirmation is keyed by a stable form of the numbers
+toml_a = tomllib.loads("ctx = 4096\npeak_ram_gib = 0.1\npeak_gpu_gib = 16\n")
+toml_b = tomllib.loads("ctx = 4096\npeak_ram_gib = 0.10\npeak_gpu_gib = 16.0\n")
+check("0.1 and 0.10 give one variant key", a.variant_key(toml_a) == a.variant_key(toml_b))
+check("a real change, however small, changes the key", a.variant_key(dict(toml_a, peak_ram_gib=12.3456781)) != a.variant_key(dict(toml_a, peak_ram_gib=12.3456782)))
+
+# recipe add: one read, the same bytes validated and written, no symlinks, no claimed measurements
+for label, text in (("measured", variants_as(curated_text, "measured")), ("no source", curated_text)):
+  claim = write_mine("claims", text)
+  code, out, err = run(a.cmd_recipe, "add", claim)
+  check(f"recipe add rejects a variant with {label}, pointing at estimated or drafted", code == 1 and 'source = "estimated"' in err and '"drafted"' in err and not os.path.exists(os.path.join(a.user_recipes_dir(), "claims.toml")), err)
+  code, out, err = run(a.cmd_recipe, "validate", claim)
+  check(f"recipe validate says the same for {label}", code == 1 and 'source = "estimated"' in out, out)
+code, _, _ = run(a.cmd_recipe, "add", write_mine("drafty", variants_as(curated_text, "drafted")))
+check("recipe add accepts drafted", code == 0)
+run(a.cmd_recipe, "remove", "drafty")
+swap_good = variants_as(curated_text, "estimated")
+swap_path = write_mine("swapped", swap_good)
+opened = []
+real_open = os.open
+def counting_open(path, *args, **kwargs):
+  if str(path) == swap_path:
+    opened.append(path)
+    fd = real_open(path, *args, **kwargs)
+    Path(swap_path + ".new").write_text(curated_text)
+    os.replace(swap_path + ".new", swap_path)  # swapped right after the open
+    return fd
+  return real_open(path, *args, **kwargs)
+with patch.object(os, "open", counting_open):
+  code, out, err = run(a.cmd_recipe, "add", swap_path)
+installed = Path(a.user_recipes_dir(), "swapped.toml")
+check("recipe add opens the file once", len(opened) == 1, str(opened))
+check("recipe add installs exactly the bytes it validated", code == 0 and installed.read_text() == swap_good, err)
+run(a.cmd_recipe, "remove", "swapped")
+link = mine / "linked.toml"
+link.symlink_to(swap_path)
+code, _, err = run(a.cmd_recipe, "add", str(link))
+check("recipe add refuses a symlink source", code == 1 and "symlink" in err and not os.path.exists(os.path.join(a.user_recipes_dir(), "linked.toml")), err)
+
+# update survival: a fresh engine copy in a new place sees the same user recipes and confirmations
+fresh_engine = Path(os.environ["HOME"]) / "engine-after-update"
+subprocess.run(["cp", "-r", os.environ["ENGINE_ROOT"], str(fresh_engine)], check=True)
+subprocess.run(["rm", "-rf", str(fresh_engine / ".git")], check=True)
+Path(a.confirmed_path()).write_text(json.dumps({"est-model": ["k"]}))
+with patch.dict(os.environ, {"OMARCHY_LOCAL_AI_CATALOG": str(fresh_engine)}):
+  after = a.load_catalog()
+  check("user recipes and confirmations survive an engine update", "est-model" in after.user and a.load_confirmed() == {"est-model": ["k"]})
+check("neither lives under the engine's folder", not a.state_dir().startswith(os.environ["ENGINE_ROOT"]) and a.confirmed_path().startswith(a.state_dir()) and a.user_recipes_dir().startswith(a.state_dir()))
+Path(a.confirmed_path()).write_text("{}")
+
 code, _, _ = run(a.cmd_recipe, "confirm", curated_id)
 check("recipe confirm only takes a user recipe's estimated variants", code == 1)
 run(a.cmd_recipe, "remove", "est-model")

@@ -82,14 +82,17 @@ in the folder that fails validation is skipped (and reported by `recipe list`), 
 | Command | Effect |
 | --- | --- |
 | `recipe validate FILE` | Prints every error, one per line, exit 1 if any; changes nothing. The id is the file name without `.toml`. |
-| `recipe add FILE` | Validates, then installs under the id. Replaces a recipe of yours, unless a model set up here uses it. |
+| `recipe add FILE` | Reads the file once, validates those bytes, and installs those same bytes under the id. Refuses a symlink, and a variant with `source = "measured"` or no source. Replaces a recipe of yours, unless a model set up here uses it. |
 | `recipe remove ID` | Removes a recipe of yours. Refuses a curated one, and one a model set up here uses, naming the model. |
-| `recipe confirm ID` | Accepts the numbers of the recipe's `estimated` variants (kept in `recipes-confirmed.json`, keyed by the numbers). |
+| `recipe confirm ID` | Accepts the numbers of the recipe's `estimated` variants (kept in `recipes-confirmed.json`, keyed by the numbers; see State). |
 | `recipe list [--json]` | Same as `list`; every row has `user` (true for yours) and `source` of the variant it would run. |
 
 A `[[variant]]` has an optional `source`: `measured` (the default; curated recipes are unchanged),
 `estimated` or `drafted`. A `drafted` variant never counts as fitting. An `estimated` one counts only
-after `recipe confirm`. The engine's measuring run writes `measured` numbers; nothing else should.
+after `recipe confirm`. The engine's measuring run writes `measured` numbers; `recipe add` and
+`recipe validate` therefore reject a variant of yours with `source = "measured"` or no `source`, and say to
+set `source = "estimated"` or `"drafted"`. That is a guard against a mistake, not a security
+boundary: the folder is yours, and a file you place there by hand is read as written.
 
 ## Lifecycle
 
@@ -205,6 +208,7 @@ Paths are relative to the user's home. JSON caches are atomically replaced.
 | Path | Purpose |
 | --- | --- |
 | `.local/state/omarchy/agent-local/models/<recipe>.json` | One current resolved manifest: schema, recipe/runtime IDs and definitions, profile, GPU, variant, image, files, roles, required fileset, creation time, optional observations and unchecked flag. Its existence means installed. |
+| `.local/state/omarchy/agent-local/recipes/<id>.toml`, `recipes-confirmed.json` | The recipes you added, and the `estimated` variants you confirmed: `{"<id>": ["<ctx>/<peak_ram_gib>/<peak_gpu_gib>", ...]}`, the numbers written as Python's `repr` of the float, so `0.1` and `0.10` are one number and any real change asks for a new confirmation. Both live in the state folder, which an engine update never touches. |
 | `.local/state/omarchy/agent-local/status.json` | Current model state and recommendation; shape below. |
 | `.local/state/omarchy/agent-local/list.json` | Array of recipe cards; shape below. |
 | `.local/state/omarchy/agent-local/ports.json`, `last` | Stable port assignments and last started recipe. |
