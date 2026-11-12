@@ -4300,7 +4300,12 @@ def cmd_pair(argv):
       say(f"Paired with {remote['host']}/{args.recipe}")
       return 0
   say(f"Pairing with {target} over SSH")
-  result = subprocess.run(ssh_command({"ssh": target, "dns": ""}, "share", "--export", interactive=True), stdout=subprocess.PIPE, text=True)
+  # ssh exits 255 both when nothing answers and when sshd turns down every key
+  # offered, so its stderr tells the two apart. Prompts go to the tty, not here.
+  result = subprocess.run(ssh_command({"ssh": target, "dns": ""}, "share", "--export", interactive=True), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+  sys.stderr.write(result.stderr)
+  if result.returncode == 255 and "Permission denied" in result.stderr:
+    raise LocalError(f"{target} turned down this machine's SSH keys. Start the SSH agent that holds your key (like 1Password's), or authorize a key there in Setup > Security")
   if result.returncode == 255:
     raise LocalError(f"Can't connect to {target} over SSH. Turn on SSHD there in Setup > Security")
   if result.returncode != 0:
