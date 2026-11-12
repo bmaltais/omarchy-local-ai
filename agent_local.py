@@ -4269,11 +4269,24 @@ def resolve_remote(mid, running_only=True):
   raise LocalError(f"{host} doesn't share {rid}")
 
 
+def short_host(target):
+  """An SSH target as people call the machine: no user, no tailnet domain.
+  An address stays whole."""
+  host = target.rsplit("@", 1)[-1]
+  try:
+    ipaddress.ip_address(host)
+    return host
+  except ValueError:
+    return host.split(".")[0]
+
+
 def ssh_command(remote, *argv, interactive=False):
   target = remote.get("ssh") or remote["dns"]
   if not SSH_TARGET_RE.match(target):
     raise LocalError("Not an SSH target")
-  options = ["-o", "ConnectTimeout=10"] + ([] if interactive else ["-o", "BatchMode=yes"])
+  # A host met for the first time is trusted on sight, as the tailnet vouches
+  # for who it is; one whose key has changed since is still refused.
+  options = ["-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new"] + ([] if interactive else ["-o", "BatchMode=yes"])
   return ["ssh", *options, "--", target, shlex.join(["omarchy-agent-local", *argv])]
 
 
@@ -4301,22 +4314,30 @@ def cmd_pair(argv):
       return 0
   say(f"Pairing with {target} over SSH")
   # ssh exits 255 both when nothing answers and when sshd turns down every key
-  # offered, so its stderr tells the two apart. Prompts go to the tty, not here.
-  result = subprocess.run(ssh_command({"ssh": target, "dns": ""}, "share", "--export", interactive=True), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+  # offered, so its stderr tells the two apart. On a terminal a key's
+  # passphrase can be asked for there; without one (the agents panel pairs this
+  # way) nothing can answer a prompt, so ssh asks none.
+  result = subprocess.run(ssh_command({"ssh": target, "dns": ""}, "share", "--export", interactive=sys.stdin.isatty()), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
   sys.stderr.write(result.stderr)
+  # The agents panel shows an error's first line on the model's line, so that
+  # line names the machine short and fits there; the next says what to do.
+  name = short_host(target)
   if result.returncode == 255 and "Permission denied" in result.stderr:
-    raise LocalError(f"{target} turned down this machine's SSH keys.\nStart the SSH agent that holds your key (like 1Password's), or authorize a key there in Setup > Security")
+    raise LocalError(f"{name} refused this machine's SSH keys\nStart the SSH agent that holds your key (like 1Password's), or authorize a key on {target} in Setup > Security")
+  if result.returncode == 255 and "Host key verification failed" in result.stderr:
+    # known_hosts keys a host by its name or address, never the login.
+    raise LocalError(f"{name}'s SSH host key has changed\nIf it was reinstalled, forget its old key with: ssh-keygen -R {target.rsplit('@', 1)[-1]}")
   if result.returncode == 255:
-    raise LocalError(f"Can't connect to {target} over SSH.\nTurn on SSHD there in Setup > Security")
+    raise LocalError(f"Can't reach {name} over SSH\nTurn on SSHD on {target} in Setup > Security")
   if result.returncode != 0:
-    raise LocalError(f"Can't reach omarchy-agent-local on {target} over SSH")
+    raise LocalError(f"Can't run omarchy-agent-local on {name}")
   try:
     export = json.loads(result.stdout.strip().splitlines()[-1])
     host, dns, key = export["host"], export["dns"], export["key"]
   except (ValueError, KeyError, IndexError, TypeError):
-    raise LocalError(f"{target} answered with something other than its sharing details")
+    raise LocalError(f"{name} didn't send its sharing details")
   if not HOST_RE.match(str(host)) or not DNS_RE.match(str(dns)) or not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key):
-    raise LocalError(f"{target} answered with an invalid host name or key")
+    raise LocalError(f"{name} sent an invalid host name or key")
   with remotes_lock():
     write_atomic(remote_key_path(host), key, mode=0o600)
     # The same host reached by another name keeps the models it connects.
