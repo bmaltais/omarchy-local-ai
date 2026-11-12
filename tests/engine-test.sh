@@ -1043,10 +1043,14 @@ check("disconnecting the only model of a one-at-a-time pairing unpairs the host"
 # The same host reached by another SSH name keeps what it connects.
 pair_away(models=["other-model"])
 export = json.dumps({"host": "away", "dns": "away.tail.ts.net", "key": "n" * 32})
-with patch.object(a.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, export + "\n")), patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
+with patch.object(a.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, export + "\n", "")), patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "fetch_listing", side_effect=lambda dns: answers[dns]):
   a.cmd_pair(["alice@away", "small-model"])
 again = a.load_remotes()["away"]
 check("pairing a host again under another name adds to its models", again["models"] == ["other-model", "small-model"] and again["ssh"] == "alice@away")
+# sshd answering but refusing every key isn't sshd being off: an agent left
+# unstarted offers no key at all.
+with patch.object(a.subprocess, "run", return_value=subprocess.CompletedProcess([], 255, "", "alice@new: Permission denied (publickey).\n")):
+  raises("pairing with a host that refuses this machine's keys points at the SSH agent", lambda: a.cmd_pair(["alice@new"]), "SSH agent")
 a.write_atomic(a.remote_key_path("away"), "k" * 32, mode=0o600)
 a.write_atomic(os.path.join(a.remotes_dir(), "away.json"), json.dumps({"host": "away", "dns": "away.tail.ts.net", "ssh": "away"}))
 raises("a network model is named host/recipe", lambda: a.split_remote_id("box/../x"), "host/recipe")
