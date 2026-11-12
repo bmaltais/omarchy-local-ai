@@ -85,7 +85,20 @@ in the folder that fails validation is skipped (and reported by `recipe list`), 
 | `recipe add FILE` | Validates, then installs under the id. Replaces a recipe of yours, unless a model set up here uses it. |
 | `recipe remove ID` | Removes a recipe of yours. Refuses a curated one, and one a model set up here uses, naming the model. |
 | `recipe confirm ID` | Accepts the numbers of the recipe's `estimated` variants (kept in `recipes-confirmed.json`, keyed by the numbers). |
+| `measure ID --ctx N [--yes]` | Sets the recipe up if needed, loads it at that context, runs the bench, and rewrites that context's `[[variant]]` with the observed `peak_ram_gib`, `peak_gpu_gib`, `decode_tok_s`, `prefill_tok_s` (long prompt) and `measured_at`, `source = "measured"`. See below. |
+| `use ID --yes` | A recipe of yours needs `--yes` to be set up; the check is in the CLI, so an agent can't skip it. |
 | `recipe list [--json]` | Same as `list`; every row has `user` (true for yours) and `source` of the variant it would run. |
+
+`measure` works on your own recipes only (a curated one is refused: its numbers are evidence the
+catalog ships) and needs a `[[variant]]` with that `ctx` to replace (a `drafted` or `estimated` one, or
+a `measured` one to measure again). Without `--yes` it prints the download size and what it would
+load, and changes nothing. With it, it holds the engine lock through the load and the bench, stops
+the model first if it runs, and leaves it running at that context. Peak RAM is the free memory
+before the load minus the lowest seen from the load through the bench (sampled twice a second and
+after each request); peak GPU is the same from the driver's counter, or the RAM peak on a
+unified-memory GPU that has none. The long prompt is cut to fit the context. The recipe is rewritten
+atomically only after the whole run succeeded, as TOML written by the engine (comments in the file
+are not kept); a failed load or bench leaves the file byte-identical. Paired recipes aren't covered.
 
 A `[[variant]]` has an optional `source`: `measured` (the default; curated recipes are unchanged),
 `estimated` or `drafted`. A `drafted` variant never counts as fitting. An `estimated` one counts only
@@ -310,6 +323,6 @@ The share proxy (`share-proxy`, run as the `omarchy-agent-local-share.service` u
 The agents panel watches `network.json` and runs `network --write` when it opens and every 20 seconds while it stays open. Each network model gets a line beside the local ones: pair while unpaired, start/stop and launch once paired, and an offline line with the last-seen time while its host is away.
 
 Maintainers run [tools/bench](../tools/bench) from a checkout against a running
-model. It imports the checkout engine and uses [bench/context.txt](../bench/context.txt)
+model (`measure` runs the same requests, from the engine, for recipes of yours). It imports the checkout engine and uses [bench/context.txt](../bench/context.txt)
 for the long prompt. Measurements remain catalog evidence; the benchmark tool
 and prompt corpus do not need to be installed.

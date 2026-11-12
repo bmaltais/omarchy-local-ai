@@ -2846,8 +2846,10 @@ def cmd_use(argv):
   parser.add_argument("--detach", action="store_true", help="set it up in the background; the agents panel shows its progress")
   parser.add_argument("--on", metavar="HOST", help="run it on this machine (default: a machine only for what this one can't run)")
   parser.add_argument("--as-remote", action="store_true", help=argparse.SUPPRESS)
+  parser.add_argument("--yes", action="store_true", help="confirm setting up a recipe of your own (it downloads and runs what you wrote)")
   args = parser.parse_args(argv)
   catalog = load_catalog()
+  require_yes_for_user_recipe(catalog, args.target, args.yes)
   profile = machine_profile()
   host = machine_placement(catalog, args.target, profile, args.on)
   if host:
@@ -2855,6 +2857,7 @@ def cmd_use(argv):
   gpu = choose_gpu(profile, args.gpu) if args.gpu else None
   if args.target == "best":
     rid, variant, skipped = resolve_best(catalog, profile, gpu, args.ctx)
+    require_yes_for_user_recipe(catalog, rid, args.yes)
     gpu = recipe_gpu(profile, catalog.recipes[rid], args.gpu)
     for skipped_id, reason in skipped:
       say(f"Skipping {skipped_id}: {reason}")
@@ -2910,6 +2913,14 @@ def cmd_use(argv):
     raise
 
 
+def require_yes_for_user_recipe(catalog, rid, yes):
+  """Setting up a recipe the user wrote needs --yes. The confirmation lives here, in the CLI, so an
+  agent driving it can't skip the step by leaving a prompt unanswered."""
+  if rid in catalog.user and not yes:
+    raise LocalError(f"{rid} is a recipe of yours, so it isn't set up without your say-so: it downloads what the recipe names and runs it.\n"
+                     f"Review it (omarchy agent local measure {rid} --ctx N shows the download size), then run: omarchy agent local use {rid} --yes")
+
+
 def detach_use(rid, args, recipe, measured_load=None):
   """Run the setup as a transient user unit, so it outlives the panel or
   terminal that asked for it; its output goes to the journal."""
@@ -2940,6 +2951,8 @@ def detach_use(rid, args, recipe, measured_load=None):
     command += ["--seed", os.path.abspath(args.seed)]
   if args.unqualified:
     command.append("--unqualified")
+  if getattr(args, "yes", False):
+    command.append("--yes")
   if getattr(args, "on", None):
     command += ["--on", args.on]
   result = subprocess.run(command, capture_output=True, text=True, env=env)
@@ -2952,7 +2965,7 @@ def detach_use(rid, args, recipe, measured_load=None):
   return 0
 
 
-def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=None):
+def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=None, sampler=None):
   recipe = catalog.recipes[rid]
   runtime = catalog.runtimes[recipe["runtime"]]
   if runtime.get("tier") == "third-party":
@@ -3022,6 +3035,9 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
       say(f"{first} play in the agents panel or run: omarchy agent local start {rid}")
       say(f"Manifest: {path}")
       return 0
+  if sampler:
+    # Memory is watched from the load on, after the download and its page cache.
+    sampler.start()
   activate(manifest, recipe, runtime, gpu, key, catalog, profile)
   path = save_model(manifest)
   clear_installing(rid)
@@ -3782,6 +3798,272 @@ def cmd_recipe_confirm(argv):
     confirmed[args.id] = sorted({variant_key(v) for v in estimated})
     write_atomic(confirmed_path(), json.dumps(confirmed, indent=2) + "\n")
   say(f"Confirmed {len(estimated)} estimated variant(s) of {args.id}")
+  return 0
+
+
+# ---------------------------------------------------------------- measuring
+#
+# `measure` is the one place a `measured` variant comes from: it sets the recipe up, loads it at the
+# context asked for, runs the bench (the same requests tools/bench makes), and writes what it
+# watched memory and speed do into that context's [[variant]]. A user recipe only: a curated
+# recipe's numbers are evidence the catalog ships, made by hand with tools/bench.
+
+def _toml_value(value):
+  if isinstance(value, bool):
+    return "true" if value else "false"
+  if isinstance(value, (int, float)):
+    return repr(value)
+  if isinstance(value, str):
+    return json.dumps(value, ensure_ascii=False)
+  if isinstance(value, list):
+    return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+  if isinstance(value, dict):
+    return "{ " + ", ".join(f"{_toml_key(k)} = {_toml_value(v)}" for k, v in value.items() if v is not None) + " }"
+  raise TypeError(f"cannot write {type(value).__name__} to TOML")
+
+
+def _toml_key(key):
+  return key if re.match(r"^[A-Za-z0-9_-]+$", key) else json.dumps(key)
+
+
+def toml_dumps(data, prefix=""):
+  scalars, tables, arrays = [], [], []
+  for key, value in data.items():
+    if value is None:
+      continue
+    if isinstance(value, dict):
+      tables.append((key, value))
+    elif isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+      arrays.append((key, value))
+    else:
+      scalars.append(f"{_toml_key(key)} = {_toml_value(value)}")
+  out = "\n".join(scalars)
+  for key, value in tables:
+    name = f"{prefix}{_toml_key(key)}"
+    out += f"\n\n[{name}]\n" + toml_dumps(value, name + ".")
+  for key, items in arrays:
+    name = f"{prefix}{_toml_key(key)}"
+    for item in items:
+      out += f"\n\n[[{name}]]\n" + toml_dumps(item, name + ".")
+  return out.strip("\n") + ("\n" if prefix == "" else "")
+
+
+BENCH_SHORT = "Write a bash function that prints the 20 largest files under a directory, human-readable sizes, handling spaces in names. Just the code."
+BENCH_LONG_QUESTION = "Above are shell scripts from a Linux desktop project. Pick the one with the most fragile error handling, name it, and rewrite its worst function to be robust. Show the code."
+# An agent's everyday edit: the reply is mostly a copy of the file, which is
+# where speculative decoding and prompt lookup pay off.
+BENCH_EDIT_QUESTION = "Rename the function `ensure_dir` to `make_dir` everywhere in the file above. Reply with the complete updated file and nothing else."
+
+
+def bench_request(prompt, model, key, max_tokens=512):
+  body = {
+    "model": model,
+    "messages": [{"role": "user", "content": prompt}],
+    "max_tokens": max_tokens,
+    "temperature": 0,
+    "stream": True,
+    "stream_options": {"include_usage": True},
+    "chat_template_kwargs": {"enable_thinking": False},
+  }
+  request = urllib.request.Request(
+    f"{endpoint(model)}/chat/completions",
+    data=json.dumps(body).encode(),
+    headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+  )
+  start = time.monotonic()
+  first = None
+  usage = None
+  chunks = 0
+  with urllib.request.urlopen(request, timeout=1800) as response:
+    for raw in response:
+      line = raw.decode(errors="replace").strip()
+      if not line.startswith("data:") or line[5:].strip() == "[DONE]":
+        continue
+      event = json.loads(line[5:])
+      usage = event.get("usage") or usage
+      for choice in event.get("choices", []):
+        delta = choice.get("delta", {})
+        if delta.get("content") or delta.get("reasoning_content"):
+          first = first or time.monotonic()
+          chunks += 1
+  end = time.monotonic()
+  prompt_tokens = (usage or {}).get("prompt_tokens")
+  completion = (usage or {}).get("completion_tokens", chunks)
+  ttft = (first or end) - start
+  decode = end - (first or end)
+  return {
+    "prompt_tokens": prompt_tokens,
+    "completion_tokens": completion,
+    "ttft_s": round(ttft, 2),
+    "prefill_tok_s": round(prompt_tokens / ttft, 1) if prompt_tokens and ttft else None,
+    "decode_tok_s": round((completion - 1) / decode, 1) if decode > 0 and completion > 1 else None,
+    "total_s": round(end - start, 2),
+  }
+
+
+BENCH_LONG_TOKENS = 31705  # what bench/context.txt tokenizes to
+BENCH_CHARS_PER_TOKEN = 3.3
+
+
+def run_bench(rid, key, context, after_request=None):
+  """The bench's requests against a running model: (short, long, edit). after_request runs after each."""
+  say(f"Benchmarking {rid}: short prompt, ~{len(context) / BENCH_CHARS_PER_TOKEN / 1000:.0f}K-token prompt and a code edit (greedy, thinking off, 512 tokens out)")
+  results = []
+  for label, prompt, max_tokens in (
+      ("warmup", "Say ok.", 8),
+      ("short", BENCH_SHORT, 512),
+      ("long", context + "\n\n" + BENCH_LONG_QUESTION, 512),
+      ("edit", "```python\n" + bench_file("edit.py.txt") + "```\n\n" + BENCH_EDIT_QUESTION, 512)):
+    result = bench_request(prompt, rid, key, max_tokens=max_tokens)
+    if after_request:
+      after_request()
+    if label == "warmup":
+      continue
+    results.append(result)
+    detail = f"first token {result['ttft_s']}s, prefill {result['prefill_tok_s']} tok/s, " if label == "long" else ""
+    say(f"  {label} ({result['prompt_tokens']} tokens): {detail}decode {result['decode_tok_s']} tok/s")
+  return tuple(results)
+
+
+def bench_file(name):
+  path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "bench", name)
+  try:
+    with open(path, encoding="utf-8") as handle:
+      return handle.read()
+  except OSError:
+    raise LocalError(f"Can't bench: {path} is missing (the bench prompts ship with the engine)")
+
+
+def bench_context(corpus, ctx):
+  """The long prompt for a context: the whole corpus when it fits with room for the reply, else its start."""
+  tokens = min(BENCH_LONG_TOKENS, int(ctx * 0.7) - 700)
+  return corpus[:max(1000, int(tokens * BENCH_CHARS_PER_TOKEN))]
+
+
+class MemorySampler:
+  """Watches free memory from start() on and keeps the lowest seen: what a load and a bench cost
+  is the baseline minus that low. GPU memory is read from the driver where it reports use; on a
+  unified-memory GPU (no sysfs counter) the GPU draws on the same pool, so its peak is the RAM one."""
+
+  def __init__(self, gpu, interval=0.5):
+    self.gpu, self.interval = gpu, interval
+    self.stopped = threading.Event()
+    self.thread = None
+    self.baseline = None
+
+  def start(self):
+    self.baseline = free_memory(self.gpu)
+    self.low_ram, self.low_gpu = self.baseline
+    self.thread = threading.Thread(target=self._loop, daemon=True)
+    self.thread.start()
+
+  def sample(self):
+    if self.baseline is None:
+      return
+    ram, gpu_free = free_memory(self.gpu)
+    self.low_ram, self.low_gpu = min(self.low_ram, ram), min(self.low_gpu, gpu_free)
+
+  def _loop(self):
+    while not self.stopped.wait(self.interval):
+      self.sample()
+
+  def stop(self):
+    self.stopped.set()
+    if self.thread:
+      self.thread.join()
+    self.sample()
+
+  def peaks(self):
+    """(peak_ram_gib, peak_gpu_gib), to a tenth of a GiB, never below 0.1."""
+    ram = self.baseline[0] - self.low_ram
+    gpu_used = self.baseline[1] - self.low_gpu if self.gpu.get("sysfs") else ram
+    return max(0.1, round(ram, 1)), max(0.1, round(gpu_used, 1))
+
+
+def _measure_target(catalog, rid, ctx):
+  if rid in catalog.curated:
+    raise LocalError(f"{rid} is a curated recipe: it ships its own measurements, and measure only works on your own recipes (add one with: omarchy agent local recipe add FILE)")
+  if rid not in catalog.user:
+    raise LocalError(f"No recipe of yours named '{rid}'" + (f" (it failed validation: {catalog.user_errors[rid][0]})" if rid in catalog.user_errors else ""))
+  variants = catalog.recipes[rid].get("variant", [])
+  match = next((v for v in variants if v["ctx"] == ctx), None)
+  if match is None:
+    raise LocalError(f"{rid} has no [[variant]] with ctx {ctx} (it has: {', '.join(str(v['ctx']) for v in variants)}); add one with source = \"drafted\" or \"estimated\", then measure it")
+  if catalog.runtimes[catalog.recipes[rid]["runtime"]].get("pair"):
+    raise LocalError(f"{rid} runs across two machines, and measure doesn't cover paired recipes yet")
+  return match
+
+
+def cmd_measure(argv):
+  parser = argparse.ArgumentParser(prog="omarchy agent local measure",
+    description="Load a recipe of yours at a context, bench it, and record the peak RAM, peak GPU memory and decode/prefill speed it showed as that context's measured variant. Without --yes it only says what it would download and load.")
+  parser.add_argument("recipe")
+  parser.add_argument("--ctx", type=int, required=True, help="the context (a [[variant]] with this ctx must exist)")
+  parser.add_argument("--yes", action="store_true", help="download and load it; without this nothing is changed")
+  args = parser.parse_args(argv)
+  catalog = load_catalog()
+  rid = args.recipe
+  variant = _measure_target(catalog, rid, args.ctx)
+  recipe = catalog.recipes[rid]
+  profile = machine_profile()
+  gpu = recipe_gpu(profile, recipe)
+  files, _ = build_artifacts(recipe)
+  total = sum(f["size"] for f in files)
+  missing = sum(f["size"] for f in files if not os.path.exists(blob_path(f)))
+  if missing:
+    download = f"{gib(missing):.1f} GiB to download ({gib(total):.1f} GiB in {len(files)} file(s))"
+  else:
+    download = f"nothing to download ({gib(total):.1f} GiB in {len(files)} file(s) already here)"
+  runtime = catalog.runtimes[recipe["runtime"]]
+  say(f"Measure {rid} at context {args.ctx} (now a {variant.get('source', 'measured')} variant)")
+  say(f"  download: {download}")
+  say(f"  load: {recipe.get('name', rid)} on {recipe['runtime']} ({runtime['image']}), context {args.ctx}, on {gpu['family']}; it expects about {variant['peak_ram_gib']:g} GiB RAM and {variant['peak_gpu_gib']:g} GiB GPU")
+  say("  then: restarts the model if it runs, runs the bench (a few minutes), leaves it running, and rewrites this variant")
+  if not args.yes:
+    say("Nothing was changed. Run again with --yes to do it.")
+    return 0
+  prepare_host(gpu)
+  setup_args = argparse.Namespace(ctx=args.ctx, gpu=None, seed=None, unqualified=True, detach=False, on=None, as_remote=False, yes=True)
+  sampler = MemorySampler(gpu)
+  # The lock is held through the bench: another model starting meanwhile would be counted as this one's memory.
+  with Lock():
+    fresh = load_model(rid) is None
+    if unit_active(rid):
+      say(f"Stopping {rid} so the load is measured from an empty start")
+      systemctl("stop", unit_name(rid))
+    try:
+      _use_setup(rid, variant, setup_args, catalog, profile, gpu, fresh, None, sampler=sampler)
+      if not unit_active(rid):
+        raise LocalError(f"{rid} was set up but can't start now, so there is nothing to measure; see: omarchy agent local status")
+      context = bench_context(bench_file("context.txt"), args.ctx)
+      short, long, edit = run_bench(rid, ensure_key(), context, after_request=sampler.sample)
+    except (OSError, ValueError) as error:
+      raise LocalError(f"The bench failed: {error}")
+    finally:
+      sampler.stop()
+    ram, gpu_gib = sampler.peaks()
+    measured = {**variant, "peak_ram_gib": ram, "peak_gpu_gib": gpu_gib, "source": "measured", "measured_at": time.strftime("%Y-%m-%d")}
+    for field in ("decode_tok_s", "prefill_tok_s"):
+      if long.get(field):
+        measured[field] = long[field]
+    updated = {**recipe, "variant": [measured if v["ctx"] == args.ctx else v for v in recipe["variant"]]}
+    errors = user_recipe_errors(rid, updated, catalog.curated, catalog.runtimes, catalog.root)
+    if errors:
+      raise LocalError("The measured recipe fails validation, so nothing was written:\n  " + "\n  ".join(errors))
+    path = os.path.join(user_recipes_dir(), f"{rid}.toml")
+    write_atomic(path, toml_dumps(updated))
+    manifest = load_model(rid)
+    if manifest:
+      manifest["variant"], manifest["recipe"] = measured, updated
+      write_atomic(model_manifest_path(rid), json.dumps(manifest, indent=2) + "\n")
+    fresh_catalog = load_catalog()
+    refresh_list_cache(fresh_catalog, profile)
+    write_status(fresh_catalog, profile)
+  say("")
+  say(f"Measured {rid} at context {args.ctx}: peak RAM {ram:g} GiB, peak GPU {gpu_gib:g} GiB, decode {measured.get('decode_tok_s')} tok/s, prefill {measured.get('prefill_tok_s')} tok/s")
+  if not gpu.get("sysfs"):
+    say("  (this GPU shares system memory, so its peak GPU figure is the RAM peak)")
+  say(f"Recorded as source = \"measured\" in {path}; {rid} is still running at {endpoint(rid)}")
   return 0
 
 
@@ -5115,6 +5397,7 @@ COMMANDS = {
   "link": cmd_link,
   "link-worker": cmd_link_worker,
   "machine": cmd_machine,
+  "measure": cmd_measure,
   "recipe": cmd_recipe,
   "share-proxy": cmd_share_proxy,
 }
@@ -5133,6 +5416,7 @@ SUMMARIES = {
   "logs": "Show a model's logs, and its other half's on a paired Spark",
   "link": "Show the Spark cabled to this one; 'link setup <peer>' prepares both",
   "machine": "Show the machines models run on over SSH; 'machine add <host>' prepares one",
+  "measure": "Load a recipe of yours at a context, bench it, and record the result: measure ID --ctx N [--yes]",
   "recipe": "Add your own recipes: validate FILE, add FILE, remove ID, confirm ID, list --json",
 }
 

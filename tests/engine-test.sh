@@ -1377,4 +1377,129 @@ run(a.cmd_recipe, "remove", "est-model")
 check("recipe remove drops the recipe's confirmation", "est-model" not in a.load_confirmed())
 check("recipe with no subcommand prints usage and fails", run(a.cmd_recipe)[0] == 1)
 
+# ---------------------------------------------------------------- measure
+# No GPU, network, ssh or machine: the runtime, the bench and memory are fakes.
+import threading
+
+measure_id = "measure-me"
+drafted_text = variants_as(curated_text, "drafted")
+measure_path = Path(a.user_recipes_dir(), measure_id + ".toml")
+write_mine(measure_id, drafted_text)
+run(a.cmd_recipe, "add", str(mine / f"{measure_id}.toml"))
+measure_ctx = 131072
+fake = {"running": False, "ram": 100.0, "gpu": 100.0, "fail_load": False, "calls": [], "bench_fail": False}
+GB = 2**30
+
+
+def fake_free_memory(_gpu):
+  return fake["ram"], fake["gpu"]
+
+
+def fake_use_setup(rid, variant, args, catalog, profile_, gpu_, fresh, measured_load=None, sampler=None):
+  fake["calls"].append(("setup", rid, variant["ctx"]))
+  if fake["fail_load"]:
+    raise a.LocalError("The model didn't start: out of memory\nlog tail")
+  sampler.start()
+  fake["ram"], fake["gpu"] = 61.5, 70.25
+  fake["running"] = True
+  return 0
+
+
+def fake_bench_request(prompt, model, key, max_tokens=512):
+  fake["calls"].append(("bench", len(prompt)))
+  if fake["bench_fail"]:
+    raise OSError("connection reset")
+  fake["ram"], fake["gpu"] = 52.25, 58.5   # the peak: KV filled during the long prompt
+  long_one = len(prompt) > 50000
+  return {"prompt_tokens": 20000 if long_one else 40, "completion_tokens": 512, "ttft_s": 10.0, "prefill_tok_s": 2000.0 if long_one else 50.0, "decode_tok_s": 21.5 if long_one else 25.0, "total_s": 30.0}
+
+
+def reset_fake(**over):
+  fake.update({"running": False, "ram": 100.0, "gpu": 100.0, "fail_load": False, "calls": [], "bench_fail": False}, **over)
+
+
+a_gpu = {**gpu, "memory_gib": 100.0, "sysfs": "/nonexistent"}
+a_profile = {**profile, "ram_gib": 128, "ram_class": 128, "gpus": [a_gpu]}
+fake_files = [{"repo": "o/r", "revision": "a" * 40, "path": "m.gguf", "dest": "m.gguf", "size": 3 * GB, "license": "mit", "sha256": "b" * 64},
+              {"repo": "o/r", "revision": "a" * 40, "path": "d.gguf", "dest": "d.gguf", "size": GB // 2, "license": "mit", "sha256": "c" * 64}]
+
+
+def measure(*argv):
+  with patch.object(a, "machine_profile", return_value=a_profile), patch.object(a, "recipe_gpu", return_value=a_gpu), \
+       patch.object(a, "build_artifacts", return_value=(fake_files, {})), patch.object(a, "prepare_host"), \
+       patch.object(a, "free_memory", fake_free_memory), patch.object(a, "_use_setup", fake_use_setup), \
+       patch.object(a, "bench_request", fake_bench_request), patch.object(a, "ensure_key", return_value="k"), \
+       patch.object(a, "unit_active", lambda rid: fake["running"]), patch.object(a, "systemctl"), \
+       patch.object(a, "write_status"), patch.object(a, "refresh_list_cache"), patch.object(a, "load_model", return_value=None):
+    return run(a.cmd_measure, *argv)
+
+
+before = measure_path.read_bytes()
+code, out, err = measure(measure_id, "--ctx", str(measure_ctx))
+check("measure without --yes states the download size and what it loads", code == 0 and "3.5 GiB" in out and str(measure_ctx) in out and "--yes" in out, out + err)
+check("measure without --yes changes nothing and runs nothing", measure_path.read_bytes() == before and fake["calls"] == [])
+help_out = io.StringIO()
+with contextlib.redirect_stdout(help_out), contextlib.suppress(SystemExit):
+  a.cmd_measure(["--help"])
+check("measure documents --ctx and --yes", "--ctx" in help_out.getvalue() and "--yes" in help_out.getvalue(), help_out.getvalue())
+code, out, err = measure(curated_id, "--ctx", "131072", "--yes")
+check("measure refuses a curated recipe with a clear message", code == 1 and "curated" in err and fake["calls"] == [], err)
+code, out, err = measure("no-such-recipe", "--ctx", "131072", "--yes")
+check("measure refuses an unknown recipe", code == 1 and "No recipe" in err, err)
+code, out, err = measure(measure_id, "--ctx", "999", "--yes")
+check("measure needs a variant for that ctx and says which exist", code == 1 and "131072" in err and measure_path.read_bytes() == before and fake["calls"] == [], err)
+
+reset_fake(fail_load=True)
+code, out, err = measure(measure_id, "--ctx", str(measure_ctx), "--yes")
+check("a failed load reports the engine's own error", code == 1 and "The model didn't start: out of memory" in err, err)
+check("a failed load leaves the recipe file byte-identical", measure_path.read_bytes() == before)
+
+reset_fake(bench_fail=True)
+code, out, err = measure(measure_id, "--ctx", str(measure_ctx), "--yes")
+check("a failed bench leaves the recipe file byte-identical", code == 1 and measure_path.read_bytes() == before, err)
+
+reset_fake()
+code, out, err = measure(measure_id, "--ctx", str(measure_ctx), "--yes")
+check("measure --yes succeeds", code == 0 and "measured" in out, out + err)
+done = {v["ctx"]: v for v in tomllib.loads(measure_path.read_text())["variant"]}
+v = done[measure_ctx]
+check("the variant is now source = measured", v["source"] == "measured", str(v))
+check("peak RAM is the baseline minus the lowest free RAM seen (100 - 52.25)", v["peak_ram_gib"] == 47.8, str(v))
+check("peak GPU is the baseline minus the lowest free GPU seen (100 - 58.5)", v["peak_gpu_gib"] == 41.5, str(v))
+check("decode and prefill speed come from the long prompt", v["decode_tok_s"] == 21.5 and v["prefill_tok_s"] == 2000.0, str(v))
+check("the other variant is untouched", done[262144]["source"] == "drafted" and done[262144]["peak_ram_gib"] == tomllib.loads(drafted_text)["variant"][0]["peak_ram_gib"])
+check("the measured recipe still validates and fits as measured", not a.user_recipe_errors(measure_id, tomllib.loads(measure_path.read_text()), a.load_catalog_dir(os.environ["ENGINE_ROOT"]).recipes, a.load_catalog_dir(os.environ["ENGINE_ROOT"]).runtimes, os.environ["ENGINE_ROOT"])
+      and a.fits(v, a_profile, a_gpu, measure_id)[0])
+check("a recipe rewrite keeps every other field", {k: x for k, x in tomllib.loads(measure_path.read_text()).items() if k != "variant"} == {k: x for k, x in tomllib.loads(drafted_text).items() if k != "variant"})
+
+reset_fake()
+estimated_text = variants_as(curated_text, "estimated")
+write_mine(measure_id, estimated_text)
+run(a.cmd_recipe, "add", str(mine / f"{measure_id}.toml"))
+code, out, err = measure(measure_id, "--ctx", "262144", "--yes")
+check("a re-measure replaces an estimated variant", code == 0 and {v["ctx"]: v for v in tomllib.loads(measure_path.read_text())["variant"]}[262144]["source"] == "measured", out + err)
+check("a measured variant needs no confirmation", a.fits({v["ctx"]: v for v in tomllib.loads(measure_path.read_text())["variant"]}[262144], a_profile, a_gpu, measure_id)[0])
+reset_fake()
+code, out, err = measure(measure_id, "--ctx", "262144", "--yes")
+check("a measured variant can be measured again", code == 0, out + err)
+
+# the long prompt never exceeds the context
+small_prompt = a.bench_context("x" * 105000, 8192)
+check("bench_context shortens the corpus for a small context", len(small_prompt) < 105000 * 8192 / 31705 and len(small_prompt) > 0)
+check("bench_context uses (nearly) the whole corpus when the context is big", len(a.bench_context("x" * 105000, 262144)) > 100000)
+
+# use on a user recipe needs --yes
+reset_fake()
+mine_text = variants_as(curated_text, "measured")
+write_mine("use-me", mine_text)
+run(a.cmd_recipe, "add", str(mine / "use-me.toml"))
+used = []
+with patch.object(a, "machine_profile", return_value=a_profile), patch.object(a, "recipe_gpu", return_value=a_gpu), patch.object(a, "prepare_host", side_effect=lambda g: used.append("prepare")):
+  code, out, err = run(a.cmd_use, "use-me")
+check("use refuses a user recipe without --yes, naming the flag", code == 1 and "--yes" in err and used == [], err)
+with patch.object(a, "machine_profile", return_value=a_profile), patch.object(a, "recipe_gpu", return_value=a_gpu), patch.object(a, "prepare_host", side_effect=lambda g: used.append("prepare")), \
+     patch.object(a, "_use_setup", return_value=0), patch.object(a, "load_measurement", return_value={}), patch.object(a, "load_model", return_value={"recipe_id": "use-me"}):
+  code, out, err = run(a.cmd_use, "use-me", "--yes", "--unqualified")
+check("use --yes lets a user recipe through", code == 0 and used == ["prepare"], out + err)
+
 PY
