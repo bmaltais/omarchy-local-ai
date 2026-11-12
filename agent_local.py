@@ -3654,7 +3654,12 @@ def tailscale(*args, timeout=10):
     raise LocalError("Tailscale isn't installed")
   try:
     return subprocess.run(["tailscale", *args], capture_output=True, text=True, timeout=timeout)
-  except subprocess.TimeoutExpired:
+  except subprocess.TimeoutExpired as expired:
+    # A tailnet that hasn't enabled Serve makes tailscale print how to, then wait for a click: keep what it said.
+    said = " ".join(" ".join(part.decode(errors="replace") if isinstance(part, bytes) else part or ""
+                             for part in (expired.stderr, expired.stdout)).split())
+    if "not enabled" in said.lower():
+      raise LocalError(f"tailscale {args[0]}: {said}")
     raise LocalError(f"tailscale {args[0]} didn't answer")
 
 

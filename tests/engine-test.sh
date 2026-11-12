@@ -1136,6 +1136,25 @@ with patch.object(a, "known_models", return_value=["current"]), patch.object(a, 
   record = a.write_status(cat, profile)
   check("a refused share is reported with the fix", record["share_error"] == a.OPERATOR_HINT)
 a.save_shares([])
+def hangs(output, error=b""):
+  def run(*args, **kwargs):
+    raise subprocess.TimeoutExpired(args[0], 10, output=output, stderr=error)
+  return run
+with patch.object(a.shutil, "which", return_value="/usr/bin/tailscale"):
+  with patch.object(a.subprocess, "run", side_effect=hangs(b"", b"Serve is not enabled on your tailnet.\nTo enable, visit:\n\n  https://login.tailscale.com/f/serve?node=n1\n")):
+    try:
+      a.tailscale("serve", "--bg", "x")
+      said = ""
+    except a.LocalError as error:
+      said = str(error)
+  check("a tailscale serve that waits for Serve to be enabled says so, with the link", "Serve is not enabled on your tailnet. To enable, visit: https://login.tailscale.com/f/serve?node=n1" in said, said)
+  with patch.object(a.subprocess, "run", side_effect=hangs(None)):
+    try:
+      a.tailscale("serve", "--bg", "x")
+      said = ""
+    except a.LocalError as error:
+      said = str(error)
+  check("one that printed nothing still just didn't answer", said == "tailscale serve didn't answer", said)
 
 # The share proxy: a request the model accepts counts its machine for the
 # window, a refused one doesn't, and a streamed answer arrives as it's sent.
