@@ -10,6 +10,7 @@ server answers only with the key. See docs/engine.md.
 import argparse
 import concurrent.futures
 import contextlib
+import errno
 import fcntl
 import fnmatch
 import hashlib
@@ -22,6 +23,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -140,7 +142,7 @@ def write_atomic(path, text, mode=0o644):
   ensure_dir(os.path.dirname(path))
   fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-")
   try:
-    with os.fdopen(fd, "w") as handle:
+    with os.fdopen(fd, "wb" if isinstance(text, bytes) else "w") as handle:
       handle.write(text)
     os.chmod(tmp, mode)
     os.replace(tmp, path)
@@ -660,6 +662,10 @@ INPUTS = ("text", "image")
 VARIANT_SOURCES = ("measured", "estimated", "drafted")
 
 
+def variant_source(variant):
+  return variant.get("source", "measured")
+
+
 def validate_recipe(rid, recipe, runtimes, root=None, user=False):
   """A user recipe goes through the same rules as a curated one. The one difference: it may omit
   a hardware entry's `measured` file, which is bench evidence the catalog ships and the user cannot."""
@@ -755,7 +761,7 @@ def validate_recipe(rid, recipe, runtimes, root=None, user=False):
         errors.append(f"{at}.{field}: must be a positive number")
     if variant.get("ctx") and runtime and "ctx" not in inputs:
       errors.append(f"{at}: runtime '{runtime_id}' has no ctx input")
-    if variant.get("source", "measured") not in VARIANT_SOURCES:
+    if variant_source(variant) not in VARIANT_SOURCES:
       errors.append(f"{at}.source: must be one of {', '.join(VARIANT_SOURCES)}")
   sampling = recipe.get("sampling", {})
   if not isinstance(sampling, dict):
@@ -956,7 +962,8 @@ def qualified(recipe, profile, gpu):
 
 
 def variant_key(variant):
-  return f"{variant['ctx']}/{variant['peak_ram_gib']:g}/{variant['peak_gpu_gib']:g}"
+  # repr of the float: 0.1 and 0.10 are one number, and no rounding hides a real change.
+  return f"{variant['ctx']}/{float(variant['peak_ram_gib'])!r}/{float(variant['peak_gpu_gib'])!r}"
 
 
 def load_confirmed():
@@ -970,9 +977,14 @@ def load_confirmed():
   return confirmed if isinstance(confirmed, dict) else {}
 
 
-def fits(variant, profile, gpu, rid=None):
-  """Static fit of a variant on this machine: (ok, reason)."""
-  source = variant.get("source", "measured")
+def save_confirmed(confirmed):
+  write_atomic(confirmed_path(), json.dumps(confirmed, indent=2) + "\n")
+
+
+def fits(variant, profile, gpu, rid):
+  """Static fit of a variant on this machine: (ok, reason). `rid` is required (None for a
+  variant outside any recipe): an estimated variant only fits once confirmed under its recipe id."""
+  source = variant_source(variant)
   if source == "drafted":
     return False, "its numbers are a draft, not measured; measure it before it counts as fitting"
   if source == "estimated" and (rid is None or variant_key(variant) not in load_confirmed().get(rid, [])):
@@ -984,7 +996,7 @@ def fits(variant, profile, gpu, rid=None):
   return True, ""
 
 
-def pick_variant(recipe, profile, gpu, ctx=None, rid=None):
+def pick_variant(recipe, profile, gpu, ctx, rid):
   # The largest context first, and at the same context the larger setup (more streams, a bigger
   # prompt cache) where it fits, so a smaller machine falls back to the variant sized for it.
   variants = sorted(recipe.get("variant", []), key=lambda v: (v["ctx"], v["peak_ram_gib"]), reverse=True)
@@ -1099,7 +1111,7 @@ def recipe_listing(catalog, profile, running=(), machines=True):
       "active": rid in running,
       # What the card shows: the measured footprint, context and speed at a
       # long prompt on this machine class.
-      "source": variant.get("source", "measured") if variant else None,
+      "source": variant_source(variant) if variant else None,
       "memory_gib": variant["peak_ram_gib"] if variant else None,
       "context": variant["ctx"] if variant else None,
       "decode_tok_s": measured.get("long", {}).get("decode_tok_s"),
@@ -2743,17 +2755,36 @@ def clear_error(rid):
 
 
 class Lock:
+  """The engine's one lock. A holder that runs long says so in `note`, kept in the lock file
+  while it holds the lock, so a command that has to wait can tell the user why."""
+
+  def __init__(self, note=""):
+    self.note = note
+
   def __enter__(self):
     ensure_dir(state_dir())
-    self.handle = open(os.path.join(state_dir(), "lock"), "w")
+    self.handle = open(os.path.join(state_dir(), "lock"), "a+")
     try:
       fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-      say("Another omarchy agent local command is running; waiting for it")
+      holder = self._holder_note()
+      say(f"{holder}; waiting for it" if holder else "Another omarchy agent local command is running; waiting for it")
       fcntl.flock(self.handle, fcntl.LOCK_EX)
+    self.handle.seek(0)
+    self.handle.truncate()
+    if self.note:
+      self.handle.write(self.note)
+      self.handle.flush()
     return self
 
+  def _holder_note(self):
+    self.handle.seek(0)
+    return self.handle.read().strip()
+
   def __exit__(self, *exc):
+    if self.note:
+      self.handle.seek(0)
+      self.handle.truncate()
     fcntl.flock(self.handle, fcntl.LOCK_UN)
     self.handle.close()
 
@@ -3686,32 +3717,62 @@ def cmd_validate(argv):
 # ---------------------------------------------------------------- user recipes
 #
 # `recipe add` puts a recipe the user wrote in their own folder (user_recipes_dir), where the
-# catalog loads it after the curated ones. It passes the rules a curated recipe does.
+# catalog loads it after the curated ones. It passes the rules a curated recipe does, and it
+# won't take a variant claiming to be `measured`: that source is the measuring run's to write.
+# This is a guard against a mistake, not a security boundary. The folder is the user's own, and
+# a file they place there by hand is read as written.
 
 
 def _read_recipe_file(path):
-  """The file's recipe, or LocalError saying why not (this is also what `validate` prints)."""
+  """(id, recipe, bytes), or LocalError saying why not (this is also what `validate` prints).
+  The file is read once and a symlink is refused, so the bytes checked are the bytes `add` writes."""
   rid = os.path.basename(path)[:-5] if path.endswith(".toml") else ""
   if not rid:
     raise LocalError(f"{path}: a recipe file is named <id>.toml")
   try:
-    with open(path, "rb") as handle:
-      return rid, tomllib.load(handle)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+  except OSError as error:
+    if error.errno == errno.ELOOP:
+      raise LocalError(f"{path}: is a symlink; give the recipe file itself")
+    raise LocalError(f"{path}: can't be read: {error}")
+  try:
+    with os.fdopen(fd, "rb") as handle:
+      if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+        raise LocalError(f"{path}: not a regular file")
+      data = handle.read()
   except OSError as error:
     raise LocalError(f"{path}: can't be read: {error}")
-  except tomllib.TOMLDecodeError as error:
+  try:
+    return rid, tomllib.loads(data.decode("utf-8")), data
+  except (tomllib.TOMLDecodeError, UnicodeDecodeError) as error:
     raise LocalError(f"{path}: not valid TOML: {error}")
 
 
 def _check_recipe_file(path):
-  """(id, recipe); raises LocalError listing every error the file has."""
-  rid, recipe = _read_recipe_file(path)
+  """(id, recipe, bytes); raises LocalError listing every error the file has."""
+  rid, recipe, data = _read_recipe_file(path)
   root = catalog_root()
   curated = load_catalog_dir(root)
   errors = user_recipe_errors(rid, recipe, curated.recipes, curated.runtimes, root)
+  variants = recipe.get("variant", [])
+  for index, variant in enumerate(variants if isinstance(variants, list) else []):
+    if isinstance(variant, dict) and variant_source(variant) == "measured":
+      errors.append(f"recipes/{rid}.variant[{index}].source: a recipe of yours can't claim measured numbers (only `measure` writes them); "
+                    'set source = "estimated" or source = "drafted"')
   if errors:
     raise LocalError("\n".join(errors))
-  return rid, recipe
+  return rid, recipe, data
+
+
+def _recipe_in_use_error(rid):
+  using = _model_using(rid)
+  if using:
+    raise LocalError(f"Recipe {rid} is used by the model {using} set up here; remove it first with: omarchy agent local remove {rid}")
+
+
+def _not_your_recipe(rid):
+  hint = " (it is a curated recipe, which can't be removed)" if rid in load_catalog_dir(catalog_root()).recipes else ""
+  return LocalError(f"No recipe of yours named '{rid}'" + hint)
 
 
 def _model_using(rid):
@@ -3738,7 +3799,7 @@ def cmd_recipe_validate(argv):
   parser.add_argument("file")
   args = parser.parse_args(argv)
   try:
-    rid, _ = _check_recipe_file(args.file)
+    rid, _, _ = _check_recipe_file(args.file)
   except LocalError as error:
     print(error)
     return 1
@@ -3750,13 +3811,10 @@ def cmd_recipe_add(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local recipe add", description="Validate a recipe file, then install it under its id (the file name without .toml).")
   parser.add_argument("file")
   args = parser.parse_args(argv)
-  rid, _ = _check_recipe_file(args.file)
+  rid, _, data = _check_recipe_file(args.file)
   with Lock():
-    using = _model_using(rid)
-    if using:
-      raise LocalError(f"Recipe {rid} is used by the model {using} set up here; remove it first with: omarchy agent local remove {rid}")
-    with open(args.file) as handle:
-      write_atomic(os.path.join(user_recipes_dir(), f"{rid}.toml"), handle.read())
+    _recipe_in_use_error(rid)
+    write_atomic(os.path.join(user_recipes_dir(), f"{rid}.toml"), data)
   say(f"Added recipe {rid}")
   return 0
 
@@ -3770,15 +3828,13 @@ def cmd_recipe_remove(argv):
     raise LocalError("Not a recipe id")
   path = os.path.join(user_recipes_dir(), f"{rid}.toml")
   if not os.path.isfile(path):
-    raise LocalError(f"No recipe of yours named '{rid}'" + (" (it is a curated recipe, which can't be removed)" if rid in load_catalog_dir(catalog_root()).recipes else ""))
+    raise _not_your_recipe(rid)
   with Lock():
-    using = _model_using(rid)
-    if using:
-      raise LocalError(f"Recipe {rid} is used by the model {using} set up here; remove it first with: omarchy agent local remove {rid}")
+    _recipe_in_use_error(rid)
     os.unlink(path)
     confirmed = load_confirmed()
     if confirmed.pop(rid, None) is not None:
-      write_atomic(confirmed_path(), json.dumps(confirmed, indent=2) + "\n")
+      save_confirmed(confirmed)
   say(f"Removed recipe {rid}")
   return 0
 
@@ -3789,14 +3845,14 @@ def cmd_recipe_confirm(argv):
   args = parser.parse_args(argv)
   catalog = load_catalog()
   if args.id not in catalog.user:
-    raise LocalError(f"No recipe of yours named '{args.id}'")
-  estimated = [v for v in catalog.recipes[args.id].get("variant", []) if v.get("source", "measured") == "estimated"]
+    raise _not_your_recipe(args.id)
+  estimated = [v for v in catalog.recipes[args.id].get("variant", []) if variant_source(v) == "estimated"]
   if not estimated:
     raise LocalError(f"Recipe {args.id} has no estimated variant to confirm")
   with Lock():
     confirmed = load_confirmed()
     confirmed[args.id] = sorted({variant_key(v) for v in estimated})
-    write_atomic(confirmed_path(), json.dumps(confirmed, indent=2) + "\n")
+    save_confirmed(confirmed)
   say(f"Confirmed {len(estimated)} estimated variant(s) of {args.id}")
   return 0
 
@@ -3814,16 +3870,21 @@ def _toml_value(value):
   if isinstance(value, (int, float)):
     return repr(value)
   if isinstance(value, str):
-    return json.dumps(value, ensure_ascii=False)
+    return _toml_string(value)
   if isinstance(value, list):
     return "[" + ", ".join(_toml_value(item) for item in value) + "]"
   if isinstance(value, dict):
     return "{ " + ", ".join(f"{_toml_key(k)} = {_toml_value(v)}" for k, v in value.items() if v is not None) + " }"
-  raise TypeError(f"cannot write {type(value).__name__} to TOML")
+  raise LocalError(f"Can't write a {type(value).__name__} value ({value!r}) to TOML; the recipe has one the engine doesn't rewrite")
+
+
+def _toml_string(text):
+  # JSON's escapes are TOML's, except DEL, which a TOML string must escape and JSON leaves.
+  return json.dumps(text, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def _toml_key(key):
-  return key if re.match(r"^[A-Za-z0-9_-]+$", key) else json.dumps(key)
+  return key if re.match(r"^[A-Za-z0-9_-]+$", key) else _toml_string(key)
 
 
 def toml_dumps(data, prefix=""):
@@ -3994,6 +4055,9 @@ def _measure_target(catalog, rid, ctx):
   return match
 
 
+MEASURE_WAIT = "a few minutes, at worst about 30 minutes per bench request"
+
+
 def cmd_measure(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local measure",
     description="Load a recipe of yours at a context, bench it, and record the peak RAM, peak GPU memory and decode/prefill speed it showed as that context's measured variant. Without --yes it only says what it would download and load.")
@@ -4015,10 +4079,11 @@ def cmd_measure(argv):
   else:
     download = f"nothing to download ({gib(total):.1f} GiB in {len(files)} file(s) already here)"
   runtime = catalog.runtimes[recipe["runtime"]]
-  say(f"Measure {rid} at context {args.ctx} (now a {variant.get('source', 'measured')} variant)")
+  say(f"Measure {rid} at context {args.ctx} (now a {variant_source(variant)} variant)")
   say(f"  download: {download}")
   say(f"  load: {recipe.get('name', rid)} on {recipe['runtime']} ({runtime['image']}), context {args.ctx}, on {gpu['family']}; it expects about {variant['peak_ram_gib']:g} GiB RAM and {variant['peak_gpu_gib']:g} GiB GPU")
   say("  then: restarts the model if it runs, runs the bench (a few minutes), leaves it running, and rewrites this variant")
+  say(f"  while it runs, every other omarchy agent local command waits for it (the agents panel's start and stop too): typically {MEASURE_WAIT}")
   if not args.yes:
     say("Nothing was changed. Run again with --yes to do it.")
     return 0
@@ -4026,7 +4091,7 @@ def cmd_measure(argv):
   setup_args = argparse.Namespace(ctx=args.ctx, gpu=None, seed=None, unqualified=True, detach=False, on=None, as_remote=False, yes=True)
   sampler = MemorySampler(gpu)
   # The lock is held through the bench: another model starting meanwhile would be counted as this one's memory.
-  with Lock():
+  with Lock(note=f"A measuring run of {rid} holds the lock (it can take {MEASURE_WAIT})"):
     fresh = load_model(rid) is None
     if unit_active(rid):
       say(f"Stopping {rid} so the load is measured from an empty start")

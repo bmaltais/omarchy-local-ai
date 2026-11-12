@@ -5,13 +5,12 @@ import os
 import re
 import subprocess
 import sys
-import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, ROOT)
 from agent_local import (LocalError, resolve_model, key_path, choose_gpu, machine_profile,
-                         free_memory, say, meminfo, gib, _read, write_atomic, toml_dumps, run_bench)
+                         MemorySampler, say, meminfo, gib, _read, write_atomic, toml_dumps, run_bench)
 
 
 # The machine the numbers came from. On AMD the kernel carries the GPU driver; an NVIDIA driver
@@ -61,21 +60,12 @@ def cmd_bench(argv):
     key = handle.read().strip()
   rid = active["recipe_id"]
   gpu = choose_gpu(machine_profile(), active["gpu"])
-  low_ram = [free_memory(gpu)[0]]
-  stop = threading.Event()
-
-  def sample():
-    while not stop.is_set():
-      low_ram.append(free_memory(gpu)[0])
-      stop.wait(0.5)
-
-  sampler = threading.Thread(target=sample, daemon=True)
+  sampler = MemorySampler(gpu)
   sampler.start()
   try:
-    short, long, edit = run_bench(rid, key, context)
+    short, long, edit = run_bench(rid, key, context, after_request=sampler.sample)
   finally:
-    stop.set()
-    sampler.join()
+    sampler.stop()
   mem = meminfo()
   pins = []
   for f in active["files"]:
@@ -99,7 +89,7 @@ def cmd_bench(argv):
     },
     "memory": {
       "observed_at_load_gib": (active.get("observed") or {}).get("ram_used_gib"),
-      "min_available_during_bench_gib": round(min(low_ram), 1),
+      "min_available_during_bench_gib": round(sampler.low_ram, 1),
       "total_gib": round(gib(mem.get("MemTotal", 0)), 1),
     },
     "load_seconds": (active.get("observed") or {}).get("load_seconds"),
