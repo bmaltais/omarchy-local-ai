@@ -4273,7 +4273,9 @@ def ssh_command(remote, *argv, interactive=False):
   target = remote.get("ssh") or remote["dns"]
   if not SSH_TARGET_RE.match(target):
     raise LocalError("Not an SSH target")
-  options = ["-o", "ConnectTimeout=10"] + ([] if interactive else ["-o", "BatchMode=yes"])
+  # A host met for the first time is trusted on sight, as the tailnet vouches
+  # for who it is; one whose key has changed since is still refused.
+  options = ["-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new"] + ([] if interactive else ["-o", "BatchMode=yes"])
   return ["ssh", *options, "--", target, shlex.join(["omarchy-agent-local", *argv])]
 
 
@@ -4301,11 +4303,15 @@ def cmd_pair(argv):
       return 0
   say(f"Pairing with {target} over SSH")
   # ssh exits 255 both when nothing answers and when sshd turns down every key
-  # offered, so its stderr tells the two apart. Prompts go to the tty, not here.
-  result = subprocess.run(ssh_command({"ssh": target, "dns": ""}, "share", "--export", interactive=True), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+  # offered, so its stderr tells the two apart. On a terminal a key's
+  # passphrase can be asked for there; without one (the agents panel pairs this
+  # way) nothing can answer a prompt, so ssh asks none.
+  result = subprocess.run(ssh_command({"ssh": target, "dns": ""}, "share", "--export", interactive=sys.stdin.isatty()), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
   sys.stderr.write(result.stderr)
   if result.returncode == 255 and "Permission denied" in result.stderr:
     raise LocalError(f"{target} turned down this machine's SSH keys.\nStart the SSH agent that holds your key (like 1Password's), or authorize a key there in Setup > Security")
+  if result.returncode == 255 and "Host key verification failed" in result.stderr:
+    raise LocalError(f"{target}'s SSH host key has changed since this machine last reached it.\nIf it was reinstalled, forget its old key with: ssh-keygen -R {target}")
   if result.returncode == 255:
     raise LocalError(f"Can't connect to {target} over SSH.\nTurn on SSHD there in Setup > Security")
   if result.returncode != 0:
