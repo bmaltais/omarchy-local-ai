@@ -988,6 +988,9 @@ check("pairing a host again under another name adds to its models", again["model
 # unstarted offers no key at all.
 with patch.object(a.subprocess, "run", return_value=subprocess.CompletedProcess([], 255, "", "alice@new: Permission denied (publickey).\n")):
   raises("pairing with a host that refuses this machine's keys points at the SSH agent", lambda: a.cmd_pair(["alice@new"]), "SSH agent")
+  # The panel shows the first line alone, so it names the machine short.
+  raises("a pairing error's first line names the machine without user or domain", lambda: a.cmd_pair(["alice@new.tail1234.ts.net"]), "new refused this machine's SSH keys\n")
+check("an address stays whole as a machine's name", a.short_host("dhh@100.90.162.80") == "100.90.162.80")
 # The agents panel pairs with no terminal (stdin here is the test script), so
 # ssh must ask nothing: a prompt would wait forever. A new host's key is taken.
 with patch.object(a.subprocess, "run", return_value=subprocess.CompletedProcess([], 255, "", "Host key verification failed.\n")) as run:
