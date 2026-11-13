@@ -2033,6 +2033,12 @@ def post_start_checks(rid, key):
     raise LocalError(f"Port {port_for(rid)} is serving {', '.join(map(str, ids)) or 'an unknown model'}, not {rid}")
 
 
+def gpu_counts_own_memory(gpu):
+  """Whether the driver reports this GPU's use apart from the system's: an AMD GPU's sysfs
+  counters, or a discrete NVIDIA card's nvidia-smi. A unified-memory GPU draws on the RAM pool."""
+  return bool(gpu.get("sysfs")) or gpu.get("nvidia_index") is not None
+
+
 def free_memory(gpu):
   mem = meminfo()
   available = gib(mem.get("MemAvailable", 0))
@@ -4098,7 +4104,7 @@ def bench_context(corpus, ctx):
 class MemorySampler:
   """Watches free memory from start() on and keeps the lowest seen: what a load and a bench cost
   is the baseline minus that low. GPU memory is read from the driver where it reports use; on a
-  unified-memory GPU (no sysfs counter) the GPU draws on the same pool, so its peak is the RAM one."""
+  unified-memory GPU (no counter of its own) the GPU draws on the same pool, so its peak is the RAM one."""
 
   def __init__(self, gpu, interval=0.5):
     self.gpu, self.interval = gpu, interval
@@ -4131,7 +4137,7 @@ class MemorySampler:
   def peaks(self):
     """(peak_ram_gib, peak_gpu_gib), to a tenth of a GiB, never below 0.1."""
     ram = self.baseline[0] - self.low_ram
-    gpu_used = self.baseline[1] - self.low_gpu if self.gpu.get("sysfs") else ram
+    gpu_used = self.baseline[1] - self.low_gpu if gpu_counts_own_memory(self.gpu) else ram
     return max(0.1, round(ram, 1)), max(0.1, round(gpu_used, 1))
 
 
@@ -4220,7 +4226,7 @@ def cmd_measure(argv):
     write_status(fresh_catalog, profile)
   say("")
   say(f"Measured {rid} at context {args.ctx}: peak RAM {ram:g} GiB, peak GPU {gpu_gib:g} GiB, decode {measured.get('decode_tok_s')} tok/s, prefill {measured.get('prefill_tok_s')} tok/s")
-  if not gpu.get("sysfs"):
+  if not gpu_counts_own_memory(gpu):
     say("  (this GPU shares system memory, so its peak GPU figure is the RAM peak)")
   say(f"Recorded as source = \"measured\" in {path}; {rid} is still running at {endpoint(rid)}")
   return 0

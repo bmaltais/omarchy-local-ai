@@ -290,6 +290,12 @@ check("a hardware entry names exactly one class", a.class_errors({"gpu": "x", "r
 vbest = {"class": [{"gpu": "nvidia-rtx3090", "vram_class": 24, "recipes": ["model"]}]}
 check("best.toml matches a discrete GPU on VRAM", a.match_class(vbest, vprof, vgpu) is vbest["class"][0] and a.match_class(vbest, vprof, rgpu) is None)
 check("best.toml accepts a vram_class and rejects both", not any("class" in e and "must be" in e for e in a.validate_best(vbest, {"model": {"hardware": [{"gpu": "nvidia-rtx3090", "vram_class": 24}]}})) and a.validate_best({"class": [dict(vbest["class"][0], ram_class=64)]}, {"model": vrecipe}))
+with patch.object(a, "free_memory", side_effect=[(60.0, 20.0), (50.0, 5.0)]):
+  sampler = a.MemorySampler(found[0])
+  sampler.start()
+  sampler.sample()
+  check("a discrete GPU's peak is its VRAM use, not the RAM peak", sampler.peaks() == (10.0, 15.0))
+check("a unified GPU has no counter of its own", not a.gpu_counts_own_memory(rgpu) and a.gpu_counts_own_memory(found[0]) and a.gpu_counts_own_memory({"sysfs": "/sys/x"}))
 positional_rt = copy.deepcopy(runtime)
 positional_rt["command"] = ["server", "serve"]
 positional_rt["inputs"]["model"] = {"positional": True}
