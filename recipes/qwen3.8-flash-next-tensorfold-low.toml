@@ -1,0 +1,44 @@
+name = "Qwen3.8 Flash Next (low effort)"
+summary = "125B mixture of experts, 6B active per token, 4-bit, with MTP drafting. The fastest agent turns on NVIDIA's unified memory, with brief thinking (reasoning effort low) for quicker answers."
+runtime = "tensorfold"
+vendor = "qwen"
+architecture = "moe"
+# Screenshots and photos through the checkpoint's Qwen-VL tower, which --vision loads.
+input = ["text", "image"]
+
+[[hardware]]
+gpu = "nvidia-gb10"
+ram_class = 128
+measured = "measurements/qwen3.8-flash-next-tensorfold-gb10-128.toml"
+
+# TensorFold's MLX affine 4-bit, group-32 export with its MTP head, which the native CUDA family serves
+# on its own kernels. It uploads 73 GiB; the n-gram tables stay mapped from the shards.
+[[artifacts]]
+repo = "TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP"
+revision = "2b170fa6309d5d1ee380b35636075fac7945f286"
+license = "other (Qwen3.8-Flash-Next model license, see the model card)"
+files = ["*.safetensors", "*.json", "chat_template.jinja", "merges.txt", "vocab.json"]
+dest = "target"
+model = "."
+
+# Measured on a DGX Spark with a 194K-token conversation and its follow-up turn: 83 GiB at load,
+# about 94 GiB at peak once the prompt cache holds the conversation.
+[[variant]]
+ctx = 262144
+peak_ram_gib = 95
+peak_gpu_gib = 92
+
+[sampling]
+temperature = 1.0
+top_p = 0.95
+top_k = 20
+
+# Same weights and measurements as qwen3.8-flash-next-tensorfold (disk is shared: files are content-addressed); only the
+# reasoning effort differs, which the chat template turns into an instruction (xhigh is the default).
+# One stream, so the memory a second one would take (7.9 GiB at the full window) goes to the prompt
+# cache instead: it keeps a conversation where its last turn ended (about 30 KiB a token), so an agent's
+# next turn starts in under a second instead of prefilling again (0.3 s against 53 s at 97K tokens).
+# On CUDA the cache gets what the weights and the stream leave, up to the 8 GiB asked for: 5.6 to 7 GiB
+# on a Spark, which keeps conversations up to about 190K tokens; longer ones prefill again.
+[server]
+args = ["--parallel", "1", "--prompt-cache-gib", "8", "--max-tokens", "65536", "--vision", "--vision-max-images", "50", "--reasoning-effort", "low"]
