@@ -29,4 +29,4 @@ recipes = ["glm-5.3-flash-tensorfold-pair"]
 [[class]]
 gpu = "nvidia-rtx3090"
 vram_class = 24
-recipes = ["nemotron-3.5-lightning-tensorfold"]
+recipes = ["nemotron-3.5-lightning-tensorfold", "lfm2.5-24b-a2b-tensorfold", "qwen3.5-2b-tensorfold"]
