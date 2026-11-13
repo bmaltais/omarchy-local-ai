@@ -1544,7 +1544,8 @@ def device_lines(runtime, gpu):
     elif device == "kfd":
       lines.append("AddDevice=/dev/kfd")
     elif device == "cdi-nvidia":
-      lines.append("AddDevice=nvidia.com/gpu=all")
+      # A discrete card gets only the one whose memory was checked; a unified GPU is the only one.
+      lines.append(f"AddDevice=nvidia.com/gpu={gpu['nvidia_index'] if gpu.get('nvidia_index') is not None else 'all'}")
     elif device == "infiniband":
       lines.append("AddDevice=/dev/infiniband")
   return lines
@@ -1917,9 +1918,10 @@ def free_memory(gpu):
     used = int(_read(os.path.join(gpu["sysfs"], "mem_info_gtt_used"), "0") or 0) + int(_read(os.path.join(gpu["sysfs"], "mem_info_vram_used"), "0") or 0)
     gpu_free = gpu["memory_gib"] - gib(used)
   elif gpu.get("nvidia_index") is not None:
+    # A reading that fails counts as no free memory, so admission waits and then refuses
+    # instead of approving a start on a card that may be full.
     free = nvidia_free_gib(gpu["nvidia_index"])
-    if free is not None:
-      gpu_free = free
+    gpu_free = free if free is not None else 0.0
   return available, gpu_free
 
 
