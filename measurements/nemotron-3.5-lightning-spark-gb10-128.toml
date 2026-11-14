@@ -1,0 +1,49 @@
+recipe = "nemotron-3.5-lightning-spark"
+measured_at = "2026-11-13"
+image = "ghcr.io/omacom/tensorfold@sha256:c88821d872e22f9dc6148173816b654e2c6dcd712fae50bc5e95915e3f817856"
+ctx = 262144
+load_seconds = 23.1
+fileset = "3244c1ffc6425aee"
+method = "tools/bench: 1 warmup, then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
+
+[machine]
+platform = "aarch64-gb10"
+gpu = "nvidia-gb10"
+ram_class = 128
+system = "ASUSTeK COMPUTER INC. GX10"
+kernel = "7.0.0-1025-nvidia"
+cpu = "Cortex-X925 + Cortex-A725"
+gpu_driver = "580.178.04"
+
+[memory]
+observed_at_load_gib = 37.3
+min_available_during_bench_gib = 80.6
+total_gib = 121.6
+
+[short]
+prompt_tokens = 45
+completion_tokens = 50
+ttft_s = 0.06
+prefill_tok_s = 756.0
+decode_tok_s = 177.3
+total_s = 0.34
+
+[long]
+prompt_tokens = 32348
+completion_tokens = 451
+ttft_s = 4.74
+prefill_tok_s = 6823.4
+decode_tok_s = 197.2
+total_s = 7.02
+
+[edit]
+prompt_tokens = 2273
+completion_tokens = 512
+ttft_s = 0.3
+prefill_tok_s = 7680.6
+decode_tok_s = 449.0
+total_s = 1.43
+
+[[artifacts]]
+repo = "TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"
+revision = "d9d758fb83953437f7263256b0d96157e2a348b8"
