@@ -1,0 +1,39 @@
+name = "Nemotron 3.5 Lightning"
+summary = "30B mixture of experts, 3B active per token, at 4 bits with MTP drafting. About 38 GiB at the full window, so it runs beside a large model on a 128 GB Spark."
+runtime = "tensorfold"
+vendor = "nvidia"
+architecture = "moe"
+
+[sampling]
+temperature = 1.0
+top_p = 0.95
+
+[server]
+args = ["--max-tokens", "16384"]
+
+[[hardware]]
+gpu = "nvidia-gb10"
+ram_class = 128
+measured = "measurements/nemotron-3.5-lightning-spark-gb10-128.toml"
+
+[[artifacts]]
+repo = "TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"
+revision = "d9d758fb83953437f7263256b0d96157e2a348b8"
+license = "other (NVIDIA OpenMDW License Agreement 1.1, see the model card)"
+files = ["*.safetensors", "*.json", "chat_template.jinja"]
+dest = "target"
+model = "."
+
+# Measured on a DGX Spark (ASUS GX10, 128 GB) with the other models stopped: 37.8 GiB at peak at the full window.
+# The Spark's GPU shares system memory, so the RAM and GPU peaks are the same figure. Defaults for the streams and
+# the prompt cache. The 3090 recipe of the same model is nemotron-3.5-lightning-tensorfold (a different runtime).
+[[variant]]
+ctx = 262144
+peak_ram_gib = 37.8
+peak_gpu_gib = 37.8
+
+# The same model with a 64K window: 27 GiB at peak, for a Spark that also holds a large model.
+[[variant]]
+ctx = 65536
+peak_ram_gib = 27
+peak_gpu_gib = 27
