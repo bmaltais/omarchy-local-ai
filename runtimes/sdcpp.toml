@@ -1,0 +1,23 @@
+# stable-diffusion.cpp's sd-server, for image models, built by Omacom (omacom/sdcpp-image) from
+# leejet/stable-diffusion.cpp with two patches open upstream: the key from SD_API_KEY (or
+# --api-key-file), and a clean stop on SIGINT and SIGTERM. Vulkan on the render node only, no ROCm.
+# It lists itself as sd-cpp-local rather than the recipe, so the engine checks it is ready by its
+# model status (api = "sdcpp") instead of /v1/models. Generation defaults (steps, CFG scale) are
+# the model's, set in each recipe's server args.
+image = "ghcr.io/omacom/sdcpp@sha256:f8f635b6afa594b7243916f6e0cf7f798e1fed838899edea093af3f2772bf37e"
+tier = "third-party"
+review = "reviews/sdcpp-f8f635b6afa5.toml"
+api = "sdcpp"
+port = 1234
+command = ["sd-server", "--listen-ip", "0.0.0.0", "--listen-port", "1234"]
+# Healthy once the model has loaded: its status, asked with the key, says ready.
+health = { probe = ["/bin/sh", "-c", "curl -fsS -H \"Authorization: Bearer $OMARCHY_LOCAL_KEY\" http://127.0.0.1:1234/sdcpp/v1/models/status | grep -q '\"state\": *\"ready\"'"] }
+# It writes scratch files only under /tmp.
+run = { devices = ["render"], group_add = "keep-groups", tmpfs = "/tmp" }
+reserved = ["--listen-ip", "--listen-port", "--api-key", "--api-key-file", "SD_API_KEY"]
+
+[inputs]
+model = { arg = "--diffusion-model" }
+text_encoder = { arg = "--llm" }
+vae = { arg = "--vae" }
+key = { env = "SD_API_KEY" }

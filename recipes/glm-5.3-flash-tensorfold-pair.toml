@@ -1,5 +1,4 @@
 name = "GLM-5.3 Flash"
-summary = "GLM-5.3 Flash at 4 bits, split across two DGX Sparks: 83 GiB a Spark, so the head can keep its desktop. One shared KV pool for long contexts."
 runtime = "tensorfold-glm53-pair"
 vendor = "zai"
 architecture = "moe"
@@ -24,9 +23,9 @@ dest = "model"
 model = "."
 
 # The engine loads 84 GiB of weights, keeps its 9.5 GiB reserve free, and gives the rest to one shared FP8 KV pool of
-# whole windows and the prompt cache; it refuses to start without room for one window, which takes about 99 GiB
-# free: the 91 here plus the 8 admission keeps for the desktop. Measured on a pair whose head runs the Omarchy
-# desktop. Headless Sparks get a larger pool from the same setup.
+# whole windows and the prompt cache; it refuses to start without room for one window, which takes about 91 GiB
+# free on each Spark. Admission asks the peer for 8 more, for a desktop fit doesn't count there. Measured on a pair
+# whose head runs the Omarchy desktop. Headless Sparks get a larger pool from the same setup.
 [[variant]]
 ctx = 262144
 peak_ram_gib = 91

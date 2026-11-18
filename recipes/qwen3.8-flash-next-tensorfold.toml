@@ -1,5 +1,4 @@
 name = "Qwen3.8 Flash Next"
-summary = "125B mixture of experts, 6B active per token, 4-bit, with MTP drafting. The fastest agent turns on NVIDIA's unified memory."
 runtime = "tensorfold"
 vendor = "qwen"
 architecture = "moe"

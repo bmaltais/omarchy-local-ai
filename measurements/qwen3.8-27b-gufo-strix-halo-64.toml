@@ -1,0 +1,52 @@
+recipe = "qwen3.8-27b-gufo"
+measured_at = "2026-11-17"
+image = "ghcr.io/gufo-org/toolboxes/gufo-runtime@sha256:faaa6e21afb903bea20cbc893aa30239146e68e0252d412a7ff4932a26f236b8"
+ctx = 262144
+load_seconds = 11.0
+fileset = "ceea81a6623d00e6"
+method = "tools/bench: 1 warmup, then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
+
+[machine]
+platform = "x86"
+gpu = "amd-strix-halo"
+ram_class = 64
+system = "Framework Desktop (AMD Ryzen AI Max 300 Series)"
+kernel = "7.2.15-2-omarchy"
+cpu = "AMD Eng Sample: 100-000001243-50_Y"
+
+[memory]
+observed_at_load_gib = 37.2
+min_available_during_bench_gib = 5.1
+total_gib = 62.1
+
+[short]
+prompt_tokens = 41
+completion_tokens = 53
+ttft_s = 0.31
+prefill_tok_s = 134.3
+decode_tok_s = 44.8
+total_s = 1.47
+
+[long]
+prompt_tokens = 31705
+completion_tokens = 512
+ttft_s = 55.81
+prefill_tok_s = 568.1
+decode_tok_s = 24.0
+total_s = 77.13
+
+[edit]
+prompt_tokens = 2306
+completion_tokens = 512
+ttft_s = 3.9
+prefill_tok_s = 591.8
+decode_tok_s = 74.6
+total_s = 10.74
+
+[[artifacts]]
+repo = "unsloth/Qwen3.8-27B-GGUF"
+revision = "4ca720788d1e01f1bff70c033e0d0028fd02e502"
+
+[[artifacts]]
+repo = "z-lab/Qwen3.8-27B-DFlash2-GGUF"
+revision = "2d9571f8ce46e151f61c6499c99dee6079e1d610"

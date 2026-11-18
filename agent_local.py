@@ -48,8 +48,46 @@ RESERVE_GIB = 8
 PROGRESS_PUBLISH_SECONDS = 0.5
 PROGRESS_WINDOW_SECONDS = 4
 NOT_ENOUGH_MEMORY = "Not enough memory to start model"
+REBOOT_FOR_GPU_MEMORY = "Reboot to raise the GPU memory limit"
+# The kernel lets a GPU map at most half of RAM. A unified-memory AMD GPU has next to no VRAM of
+# its own, so that is all it can use; use raises the cap to all of RAM but the desktop's reserve,
+# through a kernel parameter in this drop-in that applies at the next boot.
+# The same drop-in Omarchy writes on AMD machines (omarchy-apply-amd-gpu-memory).
+GPU_MEMORY_DROP_IN = "/etc/limine-entry-tool.d/amd-gpu-memory.conf"
+TTM_PAGES_LIMIT = "/sys/module/ttm/parameters/pages_limit"
+GPU_TOO_SMALL = "Not enough GPU memory"
+# Run as root with the drop-in and the page count. A failed rebuild puts the drop-in back as it
+# was, so the next use rebuilds again rather than finding its value already saved.
+GPU_MEMORY_SCRIPT = r"""
+drop_in=$1 pages=$2 previous=
+if [[ -f $drop_in ]]; then
+  previous=$(<"$drop_in")
+fi
+# A drop-in that can't be written stops here, before a rebuild that would succeed without it.
+mkdir -p "${drop_in%/*}" && printf 'KERNEL_CMDLINE[default]+=" ttm.pages_limit=%s"\n' "$pages" > "$drop_in" || exit 1
+# limine-mkinitcpio reports a kernel it could not rebuild and still exits 0.
+if ! log=$(limine-mkinitcpio 2>&1) || grep -q 'mkinitcpio failed for kernel' <<<"$log"; then
+  printf '%s\n' "$log" >&2
+  if [[ -n $previous ]]; then
+    printf '%s\n' "$previous" > "$drop_in"
+  else
+    rm -f "$drop_in"
+  fi
+  exit 1
+fi
+"""
 RAM_CLASSES = (32, 64, 96, 128, 192, 256, 512)
-STANDARD_INPUTS = ("model", "draft", "ctx", "alias", "key", "temperature", "top_p", "top_k")
+STANDARD_INPUTS = ("model", "draft", "text_encoder", "vae", "ctx", "alias", "key", "temperature", "top_p", "top_k")
+# The files a recipe's artifacts can name, each reaching the server through the runtime input of
+# the same name: the model, and a draft for speculative decoding (text) or the text encoder and
+# VAE a diffusion model needs beside it (image).
+ROLES = ("model", "draft", "text_encoder", "vae")
+# What a recipe serves: text (chat completions, for the agents) or images. Agents, overlays, the
+# default model and tailnet sharing only ever see text models.
+KINDS = ("text", "image")
+# How the engine checks a server it just started answers only with the key: an OpenAI-compatible
+# /v1/models that lists the recipe id, or stable-diffusion.cpp's model status reporting ready.
+APIS = ("openai", "sdcpp")
 GFX_FAMILIES = {"gfx1151": "amd-strix-halo", "gfx1150": "amd-strix-point"}
 # NVIDIA platforms whose GPU shares the system's memory. The N1x is the GB10's GPU in a
 # laptop: it keeps its own family name so a measurement records which machine it came from,
@@ -61,6 +99,14 @@ GPU_CLASSES = {"nvidia-n1x": "nvidia-gb10"}
 
 def gpu_class(family):
   return GPU_CLASSES.get(family, family)
+
+
+def recipe_kind(recipe):
+  return (recipe or {}).get("kind", "text")
+
+
+def manifest_kind(manifest):
+  return recipe_kind((manifest or {}).get("recipe"))
 
 ID_RE = re.compile(r"^[a-z0-9]+([.-][a-z0-9]+)*$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -79,6 +125,8 @@ RUN_OPTIONS = {
   "group_add": ("keep-groups",),
   "memlock": ("unlimited",),
   "network": ("fabric",),
+  # A writable tmpfs at /tmp under the read-only root, for servers that write scratch files there.
+  "tmpfs": ("/tmp",),
 }
 MAX_SHM_GIB = 16
 # A machine joined to another of its kind by a direct ConnectX-7 cable runs recipes across both
@@ -243,6 +291,64 @@ def amd_gpus(kfd_root="/sys/class/kfd/kfd/topology/nodes", drm_root="/sys/class/
   return gpus
 
 
+def gpu_memory_ceiling_gib(gpu, ram_gib):
+  """The most memory this GPU can be given to address: a unified AMD GPU's cap can rise to all of
+  RAM but the desktop's reserve, any other GPU has what it has."""
+  if gpu["vendor"] == "amd" and gpu.get("unified"):
+    return round(max(gpu["memory_gib"], ram_gib - RESERVE_GIB), 2)
+  return gpu["memory_gib"]
+
+
+def gpu_pages_limit(ram_bytes):
+  return (ram_bytes - RESERVE_GIB * 2**30) // os.sysconf("SC_PAGE_SIZE")
+
+
+def pending_pages_limit():
+  match = re.search(r"ttm\.pages_limit=(\d+)", _read(GPU_MEMORY_DROP_IN))
+  return int(match.group(1)) if match else 0
+
+
+def gpu_memory_pending(variant, gpu):
+  """Whether a raised cap waits for the next boot, and covers the variant once it applies."""
+  pending = pending_pages_limit()
+  current = int(_read(TTM_PAGES_LIMIT, "0") or 0)
+  return pending > current and gib(pending * os.sysconf("SC_PAGE_SIZE")) + gpu.get("vram_gib", 0) >= variant["peak_gpu_gib"]
+
+
+def gpu_short_error(variant, gpu):
+  """Why a variant can't start on what the GPU addresses now: a reboot when a raised cap is
+  waiting for it, otherwise the shortfall, and that use raises the cap where it can."""
+  if gpu_memory_pending(variant, gpu):
+    return LocalError(f"the GPU addresses {gpu['memory_gib']:.0f} GiB and the model needs {variant['peak_gpu_gib']:g}, until a reboot raises its memory limit",
+                      short=REBOOT_FOR_GPU_MEMORY)
+  hint = "; omarchy agent local use raises its memory limit" if variant["peak_gpu_gib"] <= gpu.get("max_memory_gib", gpu["memory_gib"]) else ""
+  return LocalError(f"the GPU addresses {gpu['memory_gib']:.0f} GiB and the model needs {variant['peak_gpu_gib']:g}{hint}", short=GPU_TOO_SMALL)
+
+
+def raise_gpu_memory(variant, gpu, detach=False):
+  """Raises a unified AMD GPU's memory cap when the variant needs more than the GPU addresses now.
+  It applies at the next boot, so the model starts once the machine has rebooted. The panel's
+  setup has no terminal for sudo, so polkit asks for the password instead."""
+  if variant["peak_gpu_gib"] <= gpu["memory_gib"] or variant["peak_gpu_gib"] > gpu.get("max_memory_gib", gpu["memory_gib"]):
+    return
+  pages = gpu_pages_limit(meminfo().get("MemTotal", 0))
+  if int(_read(TTM_PAGES_LIMIT, "0") or 0) >= pages:
+    raise LocalError(f"The kernel already lets the GPU map {gib(pages * os.sysconf('SC_PAGE_SIZE')):.0f} GiB, but it addresses {gpu['memory_gib']:.0f}: "
+                     "amdgpu.gttsize on the kernel command line may be holding it lower")
+  if pending_pages_limit() >= pages:
+    return
+  if not shutil.which("limine-mkinitcpio"):
+    raise LocalError(f"The model needs {variant['peak_gpu_gib']:g} GiB of GPU-addressable memory and the kernel lets this GPU map {gpu['memory_gib']:.0f}. "
+                     f"Add ttm.pages_limit={pages} to the kernel command line and reboot.")
+  say(f"Raising the GPU memory limit to {gib(pages * os.sysconf('SC_PAGE_SIZE')):.0f} GiB from the next boot, which rebuilds the boot image")
+  argv = ["pkexec" if detach else "sudo", "/usr/bin/bash", "-c", GPU_MEMORY_SCRIPT, "omarchy-local-ai", GPU_MEMORY_DROP_IN, str(pages)]
+  status = subprocess.run(argv).returncode
+  if detach and status == 126:
+    raise LocalError("Authentication was cancelled")
+  if status != 0:
+    raise LocalError("Couldn't raise the GPU memory limit (see above)")
+
+
 def ram_class(ram_gib):
   for size in RAM_CLASSES:
     if ram_gib <= size:
@@ -257,6 +363,8 @@ def machine_profile():
   ram = gib(mem.get("MemTotal", 0))
   platform = platform_name()
   gpus = amd_gpus()
+  for gpu in gpus:
+    gpu["max_memory_gib"] = gpu_memory_ceiling_gib(gpu, ram)
   if platform in NVIDIA_UNIFIED_FAMILIES:
     gpus.append({"vendor": "nvidia", "family": NVIDIA_UNIFIED_FAMILIES[platform], "render_node": "", "vram_gib": 0, "gtt_gib": 0, "unified": True, "memory_gib": round(ram, 2), "sysfs": ""})
   profile = {"platform": platform, "ram_gib": round(ram, 2), "ram_class": ram_class(ram), "gpus": gpus}
@@ -361,6 +469,21 @@ def fabric_side(peer):
     except OSError:
       return []
   return {"addr": src, "dev": dev, "hca": hca, "gid": gid, "hcas": hcas, "devs": [d for h in hcas for d in netdevs(h)]}
+def drop_cache(root, marker):
+  """Drops the page cache of every file under root's directories whose name holds marker."""
+  for top in (os.listdir(root) if os.path.isdir(root) else []):
+    if marker not in top:
+      continue
+    for directory, _, names in os.walk(os.path.join(root, top)):
+      for name in names:
+        try:
+          fd = os.open(os.path.join(directory, name), os.O_RDONLY)
+        except OSError:
+          continue
+        try:
+          os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        finally:
+          os.close(fd)
 def ports():
   """Each RDMA-capable netdev with a carrier, and its IPv4 addresses as address/prefix."""
   links = json.loads(subprocess.run(["ip", "-j", "-4", "addr"], capture_output=True, text=True).stdout or "[]")
@@ -598,7 +721,11 @@ def validate_runtime(rid, runtime, root=None):
       errors.append(f"{where}.inputs.key: {target} doesn't name a key")
     if kind == "env" and target == KEY_ENV:
       errors.append(f"{where}.inputs.{name}: {KEY_ENV} belongs to Omarchy")
-  for required in ("model", "alias", "key"):
+  api = runtime.get("api", "openai")
+  if api not in APIS:
+    errors.append(f"{where}.api: must be one of {', '.join(APIS)}")
+  # The OpenAI check finds the recipe by the alias the server is given; sd-server names no model.
+  for required in ("model", "key") + (("alias",) if api == "openai" else ()):
     if required not in inputs:
       errors.append(f"{where}.inputs: must map '{required}'")
   key = inputs.get("key", {})
@@ -614,9 +741,8 @@ def validate_runtime(rid, runtime, root=None):
 
 
 def validate_pair_runtime(where, runtime, run):
-  """A runtime spanning two machines: its own network, the ranks' state folder and environment,
-  and the flags the engine binds its API to loopback with. Both ranks run the runtime's command,
-  which their servers compare."""
+  """A runtime spanning two machines: its own network, the ranks' commands and environment,
+  and the flags the engine binds its API to loopback with."""
   errors = []
   pair = runtime.get("pair")
   fabric = run.get("network") == "fabric"
@@ -633,17 +759,34 @@ def validate_pair_runtime(where, runtime, run):
   port = pair.get("master_port")
   if not isinstance(port, int) or not 1024 <= port <= 65535:
     errors.append(f"{where}.pair.master_port: must be 1024-65535")
+  model = pair.get("model")
+  if model is not None and not (isinstance(model, str) and model.startswith("/prepared/") and _safe_relpath(model[len("/prepared/"):], f"{where}.pair.model", [])):
+    errors.append(f"{where}.pair.model: must be a path under /prepared")
   state = pair.get("state")
-  if not (isinstance(state, str) and re.match(r"^/[a-z][a-z0-9_-]*$", state) and state not in ("/models", "/tmp")):
-    errors.append(f"{where}.pair.state: must be one top-level path such as /state, not /models or /tmp")
-  env = pair.get("env", {})
-  if not isinstance(env, dict):
-    errors.append(f"{where}.pair.env: must be a table")
-    env = {}
-  for key, value in env.items():
-    if not ENV_RE.match(key) or key == KEY_ENV or key in PAIR_NCCL:
-      errors.append(f"{where}.pair.env.{key}: not an allowed variable name ({', '.join(PAIR_NCCL)} are the engine's)")
-    _safe_string(value, f"{where}.pair.env.{key}", errors)
+  if state is not None and not (isinstance(state, str) and re.match(r"^/[a-z][a-z0-9_-]*$", state) and state not in ("/models", "/prepared", "/tmp")):
+    errors.append(f"{where}.pair.state: must be one top-level path such as /state, not /models, /prepared or /tmp")
+  # Without a worker command rank 1 runs the head's own invocation: its server compares the two.
+  prepared = pair.get("prepared_gib")
+  if prepared is not None and not (isinstance(prepared, (int, float)) and prepared > 0):
+    errors.append(f"{where}.pair.prepared_gib: must be a positive number of GiB")
+  for name in ("prepare", "worker"):
+    command = pair.get(name)
+    if command is None:
+      continue
+    if not isinstance(command, list) or not command:
+      errors.append(f"{where}.pair.{name}: must be a non-empty list")
+      continue
+    for index, part in enumerate(command):
+      _safe_string(part, f"{where}.pair.{name}[{index}]", errors)
+  for name in ("env", "head_env", "worker_env"):
+    table = pair.get(name, {})
+    if not isinstance(table, dict):
+      errors.append(f"{where}.pair.{name}: must be a table")
+      continue
+    for key, value in table.items():
+      if not ENV_RE.match(key) or key == KEY_ENV or key in PAIR_NCCL:
+        errors.append(f"{where}.pair.{name}.{key}: not an allowed variable name ({', '.join(PAIR_NCCL)} are the engine's)")
+      _safe_string(value, f"{where}.pair.{name}.{key}", errors)
   listen = runtime.get("listen")
   if not (isinstance(listen, dict) and set(listen) == {"host", "port"} and all(isinstance(v, str) and ARG_RE.match(v) for v in listen.values())):
     errors.append(f"{where}.listen: a host-network runtime names its bind flags, as {{ host = '--host', port = '--port' }}")
@@ -673,11 +816,17 @@ def validate_recipe(rid, recipe, runtimes, root=None, user=False):
   where = f"recipes/{rid}"
   if not ID_RE.match(rid):
     errors.append(f"{where}: id must match {ID_RE.pattern}")
-  for field in ("name", "summary"):
-    _safe_string(recipe.get(field), f"{where}.{field}", errors)
+  _safe_string(recipe.get("name"), f"{where}.name", errors)
   # The model maker, naming the logo the agents panel shows (assets/<vendor>.svg).
   if "vendor" in recipe and not (isinstance(recipe["vendor"], str) and ID_RE.match(recipe["vendor"])):
     errors.append(f"{where}.vendor: must match {ID_RE.pattern}")
+  kind = recipe_kind(recipe)
+  if kind not in KINDS:
+    errors.append(f"{where}.kind: must be one of {', '.join(KINDS)}")
+  # An image model that changes a picture by an instruction, given it as a reference image,
+  # rather than redrawing it from a description.
+  if "edit" in recipe and (not isinstance(recipe["edit"], bool) or kind != "image"):
+    errors.append(f"{where}.edit: true or false, for image models only")
   # Dense or mixture of experts, shown on the recipe's card.
   if "architecture" in recipe and recipe["architecture"] not in ARCHITECTURES:
     errors.append(f"{where}.architecture: must be one of {', '.join(ARCHITECTURES)}")
@@ -727,7 +876,7 @@ def validate_recipe(rid, recipe, runtimes, root=None, user=False):
       _safe_relpath(pattern, f"{at}.files[{findex}]", errors, glob=True)
     if "dest" in artifact:
       _safe_relpath(artifact["dest"], f"{at}.dest", errors)
-    for role in ("model", "draft"):
+    for role in ROLES:
       if role in artifact:
         # "." names the directory the artifact lands in, for servers that load a checkpoint
         # directory rather than one file; a dest keeps it apart from the other artifacts.
@@ -745,15 +894,20 @@ def validate_recipe(rid, recipe, runtimes, root=None, user=False):
           roles[role] = index
   if "model" not in roles:
     errors.append(f"{where}.artifacts: one artifact must name the model file")
-  if "draft" in roles and runtime and "draft" not in inputs:
-    errors.append(f"{where}.artifacts: names a draft but runtime '{runtime_id}' has no draft input")
+  for role in ROLES[1:]:
+    if role in roles and runtime and role not in inputs:
+      errors.append(f"{where}.artifacts: names a {role} but runtime '{runtime_id}' has no {role} input")
   variants = recipe.get("variant", [])
   if not isinstance(variants, list) or not variants:
     errors.append(f"{where}.variant: needs at least one [[variant]]")
     variants = []
   for index, variant in enumerate(variants):
     at = f"{where}.variant[{index}]"
-    if not isinstance(variant, dict) or not isinstance(variant.get("ctx"), int) or variant["ctx"] <= 0:
+    if not isinstance(variant, dict):
+      errors.append(f"{at}: must be a table")
+      continue
+    # An image model has no context: its variants may leave it out. A text model's is required.
+    if ("ctx" in variant or kind != "image") and (not isinstance(variant.get("ctx"), int) or variant["ctx"] <= 0):
       errors.append(f"{at}.ctx: must be a positive integer")
       continue
     for field in ("peak_ram_gib", "peak_gpu_gib"):
@@ -833,10 +987,18 @@ def validate_best(best, recipes):
     if not isinstance(names, list) or not names:
       errors.append(f"{where}.recipes: must be a non-empty list")
       continue
-    for name in names:
+    # `recipes` choose the agents' model and `use best`; `images`, the image models offered beside them.
+    images = entry.get("images", [])
+    if not isinstance(images, list):
+      errors.append(f"{where}.images: must be a list")
+      images = []
+    for field, kind, name in [("recipes", "text", name) for name in names] + [("images", "image", name) for name in images]:
       recipe = recipes.get(name)
       if recipe is None:
         errors.append(f"{where}: unknown recipe '{name}'")
+        continue
+      if recipe_kind(recipe) != kind:
+        errors.append(f"{where}.{field}: '{name}' is of kind {recipe_kind(recipe)}, not {kind}")
         continue
       qualified = any(
         hw.get("ram_class") == entry.get("ram_class")
@@ -989,8 +1151,10 @@ def fits(variant, profile, gpu, rid):
     return False, "its numbers are a draft, not measured; measure it before it counts as fitting"
   if source == "estimated" and (rid is None or variant_key(variant) not in load_confirmed().get(rid, [])):
     return False, f"its numbers are estimated; confirm them once with: omarchy agent local recipe confirm {rid or '<id>'}"
-  if variant["peak_gpu_gib"] > gpu["memory_gib"]:
-    return False, f"needs {variant['peak_gpu_gib']:g} GiB GPU-addressable memory, this GPU has {gpu['memory_gib']:.0f}"
+  # Judged by the most the GPU can be given: use raises a cap that's lower.
+  ceiling = gpu.get("max_memory_gib", gpu["memory_gib"])
+  if variant["peak_gpu_gib"] > ceiling:
+    return False, f"needs {variant['peak_gpu_gib']:g} GiB GPU-addressable memory, this GPU has {ceiling:.0f}"
   if variant["peak_ram_gib"] + RESERVE_GIB > profile["ram_gib"]:
     return False, f"needs {variant['peak_ram_gib']:g} GiB RAM plus {RESERVE_GIB} GiB for the desktop, this machine has {profile['ram_gib']:.0f}"
   return True, ""
@@ -999,11 +1163,12 @@ def fits(variant, profile, gpu, rid):
 def pick_variant(recipe, profile, gpu, ctx, rid):
   # The largest context first, and at the same context the larger setup (more streams, a bigger
   # prompt cache) where it fits, so a smaller machine falls back to the variant sized for it.
-  variants = sorted(recipe.get("variant", []), key=lambda v: (v["ctx"], v["peak_ram_gib"]), reverse=True)
+  # An image model's variants have no context and go by memory alone.
+  variants = sorted(recipe.get("variant", []), key=lambda v: (v.get("ctx") or 0, v["peak_ram_gib"]), reverse=True)
   if ctx:
-    variants = [v for v in variants if v["ctx"] == ctx]
+    variants = [v for v in variants if v.get("ctx") == ctx]
     if not variants:
-      raise LocalError(f"No measured variant with ctx {ctx} (have: {', '.join(str(v['ctx']) for v in recipe.get('variant', []))})")
+      raise LocalError(f"No measured variant with ctx {ctx} (have: {', '.join(str(v['ctx']) for v in recipe.get('variant', []) if v.get('ctx')) or 'none'})")
   reasons = []
   for variant in variants:
     ok, reason = fits(variant, profile, gpu, rid)
@@ -1029,18 +1194,19 @@ def match_class(best, profile, gpu):
                if gpu_class(entry["gpu"]) == gpu_class(gpu["family"]) and entry["ram_class"] == profile["ram_class"]), None)
 
 
-def resolve_best(catalog, profile, gpu=None, ctx=None):
+def resolve_best(catalog, profile, gpu=None, ctx=None, field="recipes"):
   """The first fitting recipe of the class of `gpu`, or, with none named, of this machine's
-  GPUs from the strongest down: a pair's class first, then its own node's."""
+  GPUs from the strongest down: a pair's class first, then its own node's. `field` is the class's
+  list to choose from: its text recipes, or with "images" its image models."""
   if gpu is not None:
-    return _resolve_class(catalog, profile, gpu, ctx)
+    return _resolve_class(catalog, profile, gpu, ctx, field)
   gpus = sorted(profile["gpus"], key=lambda g: (g.get("nodes", 1), g["memory_gib"]), reverse=True)
   if not gpus:
     raise LocalError("No supported GPU found on this machine")
   failures = []
   for candidate in gpus:
     try:
-      return _resolve_class(catalog, profile, candidate, ctx)
+      return _resolve_class(catalog, profile, candidate, ctx, field)
     except LocalError as error:
       failures.append((candidate, error))
   # The most telling failure: the first GPU that has a recommendation at all.
@@ -1048,7 +1214,7 @@ def resolve_best(catalog, profile, gpu=None, ctx=None):
   raise classed[0] if classed else failures[0][1]
 
 
-def _resolve_class(catalog, profile, gpu, ctx=None):
+def _resolve_class(catalog, profile, gpu, ctx=None, field="recipes"):
   entry = match_class(catalog.best, profile, gpu)
   if entry is None:
     near = [rid for rid, recipe in catalog.recipes.items() if any(gpu_class(hw.get("gpu")) == gpu_class(gpu["family"]) for hw in recipe.get("hardware", []))]
@@ -1057,7 +1223,7 @@ def _resolve_class(catalog, profile, gpu, ctx=None):
       + (f"Recipes measured on the same GPU family: {', '.join(near)}" if near else "No recipes are measured on this GPU family yet.")
     )
   skipped = []
-  for rid in entry["recipes"]:
+  for rid in entry.get(field, []):
     if rid not in catalog.recipes:
       continue
     try:
@@ -1078,12 +1244,13 @@ def recipe_listing(catalog, profile, running=(), machines=True):
     gpu = choose_gpu(profile)
   except LocalError as error:
     gpu, gpu_error = None, str(error)
-  best_id = None
+  best_ids = set()
   if gpu:
-    try:
-      best_id = resolve_best(catalog, profile)[0]
-    except LocalError:
-      best_id = None
+    for field in ("recipes", "images"):
+      try:
+        best_ids.add(resolve_best(catalog, profile, field=field)[0])
+      except LocalError:
+        pass
   for rid in sorted(catalog.recipes):
     recipe = catalog.recipes[rid]
     runtime = catalog.runtimes.get(recipe.get("runtime"), {})
@@ -1096,8 +1263,9 @@ def recipe_listing(catalog, profile, running=(), machines=True):
     measured = load_measurement(catalog, recipe, profile, own) if variant else {}
     rows.append({
       "id": rid,
+      "kind": recipe_kind(recipe),
+      "edit": bool(recipe.get("edit")),
       "name": recipe.get("name", rid),
-      "summary": recipe.get("summary", ""),
       "runtime": recipe.get("runtime", ""),
       "tier": runtime.get("tier", ""),
       "publisher": review.get("publisher", ""),
@@ -1107,21 +1275,24 @@ def recipe_listing(catalog, profile, running=(), machines=True):
       "installed": recipe_installed(rid),
       "available": variant is not None,
       "reason": "" if variant else reason,
-      "best": rid == best_id,
+      # The recommendation of its kind: the agents' model, or the image model beside it.
+      "best": rid in best_ids,
       "active": rid in running,
       # What the card shows: the measured footprint, context and speed at a
       # long prompt on this machine class.
       "source": variant_source(variant) if variant else None,
       "memory_gib": variant["peak_ram_gib"] if variant else None,
-      "context": variant["ctx"] if variant else None,
+      "context": variant.get("ctx") if variant else None,
       "decode_tok_s": measured.get("long", {}).get("decode_tok_s"),
       "prefill_tok_s": measured.get("long", {}).get("prefill_tok_s"),
     })
   # What this machine can't run but a remote can is offered there, measured on the remote.
+  # A machine's best is offered only for a kind (text or image) this machine has no best of its own for.
+  local_best_kinds = {row["kind"] for row in rows if row["best"]}
   for host, there in (load_machines() if machines else {}).items():
     for row, far in zip(rows, recipe_listing(catalog, there, running, machines=False)):
       if not row["available"] and far["available"]:
-        row.update(far, summary=f"{far['summary']} Runs on {host}.", machine=host, best=far["best"] and best_id is None)
+        row.update(far, machine=host, best=far["best"] and row["kind"] not in local_best_kinds)
       elif not row["available"] and not row.get("machine"):
         row["reason"] += f"; on {host}: {far['reason']}"
   return rows
@@ -1225,7 +1396,7 @@ def build_artifacts(recipe, tree_cache=None):
           record["git_oid"] = entry["oid"]
         destinations[dest] = record
         files.append(record)
-    for role in ("model", "draft"):
+    for role in ROLES:
       if role in artifact:
         target = artifact[role]
         if target == ".":
@@ -1418,7 +1589,7 @@ def validate_files(files, roles):
   if len(dests) != len(files):
     errors.append("files: two records share a destination")
   for role, path in (roles or {}).items():
-    if role not in ("model", "draft"):
+    if role not in ROLES:
       errors.append(f"roles.{role}: not a role")
     elif not _safe_relpath(path, f"roles.{role}", errors):
       continue
@@ -1445,17 +1616,20 @@ def prune_filesets(rid, keep):
   base = os.path.join(data_dir(), "models", rid)
   if not os.path.isdir(base) or not FILESET_RE.match(keep or ""):
     return
+  manifest = load_model(rid) or {}
+  # A paired recipe's rank folders go with their file set, and only the current generation's stay.
+  generation = rank_generation(manifest.get("runtime"))
+  current = f"{keep}.{generation}." if generation else f"{keep}."
   for name in os.listdir(base):
-    # A paired recipe's rank folders (<fileset>.rank<N>) go with their file set.
-    if name != keep and not name.startswith(keep + "."):
+    if name != keep and not name.startswith(current):
       shutil.rmtree(os.path.join(base, name), ignore_errors=True)
   # The peer's copies too, once the setup that replaced them is the current one.
-  setup = (load_model(rid) or {}).get("pair")
+  setup = manifest.get("pair")
   if setup:
     peer_base = os.path.dirname(peer_fileset_dir(setup, rid, keep))
     q = shlex.quote
     try:
-      pair_ssh(setup["peer"], f"cd {q(peer_base)} && for d in *; do case $d in {q(keep)}|{q(keep)}.*) ;; *) rm -rf -- \"$d\" ;; esac; done", check=False)
+      pair_ssh(setup["peer"], f"cd {q(peer_base)} && for d in *; do case $d in {q(keep)}|{q(current)}*) ;; *) rm -rf -- \"$d\" ;; esac; done", check=False)
     except LocalError:
       pass
 
@@ -1520,9 +1694,13 @@ def server_invocation(runtime, recipe, variant, roles, rid):
   """Returns (entrypoint, argv, env) with the key as KEY_PLACEHOLDER when it's an argument."""
   inputs = runtime["inputs"]
   values = {
-    "model": f"/models/{roles['model']}",
+    # A paired runtime may serve a folder its prepare step made (the checkpoint linked, beside
+    # files the release lacks) instead of the file set itself.
+    "model": runtime.get("pair", {}).get("model") or f"/models/{roles['model']}",
     "draft": f"/models/{roles['draft']}" if roles.get("draft") else None,
-    "ctx": str(variant["ctx"]),
+    "text_encoder": f"/models/{roles['text_encoder']}" if roles.get("text_encoder") else None,
+    "vae": f"/models/{roles['vae']}" if roles.get("vae") else None,
+    "ctx": str(variant["ctx"]) if variant.get("ctx") else None,
     "alias": rid,
     "key": KEY_PLACEHOLDER,
   }
@@ -1540,7 +1718,7 @@ def server_invocation(runtime, recipe, variant, roles, rid):
       if name in ("temperature", "top_p", "top_k"):
         skipped.append(name)
         continue
-      if name in ("draft", "ctx"):
+      if name in ("draft", "text_encoder", "vae", "ctx"):
         raise LocalError(f"Runtime has no mapping for {name}")
       continue
     if "arg" in mapping:
@@ -1624,7 +1802,7 @@ def render_container(rid, recipe, runtime, variant, roles, gpu, fileset):
     lines += [
       "Network=host",
       f"Volume=%h/.local/share/omarchy/agent-local/models/{rid}/{fileset}:/models:ro",
-      f"Volume=%h/.local/share/omarchy/agent-local/models/{rid}/{fileset}.rank0:{pair['state']}",
+      "Volume=" + rank_mount(runtime, f"%h/.local/share/omarchy/agent-local/models/{rid}/{rank_folder(fileset, 0, runtime)}"),
       f"EnvironmentFile=%h/.local/state/omarchy/agent-local/pair/{rid}.env",
       "Ulimit=stack=67108864:67108864",
       "Tmpfs=/tmp",
@@ -1647,6 +1825,9 @@ def render_container(rid, recipe, runtime, variant, roles, gpu, fileset):
     lines.append("Ulimit=memlock=-1:-1")
   if run.get("shm_size_gib"):
     lines.append(f"ShmSize={int(run['shm_size_gib'] * 1024)}m")
+  # A paired unit mounts its own.
+  if run.get("tmpfs") == "/tmp" and not pair:
+    lines.append("Tmpfs=/tmp")
   for name, value in sorted(env.items()):
     lines.append(f"Environment={_quote(f'{name}={value}')}")
   lines += ["ReadOnly=true", "DropCapability=all", "NoNewPrivileges=true"]
@@ -1768,6 +1949,34 @@ def unit_props(rid, *names):
 
 def unit_active(rid):
   return unit_props(rid, "ActiveState").get("ActiveState") in ("active", "activating", "reloading")
+
+
+def stop_unit(rid):
+  """Stop a model's unit, as promptly mid-load as once it's up. systemd runs ExecStop only for a
+  unit that went active: one still loading just has conmon sent SIGTERM, which it doesn't pass on,
+  so the stop sat out the 90s timeout and then killed. The stop is queued first, so the container
+  ending isn't taken for a crash to restart, then the container is removed as ExecStop would, at
+  once: a server mid-load doesn't heed SIGTERM, and a half-loaded model has nothing to save. The
+  marker tells the stop hook and the start this was asked for, not a crash or a failed start, and
+  systemd's own failed state, from the killed server's exit, is cleared for the same reason."""
+  if unit_props(rid, "ActiveState").get("ActiveState") != "activating":
+    return systemctl("stop", unit_name(rid))
+  write_atomic(stop_requested_path(rid), "")
+  systemctl("stop", "--no-block", unit_name(rid))
+  subprocess.run(["podman", "rm", "-v", "-f", "-i", "-t", "0", unit_base(rid)], capture_output=True)
+  result = systemctl("stop", unit_name(rid))
+  systemctl("reset-failed", unit_name(rid))
+  return result
+
+
+def stop_requested_path(rid):
+  return os.path.join(state_dir(), "stopping", rid)
+
+
+def stop_requested(rid, since_ms):
+  """Whether a stop was asked for since since_ms, the start it would have cut short."""
+  path = stop_requested_path(rid)
+  return bool(since_ms) and os.path.exists(path) and os.path.getmtime(path) * 1000 >= since_ms
 
 
 SERVER_ERROR_RE = re.compile(r"^(error|tensorfold|fatal):\s*(.+)", re.IGNORECASE)
@@ -1929,14 +2138,31 @@ def http_status(url, key=None, timeout=10):
     return 0, str(error).encode()
 
 
-def post_start_checks(rid, key):
-  base = f"{endpoint(rid)}/models"
+# stable-diffusion.cpp's sd-server lists itself as sd-cpp-local, never the recipe, so it is
+# checked by the state of the model it loaded instead.
+SDCPP_STATUS = "/sdcpp/v1/models/status"
+
+
+def post_start_checks(rid, key, runtime=None):
+  """The server just started must refuse a request without the key, accept the key and serve
+  this recipe: by its OpenAI model list naming the recipe id, or for sd-server by its loaded
+  model reporting ready."""
+  sdcpp = (runtime or {}).get("api") == "sdcpp"
+  base = f"http://127.0.0.1:{port_for(rid)}{SDCPP_STATUS}" if sdcpp else f"{endpoint(rid)}/models"
   status, _ = http_status(base)
   if status not in (401, 403):
     raise LocalError(f"The server answered {status or 'nothing'} without the key; refusing a model that doesn't enforce its key")
   status, body = http_status(base, key)
   if status != 200:
     raise LocalError(f"The server answered {status or 'nothing'} with the key")
+  if sdcpp:
+    try:
+      state = json.loads(body).get("state")
+    except (ValueError, AttributeError):
+      state = None
+    if state != "ready":
+      raise LocalError(f"Port {port_for(rid)} reports its image model {state or 'in an unknown state'}, not ready")
+    return
   try:
     ids = [entry.get("id") for entry in json.loads(body).get("data", [])]
   except ValueError:
@@ -1995,23 +2221,42 @@ def evict_idle_weights(keep=()):
         os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
       finally:
         os.close(fd)
+  # A paired recipe's per-rank inputs (a weight file the size of the rank's share) are copied
+  # into GPU memory as it loads; on unified memory a cached copy only competes with the model.
+  # Prepare leaves them cached right after writing them.
+  running = running_models()
+  scope = {}
+  exec(FABRIC_SIDE, scope)
+  for rid in os.listdir(os.path.join(data_dir(), "models")) if os.path.isdir(os.path.join(data_dir(), "models")) else []:
+    if rid not in running:
+      scope["drop_cache"](os.path.join(data_dir(), "models", rid), ".rank")
+
+
+def start_needs_gib(variant):
+  """The RAM free a model needs to start. Fit already keeps RESERVE_GIB of the machine's RAM for
+  the desktop, and what the desktop holds now is not free, so start counts the reserve no second
+  time: a 64 GB Strix Halo whose desktop holds 13 GiB has 48.6 free, short of 42 + 8 but with room
+  for the model's 42."""
+  return variant["peak_ram_gib"]
 
 
 def check_headroom(variant, gpu):
+  if variant["peak_gpu_gib"] > gpu["memory_gib"]:
+    raise gpu_short_error(variant, gpu)
   if gpu.get("nodes") == 2:
     pair_limits(gpu["peer"])
     peer_headroom(gpu["peer"], variant)
   for _ in range(15):
     available, gpu_free = free_memory(gpu)
-    if available >= variant["peak_ram_gib"] + RESERVE_GIB and gpu_free >= variant["peak_gpu_gib"]:
+    if available >= start_needs_gib(variant) and gpu_free >= variant["peak_gpu_gib"]:
       return available, gpu_free
     time.sleep(1)
   running = [rid for rid in known_models() if unit_active(rid)]
   names = [(load_model(rid) or {}).get("recipe", {}).get("name", rid) for rid in running]
-  need = variant["peak_ram_gib"] + RESERVE_GIB
+  need = start_needs_gib(variant)
   short = f"{NOT_ENOUGH_MEMORY} (needs {need:g} GiB)"
   raise LocalError(
-    f"Not enough free memory right now: the model needs {variant['peak_ram_gib']:g} GiB RAM plus {RESERVE_GIB} GiB for the desktop "
+    f"Not enough free memory right now: the model needs {need:g} GiB RAM "
     f"and {variant['peak_gpu_gib']:g} GiB GPU-addressable; {available:.1f} GiB RAM and {gpu_free:.1f} GiB GPU are free.\n"
     + (f"Local models running: {', '.join(running)} (stop one with: omarchy agent local stop <recipe>)\n" if running else "")
     + f"Largest memory users: {top_memory_users()}",
@@ -2022,13 +2267,25 @@ def check_headroom(variant, gpu):
 # ---------------------------------------------------------------- ranks on two machines
 #
 # A paired recipe's file set is materialized here as any other, then copied to the peer over the
-# cable. Each rank keeps its server's caches in its own writable folder, <fileset>.rank<N>, at the
-# runtime's state path. Rank 1 runs on the peer as a plain Podman container the head unit's hooks
-# start and stop, with the same boundary as the head's: read-only root and model mounts, no
-# capabilities, no new privileges, the GPU and RDMA devices only.
+# cable. Each rank's own inputs (a weight file cut for that rank, tables made from the
+# checkpoint) are made next to the file set, in <fileset>.rank<N>, by the runtime's prepare
+# command in a container without network. Rank 1 runs on the peer as a plain Podman container
+# the head unit's hooks start and stop, with the same boundary as the head's: read-only root and
+# model mounts, no capabilities, no new privileges, the GPU and RDMA devices only.
+
+RANK_CONTAINER = ["--read-only", "--tmpfs", "/tmp", "--cap-drop", "all", "--security-opt", "no-new-privileges"]
+
+
+def rank_mount(runtime, folder):
+  """A rank's own folder: its prepared inputs read-only at /prepared, or, for a runtime naming a
+  state path, writable there for the server's caches."""
+  state = runtime["pair"].get("state")
+  return f"{folder}:{state}" if state else f"{folder}:/prepared:ro"
+
 
 def head_argv(runtime, recipe, variant, roles, rid):
-  """The server command both ranks run, bound to loopback on the model's port."""
+  """The head's server command, bound to loopback on the model's port; also rank 1's when the
+  runtime names no worker command."""
   entrypoint, argv, env, skipped = server_invocation(runtime, recipe, variant, roles, rid)
   return entrypoint, argv + [runtime["listen"]["host"], "127.0.0.1", runtime["listen"]["port"], str(port_for(rid))], env, skipped
 
@@ -2037,8 +2294,23 @@ def worker_name(rid):
   return f"{UNIT_PREFIX}{rid}-rank1"
 
 
-def rank_dir(rid, fileset, rank, home_dir=None):
-  return os.path.join(home_dir or home(), ".local", "share", "omarchy", "agent-local", "models", rid, f"{fileset}.rank{rank}")
+def rank_generation(runtime):
+  """A runtime with a prepare step keeps each rank's prepared files per image and prepare command:
+  an update prepares a new generation while the running setup keeps reading its own, and the old
+  one goes only once the new setup has started (prune_filesets)."""
+  prepare = (runtime or {}).get("pair", {}).get("prepare")
+  if not prepare:
+    return ""
+  return hashlib.sha256(json.dumps([runtime["image"], prepare]).encode()).hexdigest()[:12]
+
+
+def rank_folder(fileset, rank, runtime):
+  generation = rank_generation(runtime)
+  return f"{fileset}.{generation}.rank{rank}" if generation else f"{fileset}.rank{rank}"
+
+
+def rank_dir(rid, fileset, rank, home_dir=None, runtime=None):
+  return os.path.join(home_dir or home(), ".local", "share", "omarchy", "agent-local", "models", rid, rank_folder(fileset, rank, runtime))
 
 
 def peer_fileset_dir(pair, rid, fileset):
@@ -2069,6 +2341,7 @@ def pair_manifest(rid):
 
 
 def peer_headroom(peer, variant):
+  # Fit counts the reserve against this machine's RAM only, so the peer's is kept here.
   node = pair_python(peer, "node()", timeout=10)
   available = gib(node["ram_available"])
   need = variant["peak_ram_gib"] + RESERVE_GIB
@@ -2078,6 +2351,26 @@ def peer_headroom(peer, variant):
       short=f"{NOT_ENOUGH_MEMORY} on {node['host']} (needs {need:g} GiB)",
     )
   return available
+
+
+def prepare_command(runtime, rank):
+  return [part.replace("@RANK@", str(rank)).replace("@WORLD@", str(runtime["pair"]["nodes"])) for part in runtime["pair"]["prepare"]]
+
+
+def stream(argv, what):
+  """Runs a long step with its output on this terminal."""
+  if subprocess.run(argv, stdin=subprocess.DEVNULL).returncode != 0:
+    raise LocalError(f"{what} failed", short=f"{what} failed")
+
+
+def prepare_name(rid, rank):
+  """A prepare container's name, so remove can stop one a cancelled setup left running."""
+  return f"{UNIT_PREFIX}{rid}-prepare{rank}"
+
+
+def need_disk(where, free, need):
+  if free < need:
+    raise LocalError(f"{where} has {gib(free):.0f} GiB free, and this setup needs {gib(need):.0f} GiB more there", short=f"Not enough disk on {where}")
 
 
 def peer_free_gib(manifest):
@@ -2114,8 +2407,8 @@ def nodes_ram_gib(manifest, profile):
 
 
 def pair_setup(rid, manifest, runtime, pair):
-  """Everything rank 1 needs on the peer before the first start: the image, the file set and its
-  state folder (rank 0's here too)."""
+  """Everything both ranks read before the first start: rank 0's prepared inputs here, then the
+  image, the file set and rank 1's prepared inputs on the peer."""
   fileset = manifest["fileset"]
   models = fileset_dir(rid, fileset)
   inspect = subprocess.run(["podman", "image", "inspect", "--format", "{{.Id}}", runtime["image"]], capture_output=True, text=True)
@@ -2126,9 +2419,26 @@ def pair_setup(rid, manifest, runtime, pair):
   # A first setup cancelled from here on still knows where its copies went.
   if load_installing(rid) is not None:
     update_installing(rid, pair=manifest["pair"])
-  ensure_dir(rank_dir(rid, fileset, 0))
+  local_rank = rank_dir(rid, fileset, 0, runtime=runtime)
+  ensure_dir(local_rank)
   peer = pair["peer"]
   q = shlex.quote
+  # Before writing anything: the prepared files on each Spark, and the file set on the peer.
+  prepared = runtime["pair"].get("prepared_gib", 0) * 2**30
+  # lstat: the served model folder links into /models, which only resolves inside the container.
+  have = sum(os.lstat(os.path.join(d, f)).st_size for d, _, names in os.walk(local_rank) for f in names)
+  need_disk("this machine", shutil.disk_usage(local_rank).free, prepared - have)
+  # Only what this setup reuses counts as already there: its file set and its generation's rank
+  # folder, not an older generation that stays until the new setup has started.
+  target, peer_rank = peer_fileset_dir(pair, rid, fileset), rank_dir(rid, fileset, 1, pair["home"], runtime)
+  base = os.path.dirname(target)
+  free, present = (pair_ssh(peer, f"mkdir -p {q(base)} && df -B1 --output=avail {q(base)} | tail -1 && du -sbc {q(target)} {q(peer_rank)} 2>/dev/null | tail -1 | cut -f1").stdout.split() + ["0", "0"])[:2]
+  need_disk(pair["host"], int(free), sum(record["size"] for record in manifest.get("files", [])) + prepared - int(present))
+  if runtime["pair"].get("prepare"):
+    say("Preparing rank 0's inputs here (minutes the first time)")
+    stream(["podman", "run", "--rm", "--name", prepare_name(rid, 0), "--network", "none", *RANK_CONTAINER,
+            "-v", f"{models}:/models:ro", "-v", f"{local_rank}:/prepared", runtime["image"], *prepare_command(runtime, 0)],
+           "Preparing rank 0")
   if pair_ssh(peer, f"podman image exists {q(ident)}", check=False).returncode != 0:
     say(f"Copying the runtime image to {pair['host']} over the link")
     save = subprocess.Popen(["podman", "save", runtime["image"]], stdout=subprocess.PIPE)
@@ -2137,14 +2447,17 @@ def pair_setup(rid, manifest, runtime, pair):
     if save.wait() != 0 or load.returncode != 0:
       raise LocalError(f"Copying the image to {pair['host']} failed: {load.stderr.strip()[-400:]}", short="Image copy to the peer failed")
     pair_ssh(peer, f"podman image exists {q(ident)}")
-  target = peer_fileset_dir(pair, rid, fileset)
   say(f"Copying the model files to {pair['host']} over the link (only what it lacks)")
   pair_ssh(peer, f"mkdir -p {q(target)}")
-  rsync = ["rsync", "-a", "--partial", "--delete", "--info=progress2", "--no-inc-recursive",
-           "-e", shlex.join(pair_ssh_argv() + ["-o", "Compression=no", "-c", "aes128-gcm@openssh.com"]), f"{models}/", f"{peer}:{target}/"]
-  if subprocess.run(rsync, stdin=subprocess.DEVNULL).returncode != 0:
-    raise LocalError(f"Copying the model files to {pair['host']} failed", short="Copy to the peer failed")
-  pair_ssh(peer, f"mkdir -p {q(rank_dir(rid, fileset, 1, pair['home']))}")
+  stream(["rsync", "-a", "--partial", "--delete", "--info=progress2", "--no-inc-recursive",
+          "-e", shlex.join(pair_ssh_argv() + ["-o", "Compression=no", "-c", "aes128-gcm@openssh.com"]),
+          f"{models}/", f"{peer}:{target}/"], f"Copying the model files to {pair['host']}")
+  pair_ssh(peer, f"mkdir -p {q(peer_rank)}")
+  if runtime["pair"].get("prepare"):
+    say(f"Preparing rank 1's inputs on {pair['host']}")
+    command = shlex.join(["podman", "run", "--rm", "--name", prepare_name(rid, 1), "--network", "none", *RANK_CONTAINER,
+                          "-v", f"{target}:/models:ro", "-v", f"{peer_rank}:/prepared", ident, *prepare_command(runtime, 1)])
+    stream(pair_ssh_argv() + [peer, command], f"Preparing rank 1 on {pair['host']}")
 
 
 def _placeholders(text, values):
@@ -2164,23 +2477,32 @@ def pair_worker_start(rid):
   here, there = pair_link(pair)
   # Also here: systemd's restarts after a failure don't pass admission.
   pair_limits(pair["peer"])
+  peer_models = os.path.join(pair["home"], ".local", "share", "omarchy", "agent-local", "models", rid)
+  pair_python(pair["peer"], f"drop_cache({peer_models!r}, '.rank')", timeout=60)
   peer_headroom(pair["peer"], variant)
   spec = runtime["pair"]
-  def environment(rank, side):
-    values = {"@RANK@": str(rank), "@WORLD@": str(spec["nodes"]), "@MASTER_ADDR@": here["addr"],
-              "@MASTER_PORT@": str(spec["master_port"]), "@RDMA_DEVICES@": ",".join(side["hcas"])}
-    env = {name: _placeholders(value, values) for name, value in spec.get("env", {}).items()}
+  def values(rank, side):
+    return {"@RANK@": str(rank), "@WORLD@": str(spec["nodes"]), "@MASTER_ADDR@": here["addr"], "@MASTER_PORT@": str(spec["master_port"]),
+            "@CTX@": str(variant["ctx"]), "@RDMA_DEVICES@": ",".join(side["hcas"]), "@GID_INDEX@": str(side["gid"]), "@SOCKET_IFNAME@": side["dev"]}
+  def environment(rank, side, own):
+    env = {**spec.get("env", {}), **spec.get(own, {})}
+    env = {name: _placeholders(value, values(rank, side)) for name, value in env.items()}
     env.update(NCCL_SOCKET_IFNAME=side["dev"], NCCL_IB_HCA=",".join(side["hcas"]), NCCL_IB_GID_INDEX=str(side["gid"]))
     return env
-  write_atomic(pair_env_path(rid), "".join(f"{name}={value}\n" for name, value in sorted(environment(0, here).items())))
+  head = environment(0, here, "head_env")
+  write_atomic(pair_env_path(rid), "".join(f"{name}={value}\n" for name, value in sorted(head.items())))
   fileset = manifest["fileset"]
-  _, argv, worker, _ = head_argv(runtime, manifest["recipe"], variant, manifest["roles"], rid)
-  worker.update(environment(1, there))
+  worker = environment(1, there, "worker_env")
+  if spec.get("worker"):
+    argv = [_placeholders(part, values(1, there)) for part in spec["worker"]]
+  else:
+    _, argv, server_env, _ = head_argv(runtime, manifest["recipe"], variant, manifest["roles"], rid)
+    worker.update(server_env)
   run = runtime.get("run", {})
   command = ["podman", "run", "-d", "--replace", "--name", worker_name(rid), "--label", f"org.omarchy.agent-local.recipe={rid}",
              "--network", "host", "--read-only", "--tmpfs", "/tmp", "--cap-drop", "all", "--security-opt", "no-new-privileges", "--device", "nvidia.com/gpu=all", "--device", "/dev/infiniband",
              "--ulimit", "memlock=-1:-1", "--ulimit", "stack=67108864:67108864",
-             "-v", f"{peer_fileset_dir(pair, rid, fileset)}:/models:ro", "-v", f"{rank_dir(rid, fileset, 1, pair['home'])}:{spec['state']}"]
+             "-v", f"{peer_fileset_dir(pair, rid, fileset)}:/models:ro", "-v", rank_mount(runtime, rank_dir(rid, fileset, 1, pair["home"], runtime))]
   if run.get("shm_size_gib"):
     command += ["--shm-size", f"{int(run['shm_size_gib'] * 1024)}m"]
   for name, value in sorted(worker.items()):
@@ -2209,7 +2531,9 @@ def pair_remove(manifest, local_only=False):
   q = shlex.quote
   base = os.path.join(setup["home"], ".local", "share", "omarchy", "agent-local", "models", rid)
   others = {(load_model(other) or {}).get("pair", {}).get("image_id") for other in known_models() if other != rid}
-  command = f"podman rm -f {q(worker_name(rid))} >/dev/null 2>&1; rm -rf -- {q(base)}"
+  # A prepare a cancelled setup left running goes first, here and there, then its files.
+  subprocess.run(["podman", "rm", "-f", prepare_name(rid, 0)], capture_output=True)
+  command = f"podman rm -f {q(worker_name(rid))} {q(prepare_name(rid, 1))} >/dev/null 2>&1; rm -rf -- {q(base)}"
   if setup["image_id"] not in others:
     command += f"; podman rmi {q(setup['image_id'])} >/dev/null 2>&1"
   try:
@@ -2672,18 +2996,25 @@ def known_models():
 
 
 def last_model_id():
+  """The last text model started: the agents' default. Image models never become it."""
   rid = _read(os.path.join(state_dir(), "last"))
-  return rid if rid and load_model(rid) else None
+  manifest = load_model(rid) if rid else None
+  return rid if manifest and manifest_kind(manifest) == "text" else None
+
+
+def remember_last(manifest):
+  if manifest_kind(manifest) == "text":
+    write_atomic(os.path.join(state_dir(), "last"), manifest["recipe_id"] + "\n")
 
 
 def default_model(running_only=False):
-  """The model a launch means when none is named: the last one
+  """The text model a launch means when none is named: the last one
   started, if it qualifies, else any running one."""
   last = last_model_id()
   if last and (not running_only or unit_active(last)):
     return load_model(last)
   for rid in known_models():
-    if not running_only or unit_active(rid):
+    if manifest_kind(load_model(rid)) == "text" and (not running_only or unit_active(rid)):
       return load_model(rid)
   return None
 
@@ -2710,7 +3041,7 @@ def save_model(manifest, started=True):
   text = json.dumps(manifest, indent=2) + "\n"
   write_atomic(path, text)
   if started:
-    write_atomic(os.path.join(state_dir(), "last"), rid + "\n")
+    remember_last(manifest)
   return path
 
 
@@ -2824,7 +3155,7 @@ def activate(manifest, recipe, runtime, gpu, key, catalog, profile):
   if was_running:
     say(f"Restarting {rid} with the new setup (its in-flight requests are interrupted)")
     write_status(catalog, profile, {rid: "deactivating"})
-    systemctl("stop", unit_name(rid))
+    stop_unit(rid)
   clear_error(rid)
   try:
     evict_idle_weights(keep=[rid])
@@ -2835,9 +3166,9 @@ def activate(manifest, recipe, runtime, gpu, key, catalog, profile):
     systemctl("reset-failed", unit_name(rid))
     write_status(catalog, profile, {rid: "activating"}, pending={rid: manifest})
     load_seconds = start_unit(rid)
-    post_start_checks(rid, key)
+    post_start_checks(rid, key, runtime)
   except (LocalError, subprocess.CalledProcessError) as error:
-    systemctl("stop", unit_name(rid))
+    stop_unit(rid)
     write_unit_files(rid, previous_text)
     if os.path.exists(pair_setup_path(rid)):
       os.unlink(pair_setup_path(rid))
@@ -2907,6 +3238,8 @@ def cmd_use(argv):
   measured_load = load_measurement(catalog, catalog.recipes[rid], profile, gpu).get("load_seconds")
   # Before detaching: sudo needs this terminal.
   prepare_host(gpu)
+  # Before a detached setup leaves this process, so polkit can still ask in the user's session.
+  raise_gpu_memory(variant, gpu, args.detach)
   if args.detach:
     return detach_use(rid, args, catalog.recipes[rid], measured_load)
   # A first setup shows in the panel from now on: waiting for the lock, then
@@ -3006,7 +3339,8 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
     say(f"Warning: runtime {recipe['runtime']} takes its key as a command-line argument, visible in the process list to other local users")
   preflight(runtime, gpu)
   files, roles = build_artifacts(recipe)
-  say(f"Recipe {rid}: {len(files)} file(s), {gib(sum(f['size'] for f in files)):.1f} GiB, context {variant['ctx']}")
+  context = f", context {variant['ctx']}" if variant.get("ctx") else ""
+  say(f"Recipe {rid}: {len(files)} file(s), {gib(sum(f['size'] for f in files)):.1f} GiB{context}")
   for license_name in sorted({f"{f['repo']} ({f['license']})" for f in files}):
     say(f"  weights: {license_name}")
   progress = Progress(rid=rid if fresh else None)
@@ -3062,7 +3396,12 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
         say(f"Installed, but it can't start now: {error}")
         return 0
       say(f"Installed {rid}, but it can't start now: {error}")
-      first = "Stop another model, then press" if error.short.startswith(NOT_ENOUGH_MEMORY) else "Then press"
+      if error.short == REBOOT_FOR_GPU_MEMORY:
+        first = "Reboot, then press"
+      elif error.short.startswith(NOT_ENOUGH_MEMORY):
+        first = "Stop another model, then press"
+      else:
+        first = "Then press"
       say(f"{first} play in the agents panel or run: omarchy agent local start {rid}")
       say(f"Manifest: {path}")
       return 0
@@ -3082,7 +3421,8 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
   say(f"Running {rid} at {endpoint(rid)} (model id {rid}, key in {key_path()})")
   say(f"Loaded in {manifest['observed']['load_seconds']:.0f}s, using about {manifest['observed']['ram_used_gib']:.0f} GiB")
   say(f"Manifest: {path}")
-  say(f"Launch an agent against it with: omarchy agent --local-model {rid}")
+  if manifest_kind(manifest) == "text":
+    say(f"Launch an agent against it with: omarchy agent --local-model {rid}")
   return 0
 
 
@@ -3118,7 +3458,7 @@ def cmd_list(argv):
     marks = [mark for mark, on in (("yours", row["user"]), ("best", row["best"]), ("running", row["active"]), ("installed", row["installed"])) if on]
     tier = f" · third-party ({row['publisher']})" if row["tier"] == "third-party" else ""
     say(f"{'●' if row['available'] else '○'} {row['id']}{' [' + ', '.join(marks) + ']' if marks else ''}")
-    say(f"    {row['name']} on {row['runtime']}{tier} — {row['summary']}")
+    say(f"    {row['name']} on {row['runtime']}{tier}")
     if not row["available"]:
       say(f"    unavailable: {row['reason']}")
   return 0
@@ -3137,14 +3477,16 @@ def start_fit(manifest, profile):
     gpu = choose_gpu(profile, manifest.get("gpu"))
   except LocalError as error:
     return False, error.short
+  if variant["peak_gpu_gib"] > gpu["memory_gib"]:
+    return False, gpu_short_error(variant, gpu).short
   available, gpu_free = free_memory(gpu)
-  if available >= variant["peak_ram_gib"] + RESERVE_GIB and gpu_free >= variant["peak_gpu_gib"]:
+  if available >= start_needs_gib(variant) and gpu_free >= variant["peak_gpu_gib"]:
     return True, ""
   return False, "Not enough memory"
 
 
 def model_record(rid, manifest, profile):
-  props = unit_props(rid, "ActiveState", "SubState", "Result", "InactiveExitTimestamp", "ActiveExitTimestamp")
+  props = unit_props(rid, "ActiveState", "SubState", "Result", "InactiveExitTimestamp", "ActiveExitTimestamp", "StateChangeTimestamp")
   unit = props.get("ActiveState", "inactive") or "inactive"
   # A removal in progress outranks the unit's own state, which passes
   # through stopping and stopped on the way.
@@ -3171,11 +3513,16 @@ def model_record(rid, manifest, profile):
     # Whether the other machines on the tailnet can use it.
     "shared": rid in shared_recipes(),
     "recipe": rid,
+    # text or image: rows without it are text models.
+    "kind": recipe_kind(recipe),
+    # An image model that edits by instruction.
+    "edit": bool(recipe.get("edit")),
     "name": recipe.get("name", rid),
     "vendor": vendor,
     "runtime": manifest["runtime_id"],
     "image": manifest["image"],
-    "ctx": manifest["variant"]["ctx"],
+    # Null for an image model, which has no context.
+    "ctx": manifest["variant"].get("ctx"),
     "unit": unit,
     "sub_state": props.get("SubState", ""),
     "result": props.get("Result", ""),
@@ -3186,7 +3533,7 @@ def model_record(rid, manifest, profile):
     "ram_total_gib": nodes_ram_gib(manifest, profile),
     # When the current start or stop began, and how long the last load took:
     # the panel's progress bar measures the one against the other.
-    "since_ms": int(os.path.getmtime(removing_path(rid)) * 1000) if removing else _unix_ms(props.get("InactiveExitTimestamp") if unit == "activating" else props.get("ActiveExitTimestamp") if unit == "deactivating" else ""),
+    "since_ms": int(os.path.getmtime(removing_path(rid)) * 1000) if removing else _unix_ms(props.get("InactiveExitTimestamp") if unit == "activating" else (props.get("ActiveExitTimestamp") or props.get("StateChangeTimestamp")) if unit == "deactivating" else ""),
     "expected_load_seconds": expected_load_seconds(rid, manifest),
     "expected_stop_seconds": expected_stop_seconds(rid),
     "expected_remove_seconds": float(removing) if removing else None,
@@ -3274,7 +3621,8 @@ def cmd_status(argv):
       transitions[args.started] = "active"
     if args.stopped and ID_RE.match(args.stopped):
       result = os.environ.get("SERVICE_RESULT", "success")
-      if result == "success":
+      started = _unix_ms(unit_props(args.stopped, "InactiveExitTimestamp").get("InactiveExitTimestamp"))
+      if result == "success" or stop_requested(args.stopped, started):
         transitions[args.stopped] = "inactive"
       else:
         record_error(args.stopped, failure_reason(args.stopped, result))
@@ -3291,7 +3639,7 @@ def cmd_status(argv):
   for rid, model in record["models"].items():
     state = {"active": "running", "activating": "loading", "deactivating": "stopping"}.get(model["unit"], model["unit"])
     say(f"{rid} ({model['name']}) on {model['runtime']}: {state}")
-    say(f"  endpoint {model['endpoint']} · model id {rid} · context {model['ctx']}")
+    say(f"  endpoint {model['endpoint']} · model id {rid}" + (f" · context {model['ctx']}" if model["ctx"] else f" · {model['kind']}"))
     if model["unit"] == "failed":
       say(f"  last failure: {model['result']}")
       tail = journal_tail(rid, 5)
@@ -3316,7 +3664,7 @@ def cmd_stop(argv):
   write_status(catalog, profile, {rid: "deactivating" for rid in targets})
   for rid in targets:
     started = time.time()
-    systemctl("stop", unit_name(rid))
+    stop_unit(rid)
     # How long this model takes to let go; the panel's stopping bar measures
     # the next stop against it.
     write_atomic(stop_seconds_path(rid), f"{time.time() - started:.1f}\n")
@@ -3361,7 +3709,11 @@ def _start(args, catalog, profile):
   before_peer = peer_free_gib(manifest)
   systemctl("reset-failed", unit_name(rid))
   result = systemctl("start", unit_name(rid))
-  write_atomic(os.path.join(state_dir(), "last"), rid + "\n")
+  remember_last(manifest)
+  if result.returncode != 0 and stop_requested(rid, int(started * 1000)):
+    write_status(catalog, profile)
+    say(f"{rid} was stopped before it finished loading")
+    return 1
   if result.returncode != 0:
     record_error(rid, "Didn't start: omarchy agent local status shows why")
   else:
@@ -3372,9 +3724,9 @@ def _start(args, catalog, profile):
     raise LocalError(f"{rid} didn't start: {result.stderr.strip()}\n{journal_tail(rid)}")
   if manifest.get("unchecked"):
     try:
-      post_start_checks(rid, ensure_key())
+      post_start_checks(rid, ensure_key(), manifest.get("runtime"))
     except LocalError as error:
-      systemctl("stop", unit_name(rid))
+      stop_unit(rid)
       record_error(rid, error.short)
       write_status(catalog, profile)
       raise
@@ -3414,7 +3766,7 @@ def cmd_remove(argv):
     if manifest is None and setting_up is not None:
       # Cancelled while its model loaded: activation starts the unit before
       # the manifest exists, so stop it before its files go.
-      systemctl("stop", unit_name(rid))
+      stop_unit(rid)
       # Read again: the setup may have reached its image since the first look.
       setting_up = load_installing(rid) or setting_up
       if setting_up.get("pair"):
@@ -3444,7 +3796,7 @@ def cmd_remove(argv):
     try:
       if running:
         say(f"Stopping {rid}")
-        systemctl("stop", unit_name(rid))
+        stop_unit(rid)
       deleting = time.time()
       if manifest:
         pair_remove(manifest, args.local_only)
@@ -3532,7 +3884,7 @@ def installing_models():
 def begin_installing(rid, recipe, load_seconds=None):
   """`load_seconds` is how long the catalog measured its start: the panel gives the
   download and the load that follows their shares of one bar from it."""
-  record = {"name": recipe.get("name", rid), "vendor": recipe.get("vendor", ""), "phase": "waiting",
+  record = {"name": recipe.get("name", rid), "kind": recipe_kind(recipe), "vendor": recipe.get("vendor", ""), "phase": "waiting",
             "done_bytes": 0, "total_bytes": 0, "rate_bytes_s": 0, "since_ms": int(time.time() * 1000), "error": "",
             "expected_load_seconds": load_seconds}
   write_atomic(installing_path(rid), json.dumps(record) + "\n")
@@ -3577,6 +3929,7 @@ def install_row(rid, record):
     "fits": True,
     "fit_reason": "",
     "recipe": rid,
+    "kind": record.get("kind", "text"),
     "name": record.get("name", rid),
     "vendor": record.get("vendor", ""),
     "runtime": "",
@@ -3647,7 +4000,10 @@ def _remove_files(rid, setup_image=None):
   used = set()
   for directory, _, names in os.walk(os.path.join(data_dir(), "models")):
     for name in names:
-      info = os.stat(os.path.join(directory, name))
+      try:
+        info = os.stat(os.path.join(directory, name))
+      except FileNotFoundError:
+        continue  # a link that resolves only inside a container, like a served model folder's
       used.add((info.st_dev, info.st_ino))
   for directory, _, names in os.walk(os.path.join(data_dir(), "blobs")):
     for name in names:
@@ -4274,7 +4630,7 @@ def shared_listing(record, catalog, profile, dns):
   models = []
   for rid in shared_recipes():
     model = record["models"].get(rid)
-    if not model:
+    if not model or model.get("kind", "text") != "text":
       continue
     recipe = catalog.recipes.get(rid) or (load_model(rid) or {}).get("recipe") or {}
     measured = load_measurement(catalog, recipe, profile, gpu).get("long", {}) if gpu and recipe else {}
@@ -4316,10 +4672,17 @@ def publish_shares(record, catalog, profile, force=False):
     published = _read(published_path())
     if not shares and not published and not force:
       return
+    # Without tailscaled running, as for a while after boot, there is nothing
+    # to publish to, and the survey already says the tailnet is missing. The
+    # serve routes outlast a restart, so the next refresh brings them in line.
+    status = tailscale_status()
+    if not status and not force:
+      return
     try:
-      dns = self_dns()
+      dns = self_dns(status)
       have = serve_handlers(dns)
-      want = {f"{SHARE_ROOT}/{rid}": f"http://127.0.0.1:{SHARE_PROXY_PORT}/{rid}" for rid in shares if rid in record["models"]}
+      # Only text models are shared: the listing and remote agents speak chat completions.
+      want = {f"{SHARE_ROOT}/{rid}": f"http://127.0.0.1:{SHARE_PROXY_PORT}/{rid}" for rid in shares if rid in record["models"] and record["models"][rid].get("kind", "text") == "text"}
       if want:
         ensure_share_proxy()
       for path, target in want.items():
@@ -4375,6 +4738,8 @@ def cmd_share(argv):
   if not args.off:
     if not load_model(rid):
       raise LocalError(f"{rid} isn't set up. Run: omarchy agent local use {rid}")
+    if manifest_kind(load_model(rid)) != "text":
+      raise LocalError(f"{rid} is an image model, and only text models can be shared on the tailnet for now")
     self_dns()
   with share_lock():
     shares = set(shared_recipes())
@@ -5066,6 +5431,8 @@ def remote_target(model):
 
 def local_target(manifest):
   rid = manifest["recipe_id"]
+  if manifest_kind(manifest) != "text":
+    raise LocalError(f"{rid} is an image model; agents run on text models")
   return {
     "provider": OVERLAY_PROVIDER,
     "provider_name": "Omarchy local model",
@@ -5116,7 +5483,7 @@ def local_targets():
   for rid in known_models():
     try:
       targets.append(local_target(load_model(rid)))
-    except (KeyError, TypeError, AttributeError):
+    except (KeyError, TypeError, AttributeError, LocalError):
       pass
   return targets
 

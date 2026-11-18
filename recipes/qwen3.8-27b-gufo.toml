@@ -1,5 +1,4 @@
 name = "Qwen3.8 27B"
-summary = "Dense 27B at 4-bit with DFlash2 drafting. Under half the memory of Flash Next, at about half its speed."
 runtime = "gufo"
 vendor = "qwen"
 architecture = "dense"
@@ -10,6 +9,11 @@ input = ["text", "image"]
 gpu = "amd-strix-halo"
 ram_class = 128
 measured = "measurements/qwen3.8-27b-gufo-strix-halo-128.toml"
+
+[[hardware]]
+gpu = "amd-strix-halo"
+ram_class = 64
+measured = "measurements/qwen3.8-27b-gufo-strix-halo-64.toml"
 
 [[artifacts]]
 repo = "unsloth/Qwen3.8-27B-GGUF"

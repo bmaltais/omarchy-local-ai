@@ -1,5 +1,4 @@
 name = "Qwen3.8 27B"
-summary = "27B dense model, 4-bit, with DFlash2 drafting. Long conversations resume where they left off, and 128 GB runs three agents at once."
 runtime = "tensorfold"
 vendor = "qwen"
 architecture = "dense"

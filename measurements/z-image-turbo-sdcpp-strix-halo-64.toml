@@ -1,0 +1,40 @@
+recipe = "z-image-turbo-sdcpp"
+measured_at = "2026-11-18"
+image = "ghcr.io/omacom/sdcpp@sha256:f8f635b6afa594b7243916f6e0cf7f798e1fed838899edea093af3f2772bf37e"
+load_seconds = 4.0
+fileset = "ca00cabcb0fee841"
+method = "tools/bench: 1 warmup, then 3 1024x1024 images through /v1/images/generations at the recipe's default steps, the median kept"
+
+[generation]
+width = 1024
+height = 1024
+steps = 8
+images = 3
+first_image_s = 31.82
+seconds_per_image = 28.65
+
+[machine]
+platform = "x86"
+gpu = "amd-strix-halo"
+ram_class = 64
+system = "Framework Desktop (AMD Ryzen AI Max 300 Series)"
+kernel = "7.2.15-2-omarchy"
+cpu = "AMD Eng Sample: 100-000001243-50_Y"
+
+[memory]
+observed_at_load_gib = 0.2
+min_available_during_bench_gib = 23.2
+total_gib = 62.1
+peak_gpu_gib = 12.9
+
+[[artifacts]]
+repo = "leejet/Z-Image-Turbo-GGUF"
+revision = "c61c0e422dc8b541b7548cf33a4ef8302b0f8085"
+
+[[artifacts]]
+repo = "unsloth/Qwen3-4B-Instruct-2507-GGUF"
+revision = "a06e946bb6b655725eafa393f4a9745d460374c9"
+
+[[artifacts]]
+repo = "Comfy-Org/Z-Image-Turbo"
+revision = "6fc90a3b1b653e935a0d175e260736de25b84df5"
