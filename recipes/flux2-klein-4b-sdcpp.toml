@@ -2,6 +2,7 @@
 # FLUX.2 autoencoder, on stable-diffusion.cpp's sd-server. It makes new images and changes one by an
 # instruction, given the picture as a reference image ("include Princess Peach", "make it night").
 name = "FLUX.2 Klein 4B"
+vendor = "bfl"
 kind = "image"
 edit = true
 runtime = "sdcpp"
@@ -10,6 +11,11 @@ runtime = "sdcpp"
 gpu = "amd-strix-halo"
 ram_class = 64
 measured = "measurements/flux2-klein-4b-sdcpp-strix-halo-64.toml"
+
+[[hardware]]
+gpu = "amd-strix-halo"
+ram_class = 192
+measured = "measurements/flux2-klein-4b-sdcpp-strix-halo-192.toml"
 
 [[artifacts]]
 repo = "leejet/FLUX.2-klein-4B-GGUF"

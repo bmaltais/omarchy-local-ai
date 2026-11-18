@@ -10,6 +10,11 @@ gpu = "amd-strix-halo"
 ram_class = 128
 measured = "measurements/qwen3.8-flash-next-gufo-strix-halo-128.toml"
 
+[[hardware]]
+gpu = "amd-strix-halo"
+ram_class = 192
+measured = "measurements/qwen3.8-flash-next-gufo-strix-halo-192.toml"
+
 # The Unsloth UD-Q4_K_XL target Gufo supports, with its shared-Q8_0 MTP
 # predictor, at the revision Gufo's own benchmarks use.
 [[artifacts]]

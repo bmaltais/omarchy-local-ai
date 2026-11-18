@@ -1,6 +1,7 @@
 # Tongyi-MAI's Z-Image Turbo, a diffusion transformer distilled to 8 steps, with Qwen3 4B as its text
 # encoder and the Flux autoencoder as its VAE, on stable-diffusion.cpp's sd-server.
 name = "Z-Image Turbo"
+vendor = "alibaba"
 kind = "image"
 runtime = "sdcpp"
 
@@ -8,6 +9,11 @@ runtime = "sdcpp"
 gpu = "amd-strix-halo"
 ram_class = 64
 measured = "measurements/z-image-turbo-sdcpp-strix-halo-64.toml"
+
+[[hardware]]
+gpu = "amd-strix-halo"
+ram_class = 192
+measured = "measurements/z-image-turbo-sdcpp-strix-halo-192.toml"
 
 [[artifacts]]
 repo = "leejet/Z-Image-Turbo-GGUF"

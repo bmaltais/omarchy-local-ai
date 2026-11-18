@@ -12,7 +12,7 @@ import urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, ROOT)
 from agent_local import (LocalError, resolve_model, key_path, choose_gpu, machine_profile,
-                         MemorySampler, say, meminfo, gib, _read, endpoint, write_atomic, toml_dumps, run_bench, manifest_kind)
+                         MemorySampler, say, meminfo, gib, _read, endpoint, write_atomic, toml_dumps, run_bench, manifest_kind, UNIT_PREFIX)
 
 
 # The machine the numbers came from. On AMD the kernel carries the GPU driver; an NVIDIA driver
@@ -100,6 +100,17 @@ def bench_image(rid, key, active, after_request=None):
   }
 
 
+def nvidia_process_mib(container):
+  """The GPU memory the container's processes hold, in MiB, as nvidia-smi counts it; 0 when it can't say."""
+  try:
+    pids = set(subprocess.run(["podman", "top", container, "hpid"], capture_output=True, text=True, timeout=10).stdout.split()[1:])
+    apps = subprocess.run(["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10).stdout
+  except (OSError, subprocess.SubprocessError):
+    return 0
+  rows = [line.split(",") for line in apps.splitlines() if line.count(",") == 1]
+  return sum(int(used) for pid, used in rows if pid.strip() in pids and used.strip().isdigit())
+
+
 def cmd_bench(argv):
   parser = argparse.ArgumentParser(prog="tools/bench")
   parser.add_argument("recipe", nargs="?", help="the running model (default: the last one started)")
@@ -119,6 +130,18 @@ def cmd_bench(argv):
   rid = active["recipe_id"]
   gpu = choose_gpu(machine_profile(), active["gpu"])
   sampler = MemorySampler(gpu)
+  # A unified NVIDIA GPU has no memory counter of its own, but its driver counts by process.
+  held = [0]
+  held_stop = threading.Event()
+
+  def sample_held():
+    while not held_stop.is_set():
+      if gpu["vendor"] == "nvidia":
+        held.append(nvidia_process_mib(UNIT_PREFIX + rid))
+      held_stop.wait(0.5)
+
+  held_thread = threading.Thread(target=sample_held, daemon=True)
+  held_thread.start()
   sampler.start()
   try:
     if image:
@@ -129,6 +152,8 @@ def cmd_bench(argv):
       timings = {"short": short, "long": long, "edit": edit}
   finally:
     sampler.stop()
+    held_stop.set()
+    held_thread.join()
   mem = meminfo()
   observed = active.get("observed") or {}
   pins = []
@@ -155,8 +180,9 @@ def cmd_bench(argv):
       "observed_at_load_gib": observed.get("ram_used_gib"),
       "min_available_during_bench_gib": round(sampler.low_ram, 1),
       "total_gib": round(gib(mem.get("MemTotal", 0)), 1),
-      # What the GPU held at its busiest: the load's share plus what generating took on top.
-      **({"peak_gpu_gib": round(observed["gpu_used_gib"] + sampler.baseline[1] - sampler.low_gpu, 1)} if image and observed.get("gpu_used_gib") is not None else {}),
+      # What the GPU held at its busiest: the load's share plus what generating took on top, or
+      # where the driver counts by process, the most the server's processes held.
+      **({"peak_gpu_gib": round(max(held) / 1024, 1) if any(held) else round(observed["gpu_used_gib"] + sampler.baseline[1] - sampler.low_gpu, 1)} if image and observed.get("gpu_used_gib") is not None else {}),
     },
     "load_seconds": observed.get("load_seconds"),
     # A Hugging Face revision fixes every file's bytes, and the file set hashes the ones used.

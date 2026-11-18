@@ -4,10 +4,18 @@
 # `recipes` are text models: the agents' default and `use best`. `images` lists the image models
 # recommended beside them, in the same order of preference, and never competes with `recipes`.
 
+# 27B also fits at 128 and 192 GB, but on agent work it is much weaker and about a third the
+# speed, so those get Flash Next alone. At 64 GB only 27B fits.
 [[class]]
 gpu = "amd-strix-halo"
 ram_class = 128
-recipes = ["qwen3.8-flash-next-gufo", "qwen3.8-27b-gufo"]
+recipes = ["qwen3.8-flash-next-gufo"]
+
+[[class]]
+gpu = "amd-strix-halo"
+ram_class = 192
+recipes = ["qwen3.8-flash-next-gufo"]
+images = ["flux2-klein-4b-sdcpp", "z-image-turbo-sdcpp"]
 
 [[class]]
 gpu = "amd-strix-halo"
@@ -20,6 +28,7 @@ images = ["flux2-klein-4b-sdcpp", "z-image-turbo-sdcpp"]
 gpu = "nvidia-gb10"
 ram_class = 128
 recipes = ["qwen3.8-flash-next-tensorfold", "nemotron-3.5-bolt-tensorfold", "qwen3.8-27b-tensorfold"]
+images = ["flux2-klein-4b-sdcpp-cuda", "z-image-turbo-sdcpp-cuda"]
 
 [[class]]
 gpu = "nvidia-gb10"

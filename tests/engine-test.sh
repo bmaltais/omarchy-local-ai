@@ -1776,7 +1776,7 @@ check("an image runtime without an alias and an image recipe without a context v
       "\n".join(a.validate_runtime("sd", sd_rt) + a.validate_recipe("picture", picture, both)))
 check("a text recipe still needs a context", any(".ctx" in e for e in a.validate_recipe("model", dict(recipe, variant=[picture_variant]), both)))
 check("an OpenAI runtime still needs an alias", any("'alias'" in e for e in a.validate_runtime("server", dict(runtime, inputs={k: v for k, v in runtime["inputs"].items() if k != "alias"}))))
-check("a recipe's kind is text or image", any(".kind" in e for e in a.validate_recipe("model", dict(recipe, kind="video"), both)))
+check("a recipe's kind is text, image, video or music", any(".kind" in e for e in a.validate_recipe("model", dict(recipe, kind="audio"), both)))
 check("a runtime's api is a known one", any(".api" in e for e in a.validate_runtime("sd", dict(sd_rt, api="grpc"))))
 check("a text encoder or VAE needs a runtime input for it", {"no text_encoder input", "no vae input"} <= {e.split(" but runtime ")[1].split("' has ")[1] for e in a.validate_recipe("picture", dict(picture, runtime="server"), both) if " but runtime " in e})
 trees = {"test/model": [{"type": "file", "path": "model.gguf", "size": 1, "lfs": {"oid": "1" * 64, "size": 1}}],
@@ -1791,6 +1791,21 @@ check("the diffusion model, text encoder and VAE reach the server, and no contex
 picture_unit = a.render_container("picture", picture, sd_rt, picture_variant, picture_roles, dict(gpu, render_node="/dev/dri/renderD128"), "f" * 16)
 check("a runtime asking for a /tmp tmpfs gets one, others don't", "Tmpfs=/tmp" in picture_unit and "Tmpfs=" not in text and not a.validate_runtime("sd", sd_rt))
 check("an image model's variant is chosen without a context", a.pick_variant(picture, profile, gpu, None, "picture") == (picture_variant, ""))
+
+# A video model is an image model's kin: no context, and its sound decoder and its LoRA reach
+# the server, the LoRA as the folder sd-server finds it in.
+video_rt = dict(sd_rt, inputs=dict(sd_rt["inputs"], audio_vae={"arg": "--audio-vae"}, lora={"arg": "--lora-model-dir"}))
+clip = dict(picture, name="Clip", kind="video",
+            artifacts=picture["artifacts"] + [{"repo": "test/av", "revision": "b" * 40, "license": "mit", "files": ["vae/audio.safetensors", "loras/turbo.safetensors"],
+                                               "audio_vae": "vae/audio.safetensors", "lora": "loras/turbo.safetensors"}])
+check("a video recipe validates without a context", not a.validate_recipe("clip", clip, {"sd": video_rt}), "\n".join(a.validate_recipe("clip", clip, {"sd": video_rt})))
+clip_trees = dict(trees, **{"test/av": [{"type": "file", "path": "vae/audio.safetensors", "size": 1, "lfs": {"oid": "5" * 64, "size": 1}},
+                                        {"type": "file", "path": "loras/turbo.safetensors", "size": 1, "lfs": {"oid": "6" * 64, "size": 1}}]})
+with patch.object(a, "hf_tree", side_effect=lambda repo, revision, cache: clip_trees[repo]):
+  clip_files, clip_roles = a.build_artifacts(clip)
+_, clip_argv, _, _ = a.server_invocation(video_rt, clip, picture_variant, clip_roles, "clip")
+check("a video model's sound decoder and LoRA folder reach the server",
+      clip_argv[clip_argv.index("--audio-vae") + 1] == "/models/vae/audio.safetensors" and clip_argv[clip_argv.index("--lora-model-dir") + 1] == "/models/loras", repr(clip_argv))
 raises("asking an image model for a context names none", lambda: a.pick_variant(picture, profile, gpu, 4096, "picture"), "have: none")
 
 # Image models are recommended beside text ones, never instead of them.
@@ -1807,6 +1822,12 @@ check("list rows carry their kind and the best of each kind", (rows["picture"]["
 # Status rows say what kind of model they are; an image model's has no context.
 picture_manifest = {"schema": 1, "recipe_id": "picture", "recipe": picture, "runtime": sd_rt, "runtime_id": "sd", "image": sd_rt["image"],
                     "variant": picture_variant, "files": picture_files, "roles": picture_roles, "fileset": "f" * 16, "gpu": gpu["family"], "profile": profile}
+# An image model's start measures nothing, since its server reads its weights in with the
+# first image: it holds its measured peak. A text model holds what its start took.
+check("an image model's memory is its peak, not what its start took",
+      a.memory_used_gib(dict(picture_manifest, observed={"load_seconds": 4, "ram_used_gib": -1.2})) == picture_variant["peak_ram_gib"])
+check("a text model's memory is what its start took",
+      a.memory_used_gib({"recipe": recipe, "variant": {"peak_ram_gib": 40}, "observed": {"ram_used_gib": 38.2}}) == 38.2)
 with patch.object(a, "unit_props", return_value={}), patch.object(a, "free_memory", return_value=(64, 48)):
   picture_row = a.model_record("picture", picture_manifest, profile)
   text_row = a.model_record("current", manifest, profile)
@@ -1835,15 +1856,21 @@ with patch.object(a, "known_models", return_value=["picture"]), patch.object(a, 
   check("start and stop still find an image model by name", a.resolve_model("picture", running_only=True)["recipe_id"] == "picture")
 os.unlink(os.path.join(a.state_dir(), "last"))
 
-# Sharing on the tailnet is for text models for now.
-with patch.object(a, "machine_profile", return_value=profile), patch.object(a, "tailscale_status", return_value=ts_status):
-  raises("an image model can't be shared on the tailnet yet", lambda: a.cmd_share(["picture"]), "image model")
+# An image model is shared on the tailnet like a text one, for Fantasi on the other machines.
 with patch.object(a, "shared_recipes", return_value=["picture"]):
-  check("a shared image model stays out of the tailnet listing", a.shared_listing({"models": {"picture": picture_row}, "ram_total_gib": 64}, img_catalog, profile, "me.tail.ts.net")["models"] == [])
+  listed = a.shared_listing({"models": {"picture": dict(picture_row, edit=True)}, "ram_total_gib": 64}, img_catalog, profile, "me.tail.ts.net")["models"]
+  check("a shared image model is listed with its kind and whether it edits", [(m["recipe"], m["kind"], m["edit"]) for m in listed] == [("picture", "image", True)], repr(listed))
   handlers.clear()
   with patch.object(a, "tailscale", side_effect=fake_tailscale), patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0, stderr="")):
     a.publish_shares({"models": {"picture": picture_row}, "ram_total_gib": 64}, img_catalog, profile, force=True)
-  check("nor gets a tailnet route", "/local-ai/picture" not in handlers, repr(handlers))
+  check("and gets a tailnet route", "/local-ai/picture" in handlers, repr(handlers))
+peer = a.clean_listing({"schema": a.NETWORK_SCHEMA, "models": [dict(listed[0]), {"recipe": "old", "name": "Old"}]}, "me.tail.ts.net")["models"]
+check("a peer's listing keeps an image model's kind, and a row without one is text", [(m["kind"], m["edit"]) for m in peer] == [("image", True), ("text", False)], repr(peer))
+image_remote = a.remote_record("spark", "spark.tail.ts.net", peer[0], True, 128, 0)
+with patch.object(a, "resolve_remote", return_value=image_remote):
+  raises("a paired host's image model is refused as an agent's", lambda: a.overlay_target("spark/picture"), "image model")
+with patch.object(a, "load_remotes", return_value={"spark": {"host": "spark"}}), patch.object(a, "load_network", return_value={"hosts": {}, "models": {"spark/picture": image_remote}}):
+  check("nor is it one of pi's providers", a.remote_targets() == [])
 
 # sd-server lists no recipe id: it's ready when its model status, asked with the key, says so.
 status_url = f"http://127.0.0.1:{a.port_for('picture')}/sdcpp/v1/models/status"
@@ -1857,5 +1884,33 @@ for name, answers, message in (("that answers without the key", [(200, b'{"state
   with patch.object(a, "http_status", side_effect=answers):
     raises(f"an sd-server {name} is refused", lambda: a.post_start_checks("picture", "test-key", sd_rt), message)
 os.unlink(a.model_manifest_path("picture"))
+
+# A music model runs on acestep.cpp's ace-server, which takes the folder holding its models and
+# loads one only when asked for a song: it's ready when it has found every model a song takes.
+ace_rt = {"image": "registry.example/test/ace@sha256:" + "e" * 64, "tier": "omarchy", "api": "acestep", "port": 8085,
+          "health": {"probe": ["curl", "http://127.0.0.1:8085/health"]}, "command": ["ace-server"],
+          "reserved": ["--port", "ACE_API_KEY"], "run": {"devices": ["render"], "tmpfs": "/tmp"},
+          "inputs": {"model": {"arg": "--models"}, "key": {"env": "ACE_API_KEY"}}}
+song = {"name": "Song", "kind": "music", "runtime": "ace", "hardware": recipe["hardware"],
+        "artifacts": [{"repo": "test/ace", "revision": "a" * 40, "license": "mit", "files": ["lm.gguf", "dit.gguf"], "dest": "acestep", "model": "."}],
+        "variant": [picture_variant]}
+check("a music runtime and a music recipe validate, without an alias or a context", not a.validate_runtime("ace", ace_rt) and not a.validate_recipe("song", song, {"ace": ace_rt}),
+      "\n".join(a.validate_runtime("ace", ace_rt) + a.validate_recipe("song", song, {"ace": ace_rt})))
+ace_tree = [{"type": "file", "path": name, "size": 1, "lfs": {"oid": oid * 64, "size": 1}} for name, oid in (("lm.gguf", "7"), ("dit.gguf", "8"))]
+with patch.object(a, "hf_tree", return_value=ace_tree):
+  song_files, song_roles = a.build_artifacts(song)
+_, song_argv, _, _ = a.server_invocation(ace_rt, song, picture_variant, song_roles, "song")
+check("a music model's folder reaches the server", song_argv == ["ace-server", "--models", "/models/acestep"], repr(song_argv))
+props_url = f"http://127.0.0.1:{a.port_for('song')}/props"
+found = b'{"models": {"lm": ["lm.gguf"], "embedding": ["te.gguf"], "dit": ["dit.gguf"], "vae": ["vae.gguf"]}}'
+with patch.object(a, "http_status", side_effect=[(401, b""), (200, found)]) as http:
+  a.post_start_checks("song", "test-key", ace_rt)
+check("an ace-server is checked by the models it found, without and then with the key",
+      [call.args for call in http.call_args_list] == [(props_url,), (props_url, "test-key")], repr(http.call_args_list))
+for name, answers, message in (("that answers without the key", [(200, found)], "doesn't enforce its key"),
+                               ("missing a model a song takes", [(401, b""), (200, b'{"models": {"lm": ["lm.gguf"], "embedding": [], "dit": ["dit.gguf"]}}')], "found no embedding, vae model"),
+                               ("that lists no models", [(401, b""), (200, b"not json")], "found no lm, embedding, dit, vae model")):
+  with patch.object(a, "http_status", side_effect=answers):
+    raises(f"an ace-server {name} is refused", lambda: a.post_start_checks("song", "test-key", ace_rt), message)
 
 PY

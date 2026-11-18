@@ -18,6 +18,7 @@ import ipaddress
 import itertools
 import json
 import os
+import posixpath
 import pty
 import re
 import shlex
@@ -77,17 +78,18 @@ if ! log=$(limine-mkinitcpio 2>&1) || grep -q 'mkinitcpio failed for kernel' <<<
 fi
 """
 RAM_CLASSES = (32, 64, 96, 128, 192, 256, 512)
-STANDARD_INPUTS = ("model", "draft", "text_encoder", "vae", "ctx", "alias", "key", "temperature", "top_p", "top_k")
+STANDARD_INPUTS = ("model", "draft", "text_encoder", "vae", "audio_vae", "lora", "ctx", "alias", "key", "temperature", "top_p", "top_k")
 # The files a recipe's artifacts can name, each reaching the server through the runtime input of
 # the same name: the model, and a draft for speculative decoding (text) or the text encoder and
 # VAE a diffusion model needs beside it (image).
-ROLES = ("model", "draft", "text_encoder", "vae")
-# What a recipe serves: text (chat completions, for the agents) or images. Agents, overlays, the
-# default model and tailnet sharing only ever see text models.
-KINDS = ("text", "image")
+ROLES = ("model", "draft", "text_encoder", "vae", "audio_vae", "lora")
+# What a recipe serves: text (chat completions, for the agents), images, video or music. Agents,
+# overlays, the default model and tailnet sharing only ever see text models.
+KINDS = ("text", "image", "video", "music")
 # How the engine checks a server it just started answers only with the key: an OpenAI-compatible
-# /v1/models that lists the recipe id, or stable-diffusion.cpp's model status reporting ready.
-APIS = ("openai", "sdcpp")
+# /v1/models that lists the recipe id, stable-diffusion.cpp's model status reporting ready, or
+# acestep.cpp's list of the models it found.
+APIS = ("openai", "sdcpp", "acestep")
 GFX_FAMILIES = {"gfx1151": "amd-strix-halo", "gfx1150": "amd-strix-point"}
 # NVIDIA platforms whose GPU shares the system's memory. The N1x is the GB10's GPU in a
 # laptop: it keeps its own family name so a measurement records which machine it came from,
@@ -907,7 +909,7 @@ def validate_recipe(rid, recipe, runtimes, root=None, user=False):
       errors.append(f"{at}: must be a table")
       continue
     # An image model has no context: its variants may leave it out. A text model's is required.
-    if ("ctx" in variant or kind != "image") and (not isinstance(variant.get("ctx"), int) or variant["ctx"] <= 0):
+    if ("ctx" in variant or kind == "text") and (not isinstance(variant.get("ctx"), int) or variant["ctx"] <= 0):
       errors.append(f"{at}.ctx: must be a positive integer")
       continue
     for field in ("peak_ram_gib", "peak_gpu_gib"):
@@ -1700,6 +1702,10 @@ def server_invocation(runtime, recipe, variant, roles, rid):
     "draft": f"/models/{roles['draft']}" if roles.get("draft") else None,
     "text_encoder": f"/models/{roles['text_encoder']}" if roles.get("text_encoder") else None,
     "vae": f"/models/{roles['vae']}" if roles.get("vae") else None,
+    # A video model's sound, decoded beside its frames.
+    "audio_vae": f"/models/{roles['audio_vae']}" if roles.get("audio_vae") else None,
+    # A LoRA the model is run with, which sd-server finds in the folder holding it.
+    "lora": posixpath.dirname(f"/models/{roles['lora']}") if roles.get("lora") else None,
     "ctx": str(variant["ctx"]) if variant.get("ctx") else None,
     "alias": rid,
     "key": KEY_PLACEHOLDER,
@@ -1718,7 +1724,7 @@ def server_invocation(runtime, recipe, variant, roles, rid):
       if name in ("temperature", "top_p", "top_k"):
         skipped.append(name)
         continue
-      if name in ("draft", "text_encoder", "vae", "ctx"):
+      if name in ("draft", "text_encoder", "vae", "audio_vae", "lora", "ctx"):
         raise LocalError(f"Runtime has no mapping for {name}")
       continue
     if "arg" in mapping:
@@ -2139,16 +2145,19 @@ def http_status(url, key=None, timeout=10):
 
 
 # stable-diffusion.cpp's sd-server lists itself as sd-cpp-local, never the recipe, so it is
-# checked by the state of the model it loaded instead.
-SDCPP_STATUS = "/sdcpp/v1/models/status"
+# checked by the state of the model it loaded instead. acestep.cpp's ace-server loads a model
+# only when asked for a song, so it is checked by the models it found to load.
+STATUS_PATHS = {"sdcpp": "/sdcpp/v1/models/status", "acestep": "/props"}
+ACESTEP_PARTS = ("lm", "embedding", "dit", "vae")
 
 
 def post_start_checks(rid, key, runtime=None):
   """The server just started must refuse a request without the key, accept the key and serve
-  this recipe: by its OpenAI model list naming the recipe id, or for sd-server by its loaded
-  model reporting ready."""
-  sdcpp = (runtime or {}).get("api") == "sdcpp"
-  base = f"http://127.0.0.1:{port_for(rid)}{SDCPP_STATUS}" if sdcpp else f"{endpoint(rid)}/models"
+  this recipe: by its OpenAI model list naming the recipe id, for sd-server by its loaded
+  model reporting ready, or for ace-server by its finding every model a song takes."""
+  api = (runtime or {}).get("api", "openai")
+  sdcpp = api == "sdcpp"
+  base = f"http://127.0.0.1:{port_for(rid)}{STATUS_PATHS[api]}" if api in STATUS_PATHS else f"{endpoint(rid)}/models"
   status, _ = http_status(base)
   if status not in (401, 403):
     raise LocalError(f"The server answered {status or 'nothing'} without the key; refusing a model that doesn't enforce its key")
@@ -2162,6 +2171,15 @@ def post_start_checks(rid, key, runtime=None):
       state = None
     if state != "ready":
       raise LocalError(f"Port {port_for(rid)} reports its image model {state or 'in an unknown state'}, not ready")
+    return
+  if api == "acestep":
+    try:
+      found = json.loads(body).get("models", {})
+    except (ValueError, AttributeError):
+      found = {}
+    missing = [part for part in ACESTEP_PARTS if not found.get(part)]
+    if missing:
+      raise LocalError(f"Port {port_for(rid)} found no {', '.join(missing)} model to make music with")
     return
   try:
     ids = [entry.get("id") for entry in json.loads(body).get("data", [])]
@@ -2383,6 +2401,16 @@ def peer_free_gib(manifest):
     return gib(pair_python(setup["peer"], "node()", timeout=10)["ram_available"])
   except (LocalError, ValueError, KeyError):
     return None
+
+
+def memory_used_gib(manifest):
+  """The memory a running model holds. An image model's server maps its weights at
+  start and reads them in with the first image, so what its start took says
+  nothing: its measured peak does."""
+  observed = manifest.get("observed") or {}
+  if manifest_kind(manifest) != "text":
+    return (manifest.get("variant") or {}).get("peak_ram_gib", observed.get("ram_used_gib"))
+  return observed.get("ram_used_gib")
 
 
 def ram_used_gib(manifest, before, after, peer_before, peer_after):
@@ -3419,7 +3447,7 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
     say(f"Loaded in {manifest['observed']['load_seconds']:.0f}s, using about {manifest['observed']['ram_used_gib']:.0f} GiB")
     return 0
   say(f"Running {rid} at {endpoint(rid)} (model id {rid}, key in {key_path()})")
-  say(f"Loaded in {manifest['observed']['load_seconds']:.0f}s, using about {manifest['observed']['ram_used_gib']:.0f} GiB")
+  say(f"Loaded in {manifest['observed']['load_seconds']:.0f}s, using about {memory_used_gib(manifest):.0f} GiB")
   say(f"Manifest: {path}")
   if manifest_kind(manifest) == "text":
     say(f"Launch an agent against it with: omarchy agent --local-model {rid}")
@@ -3496,6 +3524,8 @@ def model_record(rid, manifest, profile):
   recipe = manifest["recipe"]
   vendor = recipe.get("vendor", "")
   observed = manifest.get("observed") or {}
+  if observed:
+    observed = {**observed, "ram_used_gib": memory_used_gib(manifest)}
   fits, fit_reason = (True, "") if unit in ("active", "activating", "deactivating", "removing") else start_fit(manifest, profile)
   error = _read(error_path(rid))
   # A memory refusal isn't a failure to show: play is greyed out with its
@@ -4630,7 +4660,7 @@ def shared_listing(record, catalog, profile, dns):
   models = []
   for rid in shared_recipes():
     model = record["models"].get(rid)
-    if not model or model.get("kind", "text") != "text":
+    if not model:
       continue
     recipe = catalog.recipes.get(rid) or (load_model(rid) or {}).get("recipe") or {}
     measured = load_measurement(catalog, recipe, profile, gpu).get("long", {}) if gpu and recipe else {}
@@ -4639,6 +4669,10 @@ def shared_listing(record, catalog, profile, dns):
       "recipe": rid,
       "name": model["name"],
       "vendor": model["vendor"],
+      # text or image, and whether an image model edits by instruction: an
+      # image model is for Fantasi, never for an agent.
+      "kind": model.get("kind", "text"),
+      "edit": bool(model.get("edit")),
       # Dense or mixture of experts, which a peer's panel shows beside the
       # speeds instead of this machine's memory.
       "architecture": recipe.get("architecture", ""),
@@ -4681,8 +4715,7 @@ def publish_shares(record, catalog, profile, force=False):
     try:
       dns = self_dns(status)
       have = serve_handlers(dns)
-      # Only text models are shared: the listing and remote agents speak chat completions.
-      want = {f"{SHARE_ROOT}/{rid}": f"http://127.0.0.1:{SHARE_PROXY_PORT}/{rid}" for rid in shares if rid in record["models"] and record["models"][rid].get("kind", "text") == "text"}
+      want = {f"{SHARE_ROOT}/{rid}": f"http://127.0.0.1:{SHARE_PROXY_PORT}/{rid}" for rid in shares if rid in record["models"]}
       if want:
         ensure_share_proxy()
       for path, target in want.items():
@@ -4738,8 +4771,6 @@ def cmd_share(argv):
   if not args.off:
     if not load_model(rid):
       raise LocalError(f"{rid} isn't set up. Run: omarchy agent local use {rid}")
-    if manifest_kind(load_model(rid)) != "text":
-      raise LocalError(f"{rid} is an image model, and only text models can be shared on the tailnet for now")
     self_dns()
   with share_lock():
     shares = set(shared_recipes())
@@ -5104,6 +5135,8 @@ def clean_listing(listing, dns):
       "recipe": model["recipe"],
       "name": _clean(model.get("name") or model["recipe"]),
       "vendor": model.get("vendor") if ID_RE.match(str(model.get("vendor", ""))) else "",
+      "kind": model.get("kind") if model.get("kind") in KINDS else "text",
+      "edit": model.get("edit") is True,
       "architecture": model.get("architecture") if model.get("architecture") in ARCHITECTURES else "",
       "ctx": int(ctx) if ctx and ctx > 0 else 0,
       "max_tokens": int(min(tokens, ctx or tokens)) if tokens and tokens > 0 else DEFAULT_MAX_OUTPUT_TOKENS,
@@ -5408,7 +5441,10 @@ def overlay_target(rid=None):
   """The running model an overlay points at: a local recipe, or host/recipe
   on a paired machine of the tailnet."""
   if rid and "/" in rid:
-    return remote_target(resolve_remote(rid))
+    model = resolve_remote(rid)
+    if model.get("kind", "text") != "text":
+      raise LocalError(f"{rid} is an image model; agents run on text models")
+    return remote_target(model)
   return local_target(resolve_model(rid, running_only=True))
 
 
@@ -5496,7 +5532,8 @@ def remote_targets():
   targets = []
   for model in load_network()["models"].values():
     try:
-      if model.get("paired") and model["host"] in remotes:
+      # An image model is for Fantasi, not an agent.
+      if model.get("paired") and model["host"] in remotes and model.get("kind", "text") == "text":
         targets.append(remote_target(model))
     except (KeyError, TypeError, AttributeError):
       pass

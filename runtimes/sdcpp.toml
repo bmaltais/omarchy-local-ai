@@ -20,4 +20,6 @@ reserved = ["--listen-ip", "--listen-port", "--api-key", "--api-key-file", "SD_A
 model = { arg = "--diffusion-model" }
 text_encoder = { arg = "--llm" }
 vae = { arg = "--vae" }
+audio_vae = { arg = "--audio-vae" }
+lora = { arg = "--lora-model-dir" }
 key = { env = "SD_API_KEY" }

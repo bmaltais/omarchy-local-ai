@@ -1,0 +1,23 @@
+# stable-diffusion.cpp's sd-server built with CUDA, for image and video models on NVIDIA's
+# unified-memory ARM machines (GB10, N1x). The same commit and patches as sdcpp, from
+# omacom/sdcpp-image's Containerfile.cuda: the key from SD_API_KEY and a clean stop on SIGTERM.
+# The driver's libcuda arrives through CDI; the image carries only cudart and cuBLAS.
+image = "ghcr.io/omacom/sdcpp-cuda@sha256:0571b9ddbb8ad78fddb0bc6909eb4ddd7f3d4c1d23828c14309bbf9f1783ef7d"
+tier = "third-party"
+review = "reviews/sdcpp-cuda-0571b9ddbb8a.toml"
+api = "sdcpp"
+port = 1234
+command = ["sd-server", "--listen-ip", "0.0.0.0", "--listen-port", "1234"]
+# Healthy once the model has loaded: its status, asked with the key, says ready.
+health = { probe = ["/bin/sh", "-c", "curl -fsS -H \"Authorization: Bearer $OMARCHY_LOCAL_KEY\" http://127.0.0.1:1234/sdcpp/v1/models/status | grep -q '\"state\": *\"ready\"'"] }
+# It writes scratch files only under /tmp.
+run = { devices = ["cdi-nvidia"], tmpfs = "/tmp" }
+reserved = ["--listen-ip", "--listen-port", "--api-key", "--api-key-file", "SD_API_KEY"]
+
+[inputs]
+model = { arg = "--diffusion-model" }
+text_encoder = { arg = "--llm" }
+vae = { arg = "--vae" }
+audio_vae = { arg = "--audio-vae" }
+lora = { arg = "--lora-model-dir" }
+key = { env = "SD_API_KEY" }

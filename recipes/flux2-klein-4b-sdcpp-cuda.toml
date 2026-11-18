@@ -1,0 +1,42 @@
+# Black Forest Labs' FLUX.2 [klein] 4B on stable-diffusion.cpp's CUDA build: the same weights and
+# settings as flux2-klein-4b-sdcpp, for NVIDIA's unified-memory ARM machines. It makes new images
+# and changes one by an instruction, given the picture as a reference image.
+name = "FLUX.2 Klein 4B"
+kind = "image"
+edit = true
+runtime = "sdcpp-cuda"
+vendor = "bfl"
+
+[[hardware]]
+gpu = "nvidia-n1x"
+ram_class = 128
+measured = "measurements/flux2-klein-4b-sdcpp-cuda-n1x-128.toml"
+
+[[artifacts]]
+repo = "leejet/FLUX.2-klein-4B-GGUF"
+revision = "3b1f5a9dc3abb32238b053aeb3d823c30afdacbd"
+license = "apache-2.0"
+files = ["flux-2-klein-4b-Q8_0.gguf"]
+model = "flux-2-klein-4b-Q8_0.gguf"
+
+[[artifacts]]
+repo = "unsloth/Qwen3-4B-GGUF"
+revision = "22c9fc8a8c7700b76a1789366280a6a5a1ad1120"
+license = "apache-2.0"
+files = ["Qwen3-4B-Q8_0.gguf"]
+text_encoder = "Qwen3-4B-Q8_0.gguf"
+
+[[artifacts]]
+repo = "Comfy-Org/flux2-klein-4B"
+revision = "5b3abca5c0dc1ecd4eaf3340868d09063fc1c965"
+license = "apache-2.0"
+files = ["split_files/vae/flux2-vae.safetensors"]
+vae = "split_files/vae/flux2-vae.safetensors"
+
+# Measured: 10.7 GiB of GPU memory at its peak, generating at 1024x1024 in 5.6 s.
+[[variant]]
+peak_ram_gib = 12
+peak_gpu_gib = 12
+
+[server]
+args = ["--cfg-scale", "1.0", "--steps", "4", "--sampling-method", "euler"]

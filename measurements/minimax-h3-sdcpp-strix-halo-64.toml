@@ -1,0 +1,40 @@
+recipe = "minimax-h3-sdcpp"
+measured_at = "2026-11-18"
+image = "ghcr.io/omacom/sdcpp@sha256:f8f635b6afa594b7243916f6e0cf7f798e1fed838899edea093af3f2772bf37e"
+load_seconds = 4.0
+fileset = "74f340a66930dc5c"
+method = "one 864x480, 56-frame (2.3 s at 24 fps) clip with sound through /sdcpp/v1/vid_gen on the engine-run server, at its default 4 steps with the turbo LoRA it lists, VAE tiling on; GPU memory from the GTT counter, every half second"
+
+[machine]
+platform = "x86"
+gpu = "amd-strix-halo"
+ram_class = 64
+system = "Framework Desktop (AMD Ryzen AI Max 300 Series)"
+kernel = "7.2.15-2-omarchy"
+cpu = "AMD Eng Sample: 100-000001243-50_Y"
+
+[memory]
+observed_at_load_gib = 0.0
+min_available_during_bench_gib = 8.5
+total_gib = 62.1
+peak_gpu_gib = 36.2
+
+[generation]
+width = 864
+height = 480
+steps = 4
+images = 1
+first_image_s = 178.2
+seconds_per_image = 178.2
+
+[[artifacts]]
+repo = "leejet/MiniMax-H3-GGUF"
+revision = "eee1dd2f05b755b28bd1b785925cbfeebfcba9d9"
+
+[[artifacts]]
+repo = "PrunaAI/P-H3-Image-Comfy"
+revision = "44a0fb73f299da1bb715bdb5ff59ce3fd3c6f543"
+
+[[artifacts]]
+repo = "Comfy-Org/MiniMax-H3"
+revision = "4b53a35191437de05370da548e59aeabe2a5a09a"
