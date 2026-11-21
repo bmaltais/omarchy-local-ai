@@ -18,6 +18,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from types import SimpleNamespace
@@ -641,7 +642,7 @@ with patch.object(a, "cable_neighbors", return_value=["fe80::2%enp1"]), patch.ob
   a.link_notify(pair_profile)
   a.link_notify(pair_profile)
 notices = [call.args[0] for call in sent.call_args_list if call.args and call.args[0][:1] == ["omarchy-notification-send"]]
-check("a newly cabled Spark is announced once, with link setup as its action", len(notices) == 1 and notices[0][-1] == "omarchy-agent-local link setup", repr(notices))
+check("a newly cabled Spark is announced once, with link setup as its action", len(notices) == 1 and notices[0][-1] == "omarchy-models link setup", repr(notices))
 os.unlink(os.path.join(a.state_dir(), "link-notified"))
 # A refresh that found the Spark first doesn't stop the announcement.
 with patch.object(a, "cable_neighbors", return_value=["fe80::3%enp1"]), patch.object(a, "mdns_names", return_value={}):
@@ -994,8 +995,26 @@ with patch.object(a, "known_models", return_value=["flux", "plain"]), patch.obje
 check("a model set up before its recipe named a maker shows the catalog's mark", vendors == {"flux": "bfl", "plain": ""}, json.dumps(vendors))
 with patch.object(a, "known_models", return_value=["current"]), patch.object(a, "unit_props", return_value={}), patch.object(a, "free_memory", return_value=(64, 48)):
   a.write_status(a.load_catalog(), profile)
-a.publish_installing("current", {"name": "Current", "phase": "downloading"})
-check("setting up an installed model again leaves its row as it is", json.loads(Path(a.state_dir(), "status.json").read_text())["models"]["current"]["unit"] != "installing")
+a.publish_installing("current", {"name": "Current", "phase": "downloading", "done_bytes": 5, "total_bytes": 10})
+current = json.loads(Path(a.state_dir(), "status.json").read_text())["models"]["current"]
+check("setting up an installed model again leaves its row as it is", current["unit"] != "installing")
+check("an update's download rides on the model's own row", current["update_progress"] == {"phase": "downloading", "done_bytes": 5, "total_bytes": 10, "rate_bytes_s": 0}, json.dumps(current.get("update_progress")))
+
+# What a running model holds now: its anonymous memory and its GTT, once per GPU client, not
+# the file cache it reads weights through, across its unit and the container's own cgroup.
+with tempfile.TemporaryDirectory() as fake:
+  unit = Path(fake, "cg", "app.slice", "m.service")
+  (unit / "libpod-payload-1").mkdir(parents=True)
+  (unit / "memory.stat").write_text("anon 1073741824\nfile 8589934592\n")
+  (unit / "cgroup.procs").write_text("10\n")
+  (unit / "libpod-payload-1" / "cgroup.procs").write_text("11\n")
+  # Process 10 forked from 11 after it opened the GPU, so both show client 7.
+  for pid, fds in {"10": {"3": "drm-client-id:\t7\ndrm-memory-gtt:\t2097152 KiB\n"}, "11": {"3": "drm-client-id:\t7\ndrm-memory-gtt:\t2097152 KiB\n", "4": "drm-client-id:\t7\ndrm-memory-gtt:\t2097152 KiB\n", "5": "pos: 0\n"}}.items():
+    Path(fake, "proc", pid, "fdinfo").mkdir(parents=True)
+    for fd, text in fds.items():
+      Path(fake, "proc", pid, "fdinfo", fd).write_text(text)
+  held = a.held_bytes("/app.slice/m.service", str(Path(fake, "cg")), str(Path(fake, "proc")))
+check("a model holds its anonymous memory and its GTT once per GPU client, across its processes, not its file cache", held == 3 * 2**30, str(held))
 
 a.clear_installing("timed")
 a.begin_installing("timed", {"name": "Timed"}, 48.0)
@@ -1326,7 +1345,7 @@ with patch.object(a.subprocess, "run", return_value=subprocess.CompletedProcess(
   # The panel shows the first line alone, so it names the machine short.
   raises("a pairing error's first line names the machine without user or domain", lambda: a.cmd_pair(["alice@new.tail1234.ts.net"]), "new refused this machine's SSH keys\n")
 check("an address stays whole as a machine's name", a.short_host("dhh@100.90.162.80") == "100.90.162.80")
-# The agents panel pairs with no terminal (stdin here is the test script), so
+# The local models panel pairs with no terminal (stdin here is the test script), so
 # ssh must ask nothing: a prompt would wait forever. A new host's key is taken.
 with patch.object(a.subprocess, "run", return_value=subprocess.CompletedProcess([], 255, "", "Host key verification failed.\n")) as run:
   raises("pairing with a host whose key changed says how to forget the old one, by host alone", lambda: a.cmd_pair(["alice@new.tail1234.ts.net"]), "ssh-keygen -R new.tail1234.ts.net")
@@ -1335,7 +1354,7 @@ a.write_atomic(a.remote_key_path("away"), "k" * 32, mode=0o600)
 a.write_atomic(os.path.join(a.remotes_dir(), "away.json"), json.dumps({"host": "away", "dns": "away.tail.ts.net", "ssh": "away"}))
 raises("a network model is named host/recipe", lambda: a.split_remote_id("box/../x"), "host/recipe")
 raises("an SSH target can't smuggle options", lambda: a.ssh_command({"ssh": "-oProxyCommand=x", "dns": ""}, "share", "--export"), "Not an SSH target")
-check("remote commands quote their arguments", a.ssh_command({"ssh": "box", "dns": "box.tail.ts.net"}, "share", "--export")[-2:] == ["box", "omarchy-agent-local share --export"])
+check("remote commands quote their arguments", a.ssh_command({"ssh": "box", "dns": "box.tail.ts.net"}, "share", "--export")[-2:] == ["box", "omarchy-models share --export"])
 
 # A paired, running remote model becomes an overlay with its own provider.
 a.write_atomic(a.remote_key_path("box"), "b" * 32, mode=0o600)
@@ -1862,7 +1881,7 @@ check("use --yes lets a user recipe through", code == 0 and used == ["prepare"],
 
 # measure holds the lock, and says so
 dry_code, dry_out, dry_err = measure(measure_id, "--ctx", str(measure_ctx))
-check("measure says up front that other commands wait for it", dry_code == 0 and "other omarchy agent local command waits" in dry_out and "30 minutes" in dry_out, dry_out + dry_err)
+check("measure says up front that other commands wait for it", dry_code == 0 and "other omarchy models command waits" in dry_out and "30 minutes" in dry_out, dry_out + dry_err)
 # The lock is one per process (a command may run another that takes it), so a blocked command is another process.
 child_code = "import sys; sys.path.insert(0, sys.argv[1]); import agent_local as a\nwith a.Lock():\n  print('entered', flush=True)"
 with a.Lock(note=f"a measuring run of {measure_id}"):
@@ -1980,6 +1999,14 @@ check("best stays the text recommendation, and image models resolve on their own
 rows = {row["id"]: row for row in a.recipe_listing(img_catalog, profile)}
 check("list rows carry their kind and the best of each kind", (rows["picture"]["kind"], rows["model"]["kind"]) == ("image", "text") and rows["picture"]["best"] and rows["model"]["best"]
       and rows["picture"]["available"] and rows["picture"]["context"] is None and rows["picture"]["reason"] == "", repr(rows["picture"]))
+# Video and music models are recommended beside them the same way, each kind its own use best.
+check("best.toml lists video models of their own", not a.validate_best({"class": [dict(entry, videos=["clip"])]}, {"model": recipe, "clip": clip}))
+check("a kind's list takes only that kind", any(".music: 'picture' is of kind image, not music" in e for e in a.validate_best({"class": [dict(entry, music=["picture"])]}, {"model": recipe, "picture": picture})))
+raises("a kind with nothing recommended says so", lambda: a.resolve_best(img_catalog, profile, gpu, field="videos"), "No video model is recommended")
+said = []
+with patch.object(a, "load_catalog", return_value=img_catalog), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "say", side_effect=said.append):
+  asked = a.cmd_use(["best"])
+check("best alone names each kind's pick and sets nothing up", asked == 2 and "  text: model" in said and "  image: picture" in said and "  video: none for this machine yet" in said, repr(said))
 
 # Status rows say what kind of model they are; an image model's has no context.
 picture_manifest = {"schema": 1, "recipe_id": "picture", "recipe": picture, "runtime": sd_rt, "runtime_id": "sd", "image": sd_rt["image"],

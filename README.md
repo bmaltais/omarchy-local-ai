@@ -1,6 +1,6 @@
 # omarchy-local-ai
 
-The local-model engine, recipe catalog and internals reference for Omarchy. The Arch package `omarchy-local-ai` installs this tree to `/usr/share/omarchy-local-ai` and symlinks `/usr/bin/omarchy-local-ai` to its executable entry script. Omarchy's thin `omarchy-agent-local` wrapper exposes it as `omarchy agent local <command>`.
+The local-model engine, recipe catalog and internals reference for Omarchy. The Arch package `omarchy-local-ai` installs this tree to `/usr/share/omarchy-local-ai` and symlinks `/usr/bin/omarchy-local-ai` to its executable entry script. Omarchy's thin `omarchy-models` wrapper exposes it as `omarchy models <command>`.
 
 The engine resolves recipes, downloads pinned weights, and manages rootless Podman model servers with an internal network, read-only root, dropped capabilities, allowlisted devices and authenticated loopback endpoints. The catalog ships with the engine; it is never fetched at runtime. See [engine contract](docs/engine.md) for the security boundary, lifecycle and state formats.
 
@@ -10,7 +10,7 @@ Python 3.11 or newer is required. On Omarchy, run:
 
 ```bash
 ./omarchy-local-ai list
-./omarchy-local-ai use best
+./omarchy-local-ai use best text
 ./omarchy-local-ai validate .
 ./tests/engine-test.sh
 ```
@@ -47,14 +47,14 @@ Point any OpenAI-compatible client at `http://127.0.0.1:11435/v1` with that key;
 An Omarchy machine can set up models on another one over SSH, a DGX Spark on DGX OS for example, and use them as it uses any machine's shared models. The other machine and this one need Tailscale: the models reach this machine through the tailnet, as `share` and `pair` do.
 
 ```bash
-omarchy agent local machine add user@spark-1234.local   # once: asks for its password and sudo once
-omarchy agent local list                                # what only the machine runs is listed, "Runs on user@spark-1234.local"
-omarchy agent local use nemotron-3.5-bolt-tensorfold   # set up, shared and paired
-omarchy agent local remote start spark-1234/nemotron-3.5-bolt-tensorfold
+omarchy models machine add user@spark-1234.local   # once: asks for its password and sudo once
+omarchy models list                                # what only the machine runs is listed, "Runs on user@spark-1234.local"
+omarchy models use nemotron-3.5-bolt-tensorfold   # set up, shared and paired
+omarchy models remote start spark-1234/nemotron-3.5-bolt-tensorfold
 omarchy agent --local-model spark-1234/nemotron-3.5-bolt-tensorfold
 ```
 
-`machine add` gives the machine this machine's SSH key, the same host setup `link setup` gives a peer, a copy of this engine and catalog (in `~/.local/share/omarchy-local-ai`, refreshed before each setup there) and `omarchy-agent-local` on its PATH, then pairs with it. `use` sends what this machine can't run to the machine (`--on <host>` sends anything), whose engine sets it up and starts it, then shares it on the tailnet; this machine pairs with that model. From then on it is one of the network's models: the agents panel lists it, and `remote start|stop`, `forget` and `--local-model <host>/<recipe>` work as for any paired machine's. To remove one, run `ssh <host> omarchy-agent-local remove <recipe>`.
+`machine add` gives the machine this machine's SSH key, the same host setup `link setup` gives a peer, a copy of this engine and catalog (in `~/.local/share/omarchy-local-ai`, refreshed before each setup there) and `omarchy-models` on its PATH, then pairs with it. `use` sends what this machine can't run to the machine (`--on <host>` sends anything), whose engine sets it up and starts it, then shares it on the tailnet; this machine pairs with that model. From then on it is one of the network's models: the agents panel lists it, and `remote start|stop`, `forget` and `--local-model <host>/<recipe>` work as for any paired machine's. To remove one, run `ssh <host> omarchy-models remove <recipe>`.
 
 ## Catalog layout
 
@@ -76,7 +76,7 @@ omarchy agent --local-model spark-1234/nemotron-3.5-bolt-tensorfold
 
 ## Build a runtime image
 
-A runtime whose image is built here has its Containerfile in `images/<image>/`: `llamacpp`, `sdcpp`, `sdcpp-cuda`, `acestep`, `acestep-cuda`, `tensorfold`, `tensorfold-dsv41`, `tensorfold-glm53` and `tensorfold-nemotron-bolt`. The base image and upstream commits are pinned in the Containerfile, but packages come from the distribution at build time, so a rebuild gives a new digest even with nothing changed. To update one, for example to a newer llama.cpp:
+A runtime whose image is built here has its Containerfile in `images/<image>/`: `llamacpp`, `sdcpp`, `sdcpp-cuda`, `acestep`, `acestep-cuda`, `tensorfold`, `tensorfold-dsv41`, `tensorfold-glm53`, `tensorfold-nemotron-bolt` and `llamacpp-hy4`. The base image and upstream commits are pinned in the Containerfile, but packages come from the distribution at build time, so a rebuild gives a new digest even with nothing changed. To update one, for example to a newer llama.cpp:
 
 1. Change the pinned `COMMIT` and its `BUILD` tag, or the base digest, in `images/llamacpp/Containerfile`, in a pull request. CI builds every image a pull request changes, to check it.
 2. Merging it publishes the image: `.github/workflows/images.yml` pushes `ghcr.io/omacom/omarchy-local-ai/llamacpp:<version>-<run>` and puts the digest to pin in the run's summary. Run the workflow by hand, naming the image, to rebuild without a change, for the distribution's newer packages.
@@ -95,4 +95,4 @@ Validate and test, then tag the release `vX.Y.Z`; nothing in the repo is bumped.
 
 `bench/` and `tools/` do not need to ship in the Arch package. Measurement records still ship: recipe validation and the panel use them.
 
-After package updates, `omarchy-agent-local refresh --quiet` rewrites the panel's list and status caches. It does not download a catalog or change running models.
+After package updates, `omarchy-models refresh --quiet` rewrites the panel's list and status caches. It does not download a catalog or change running models.

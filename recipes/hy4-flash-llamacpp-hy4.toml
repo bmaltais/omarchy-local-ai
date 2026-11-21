@@ -1,0 +1,48 @@
+name = "Hy4 flash"
+runtime = "llamacpp-hy4"
+vendor = "tencent"
+architecture = "moe"
+# Screenshots and photos through the checkpoint's SigLIP2 tower, from AngelSlim's projector.
+input = ["text", "image"]
+
+[[hardware]]
+gpu = "nvidia-gb10"
+ram_class = 128
+measured = "measurements/hy4-flash-llamacpp-hy4-gb10-128.toml"
+
+# Tencent AngelSlim's SPARK-4Bit "Fast" build, made for the DGX Spark: 4-bit experts with the kernels
+# their patch tunes for the GB10, and the model's own multi-token-prediction head. Of its 149 GiB the
+# Engram tables (bigram and trigram embeddings at four layers, about 59 GiB) stay in the file on disk,
+# read a few rows a token; the rest goes to the GPU.
+[[artifacts]]
+repo = "AngelSlim/Hy4-flash-GGUF"
+revision = "bcbc7db5dcf4162cc1e1b8ed6c65567e843ebe46"
+license = "other (Tencent Hy License 1.0, see the model card)"
+files = ["Hy4-flash-SPARK-4Bit-Fast.gguf", "mmproj-Hy4-flash-bf16.gguf"]
+model = "Hy4-flash-SPARK-4Bit-Fast.gguf"
+
+# Measured on a DGX Spark running the Omarchy desktop: 95.5 GiB at load, 97 at peak with a 185K-token
+# prompt, which still leaves 19 GiB free. The KV cache for the whole window is set aside at load.
+[[variant]]
+ctx = 196608
+peak_ram_gib = 98
+peak_gpu_gib = 96
+
+# Tencent's generation defaults: temperature 0.9, no top-p or top-k cut.
+[sampling]
+temperature = 0.9
+top_p = 1.0
+top_k = 0
+
+# AngelSlim's server settings for the Spark: one slot, which multi-token prediction needs; the Engram
+# tables read from disk as needed, and the token embeddings on the GPU; the vision projector, which the
+# runtime has no input for, at its path in the model folder. AngelSlim loads with --load-mode mmap, but
+# the 615 driver copies to the GPU from a file's mapping so slowly that the model was still loading
+# after 12 minutes; read into memory it loads in 32 s, and the Engram rows are still read lazily.
+[server]
+args = ["--parallel", "1", "--split-mode", "none", "--fit", "off", "--flash-attn", "on",
+        "--override-tensor", "^per_layer_token_embd\\.weight$=CPU,^token_embd\\.weight$=CUDA0",
+        "--load-mode", "none", "--lazy-mode", "on", "--no-host",
+        "--batch-size", "2048", "--ubatch-size", "1024", "--threads", "4", "--threads-batch", "4",
+        "--cache-type-k", "f16", "--cache-type-v", "f16", "--spec-type", "draft-mtp", "--jinja",
+        "--mmproj", "/models/mmproj-Hy4-flash-bf16.gguf", "--mmproj-offload"]

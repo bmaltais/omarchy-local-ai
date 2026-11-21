@@ -3,8 +3,9 @@
 # Kept by hand, and what the agents panel puts forward: any recipe whose runtime runs on a machine
 # and that fits it can be added from Local AI, but only these are recommended. A recipe may be listed
 # only for classes it has a measurement record for.
-# `recipes` are text models: the agents' default and `use best`. `images` lists the image models
-# recommended beside them, in the same order of preference, and never competes with `recipes`.
+# `recipes` are text models: the agents' default and `use best text`. `images`, `videos` and `music`
+# list the models recommended beside them for each kind, `use best image` and so on, in the same
+# order of preference, and never compete with `recipes` or each other.
 
 # 27B also fits at 128 and 192 GB, but on agent work it is much weaker and about a third the
 # speed, so those get Flash Next alone. At 64 GB only 27B fits.
@@ -24,6 +25,8 @@ gpu = "amd-strix-halo"
 ram_class = 64
 recipes = ["qwen3.8-27b-gufo"]
 images = ["flux2-klein-4b-sdcpp", "z-image-turbo-sdcpp"]
+videos = ["minimax-h3-sdcpp"]
+music = ["ace-step-1.5-turbo-acestep"]
 
 # The N1x and the GB10 share these lists (GPU_CLASSES): only memory sets them apart.
 [[class]]
@@ -31,6 +34,8 @@ gpu = "nvidia-gb10"
 ram_class = 128
 recipes = ["qwen3.8-flash-next-tensorfold", "nemotron-3.5-bolt-tensorfold", "qwen3.8-27b-tensorfold"]
 images = ["flux2-klein-4b-sdcpp-cuda", "z-image-turbo-sdcpp-cuda"]
+videos = ["minimax-h3-sdcpp-cuda"]
+music = ["ace-step-1.5-turbo-acestep-cuda"]
 
 [[class]]
 gpu = "nvidia-gb10"

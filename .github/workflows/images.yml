@@ -49,13 +49,13 @@ jobs:
           declare -A runner=(
             [llamacpp]=ubuntu-latest [sdcpp]=ubuntu-latest [acestep]=ubuntu-latest
             [sdcpp-cuda]=ubuntu-24.04-arm [acestep-cuda]=ubuntu-24.04-arm [tensorfold]=ubuntu-24.04-arm
-            [tensorfold-dsv41]=ubuntu-24.04-arm [tensorfold-glm53]=ubuntu-24.04-arm [tensorfold-nemotron-bolt]=ubuntu-24.04-arm
+            [tensorfold-dsv41]=ubuntu-24.04-arm [tensorfold-glm53]=ubuntu-24.04-arm [tensorfold-nemotron-bolt]=ubuntu-24.04-arm [llamacpp-hy4]=ubuntu-24.04-arm
           )
           declare -A check=(
             [llamacpp]="llama-server --version" [sdcpp]="command -v sd-server" [acestep]="command -v ace-server"
             [sdcpp-cuda]="command -v sd-server" [acestep-cuda]="command -v ace-server" [tensorfold]="command -v tensorfold-native"
             [tensorfold-dsv41]="command -v tensorfold-native" [tensorfold-glm53]="command -v tensorfold-native"
-            [tensorfold-nemotron-bolt]="command -v tensorfold-native"
+            [tensorfold-nemotron-bolt]="command -v tensorfold-native" [llamacpp-hy4]="command -v llama-server"
           )
           all=$(ls images)
           case $EVENT in

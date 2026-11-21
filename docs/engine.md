@@ -1,7 +1,7 @@
 # Local model engine contract
 
 `omarchy-local-ai` installs the engine and catalog together; Omarchy routes
-`omarchy agent local <command>` to it. The engine reads the catalog beside
+`omarchy models <command>` to it. The engine reads the catalog beside
 `agent_local.py`, following the entry script's symlink. Developers can select a
 checkout catalog with `OMARCHY_LOCAL_AI_CATALOG`.
 
@@ -109,7 +109,7 @@ atomically only after the whole run succeeded, as TOML written by the engine (co
 are not kept); a failed load or bench leaves the file byte-identical. Paired recipes aren't covered.
 
 The lock is held for the whole run, because it protects the numbers: another model starting
-meanwhile would be counted as this one's memory. So every other `omarchy agent local` command, the
+meanwhile would be counted as this one's memory. So every other `omarchy models` command, the
 agents panel's start and stop included, waits until `measure` ends: typically a few minutes, and at
 worst about 30 minutes per bench request. `measure` says so before it starts, and a command that is
 blocked prints that a measuring run of that recipe holds the lock (the holder's note lives in the
@@ -125,8 +125,9 @@ boundary: the folder is yours, and a file you place there by hand is read as wri
 
 ## Lifecycle
 
-`use best` matches the GPU class and RAM class, tries the class's text recipes
-in order, checks that the runtime runs on the GPU and that the recipe fits, and
+`use best <kind>` (`text`, `image`, `video` or `music`) matches the GPU class and RAM class, tries the
+class's recipes of that kind (`recipes` for text, else `images`, `videos` or `music` in `best.toml`)
+in order; `use best` alone lists each kind's pick for this machine and sets nothing up. It checks that the runtime runs on the GPU and that the recipe fits, and
 chooses the largest fitting context, and at the same context the variant with the larger memory peak that fits.
 A GPU class is its family, except that the N1x (`nvidia-n1x`) shares the GB10's (`nvidia-gb10`): the same
 chip, so what either can run depends only on memory. Measurements keep the family they ran on. `use <recipe>` supports `--ctx`, `--gpu`,
@@ -146,7 +147,7 @@ Without Omarchy (a DGX Spark on DGX OS, run from a checkout), the platform is re
 `nvidia-smi`, and the first `use` on an NVIDIA machine runs `link setup`'s host script here
 through sudo when Podman is missing or can't read the CDI spec. Units are written for
 Podman 4.9 too: `GroupAdd`, `Entrypoint` and `Notify=healthy` also go through `PodmanArgs`,
-and their hooks call the checkout's entry script when `omarchy-agent-local` isn't installed.
+and their hooks call the checkout's entry script when `omarchy-models` isn't installed.
 
 Downloads share verified blobs. Each setup materializes an immutable
 `models/<recipe>/<fileset>` directory, always mounted read-only at `/models`.
@@ -243,7 +244,7 @@ given `--local-only` for a peer that's gone for good.
 
 `machine add <host>` prepares a machine reached over SSH to run models for this one: the
 SSH key and host setup of `link setup` (`HOST_SETUP`, as root through sudo there), a symlink
-`/usr/local/bin/omarchy-agent-local` (the commands `pair` and `remote` run there over SSH), and a copy of
+`/usr/local/bin/omarchy-models` (the commands `pair` and `remote` run there over SSH), and a copy of
 this engine and catalog in `~/.local/share/omarchy-local-ai` (rsync, `.git` left out, sent again
 before each `use` there). It records the host and its machine profile in `machines.json`, then
 pairs with it, or says to install Tailscale there when it isn't.
@@ -296,7 +297,9 @@ with a notification whose action opens `link setup` in a terminal. Each model co
 - State: `unit`, `sub_state`, `result`, `error`, `fits`, `fit_reason`.
 - Updates: `update`, null when the model is as the catalog would set it up, else which of
   `image`, `weights` and `settings` would change and its `download_bytes`, null until sized, and
-  `updating`, true while an update runs or waits its turn.
+  `updating`, true while an update runs or waits its turn. While it does, `update_progress` carries
+  its download as an installing row's `install` does (`phase` `waiting` or `downloading`,
+  `done_bytes`, `total_bytes`, `rate_bytes_s`); its reload shows in `unit` as any restart does.
 - Progress: `since_ms`, `expected_load_seconds`, `expected_stop_seconds`,
   `expected_remove_seconds`, and nullable `observed` (`load_seconds`,
   `ram_used_gib`, `gpu_used_gib`) and `ram_total_gib`, the memory of the
@@ -331,6 +334,10 @@ with `--started <recipe>` or `--stopped <recipe>` from their hooks.
 `list --json` and `status --json` print the corresponding shapes; `profile`
 prints the machine profile. `refresh` rebuilds both caches using the installed
 catalog without changing running models.
+`memory --json` prints what each running model holds now, in GiB, for the panel's memory
+bar while it's open: its unit's anonymous memory and the GTT its processes map, once per GPU
+client, but not the file cache it reads weights through, which the kernel counts as available.
+`observed.ram_used_gib` stays what it took to load.
 
 ## Client integration
 
@@ -365,15 +372,15 @@ leaves the picker whole.
 
 `share <recipe>` lets the other machines of the user's tailnet use a model, text or image, and `share <recipe> --off` stops. The container, its loopback port and its key check are unchanged: `tailscale serve` proxies `https://<host>.<tailnet>.ts.net/local-ai/<recipe>`, reachable only on the tailnet, to the share proxy at `127.0.0.1:11430/<recipe>`, which forwards each request untouched to the model's loopback port and streams the answer back, and the model still refuses a request without the key. Beside the models, a `text:` route at `/local-ai/models.json` lists the shared models with their state, `kind` (`text` or `image`), `edit` (whether an image model edits by instruction), context, reply cap, inputs, memory and measured speeds. It never contains the key. Every status write republishes the listing when it changed, so remote machines see starts and stops as they happen. Changing Serve needs the user to be Tailscale's operator (`sudo tailscale set --operator=$USER`); a refusal is recorded as `share_error` in `status.json` with that fix. Removing a model unshares it.
 
-The share proxy (`share-proxy`, run as the `omarchy-agent-local-share.service` user unit while anything is shared, and stopped once nothing is) counts who uses each shared model. A request the model accepted counts the machine that sent it, by the tailnet address `tailscale serve` puts in `X-Forwarded-For`, for five minutes after its last one; a refused request counts nothing. `.local/state/omarchy/agent-local/clients.json` is `{models: {<recipe>: <machines>}}`, rewritten only when a count changes, as a machine starts or lapses, and removed when the proxy stops. The agents panel watches it to say how many machines use a shared model.
+The share proxy (`share-proxy`, run as the `omarchy-agent-local-share.service` user unit while anything is shared, and stopped once nothing is) counts who uses each shared model. A request the model accepted counts the machine that sent it, by the tailnet address `tailscale serve` puts in `X-Forwarded-For`, for five minutes after its last one; a refused request counts nothing. `.local/state/omarchy/agent-local/clients.json` is `{models: {<recipe>: <machines>}}`, rewritten only when a count changes, as a machine starts or lapses, and removed when the proxy stops. The local models panel watches it to say how many machines use a shared model.
 
-`pair <host>` runs `omarchy-agent-local share --export` on the host over SSH, which prints its tailnet name and key, and stores them in `.config/omarchy/agent-local/remotes/<host>.{json,key}` (mode 0600). SSH is the only way a key leaves its machine. `forget <host>` deletes both and drops the host's models.
+`pair <host>` runs `omarchy-models share --export` on the host over SSH, which prints its tailnet name and key, and stores them in `.config/omarchy/agent-local/remotes/<host>.{json,key}` (mode 0600). SSH is the only way a key leaves its machine. `forget <host>` deletes both and drops the host's models.
 
 `network` asks the local tailscaled for its online Linux peers, fetches each one's `models.json` in parallel (4s timeout) and writes `network.json`: `{schema, updated_ms, tailnet, self, hosts, models}`. Models are keyed `host/recipe` and carry the local model fields plus `host`, `dns`, `paired`, `endpoint`, `ram_total_gib`, `last_seen_ms` and `offline`. A host that drops off keeps its models, with `offline` set to `offline` (Tailscale says so) or `unreachable` (online but not answering) and `last_seen_ms` from its last answer. Paired hosts are kept until forgotten; unpaired ones for a week. An online host serving no listing shares nothing and its models go. Listings are untrusted input: only known states, kinds, recipe IDs and inputs survive, and text loses control characters. A row without a `kind`, from a host older than image sharing, is a text model. A paired host's image model is for Fantasi, which reaches it at its endpoint with that host's key; pi's providers and the launch overlays leave it out, as they do a local image model.
 
 `overlay pi|opencode <host>/<recipe>` writes the same overlays for a paired host's running model, with provider `omarchy-local-<host>`, the tailnet endpoint and the stored key file, so `omarchy agent --local-model <host>/<recipe>` launches against it.
 
-The agents panel watches `network.json` and runs `network --write` when it opens and every 20 seconds while it stays open. Each network model gets a line beside the local ones: pair while unpaired, start/stop and launch once paired, and an offline line with the last-seen time while its host is away.
+The local models panel watches `network.json` and runs `network --write` when it opens and every 20 seconds while it stays open. Each network model gets a line beside the local ones: pair while unpaired, start/stop and launch once paired, and an offline line with the last-seen time while its host is away.
 
 Maintainers run [tools/bench](../tools/bench) from a checkout against a running
 model (`measure` runs the same requests, from the engine, for recipes of yours). It imports the checkout engine and uses [bench/context.txt](../bench/context.txt)
