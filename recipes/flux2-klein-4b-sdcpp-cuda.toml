@@ -5,6 +5,8 @@ name = "FLUX.2 Klein 4B"
 kind = "image"
 edit = true
 runtime = "sdcpp-cuda"
+# What a setup downloads: the files the artifacts below pin, not the runtime image.
+download_gib = 8.3
 vendor = "bfl"
 
 [[hardware]]

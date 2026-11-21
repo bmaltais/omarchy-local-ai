@@ -4,6 +4,8 @@ name = "Z-Image Turbo"
 vendor = "alibaba"
 kind = "image"
 runtime = "sdcpp"
+# What a setup downloads: the files the artifacts below pin, not the runtime image.
+download_gib = 10.42
 
 [[hardware]]
 gpu = "amd-strix-halo"

@@ -17,9 +17,11 @@ import hashlib
 import ipaddress
 import itertools
 import json
+import math
 import os
 import posixpath
 import pty
+import random
 import re
 import shlex
 import shutil
@@ -34,6 +36,7 @@ import threading
 import time
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
 
 SCHEMA = 1
@@ -91,6 +94,14 @@ KINDS = ("text", "image", "video", "music")
 # acestep.cpp's list of the models it found.
 APIS = ("openai", "sdcpp", "acestep")
 GFX_FAMILIES = {"gfx1151": "amd-strix-halo", "gfx1150": "amd-strix-point"}
+# Intel integrated graphics on the xe kernel driver (Lunar Lake and newer) is a GPU here. Those
+# named by PCI device id keep that name; any other is intel-xe-<device id>.
+INTEL_FAMILIES = {"0xb080": "intel-arc-b390"}
+# What a runtime's `gpus` may name besides a GPU class: every GPU of a vendor.
+VENDORS = ("amd", "intel", "nvidia")
+# Mesa lets its Intel driver address three quarters of RAM, and the kernel's ttm.pages_limit
+# (half of RAM unless raised) caps what the driver may map of it.
+INTEL_MEMORY_SHARE = 0.75
 # NVIDIA platforms whose GPU shares the system's memory. The N1x is the GB10's GPU in a
 # laptop: it keeps its own family name so a measurement records which machine it came from,
 # but it runs what a GB10 with the same memory runs.
@@ -293,6 +304,38 @@ def amd_gpus(kfd_root="/sys/class/kfd/kfd/topology/nodes", drm_root="/sys/class/
   return gpus
 
 
+def intel_gpus(ram_gib, drm_root="/sys/class/drm"):
+  gpus = []
+  try:
+    renders = sorted(name for name in os.listdir(drm_root) if name.startswith("renderD"))
+  except OSError:
+    return gpus
+  memory = ram_gib * INTEL_MEMORY_SHARE
+  pages_limit = int(_read(TTM_PAGES_LIMIT, "0") or 0)
+  if pages_limit:
+    memory = min(memory, gib(pages_limit * os.sysconf("SC_PAGE_SIZE")))
+  for render in renders:
+    device = os.path.join(drm_root, render, "device")
+    pci_id = _read(os.path.join(device, "device"))
+    # Integrated graphics is always the device at 00:02.0; an Arc card has memory of its own.
+    # The older i915 driver's GPUs are left out: too slow for the models to be worth it.
+    if (_read(os.path.join(device, "vendor")) != "0x8086" or not pci_id or os.path.basename(os.path.realpath(device)) != "0000:00:02.0"
+        or os.path.basename(os.path.realpath(os.path.join(device, "driver"))) != "xe"):
+      continue
+    family = INTEL_FAMILIES.get(pci_id, f"intel-xe-{pci_id.removeprefix('0x')}")
+    gpus.append({
+      "vendor": "intel",
+      "family": family,
+      "render_node": f"/dev/dri/{render}",
+      "vram_gib": 0,
+      "gtt_gib": 0,
+      "unified": True,
+      "memory_gib": round(memory, 2),
+      "sysfs": "",
+    })
+  return gpus
+
+
 def gpu_memory_ceiling_gib(gpu, ram_gib):
   """The most memory this GPU can be given to address: a unified AMD GPU's cap can rise to all of
   RAM but the desktop's reserve, any other GPU has what it has."""
@@ -367,6 +410,7 @@ def machine_profile():
   gpus = amd_gpus()
   for gpu in gpus:
     gpu["max_memory_gib"] = gpu_memory_ceiling_gib(gpu, ram)
+  gpus += intel_gpus(ram)
   if platform in NVIDIA_UNIFIED_FAMILIES:
     gpus.append({"vendor": "nvidia", "family": NVIDIA_UNIFIED_FAMILIES[platform], "render_node": "", "vram_gib": 0, "gtt_gib": 0, "unified": True, "memory_gib": round(ram, 2), "sysfs": ""})
   profile = {"platform": platform, "ram_gib": round(ram, 2), "ram_class": ram_class(ram), "gpus": gpus}
@@ -397,13 +441,16 @@ def choose_gpu(profile, family=None):
   return best
 
 
-def recipe_gpu(profile, recipe, family=None):
-  """The GPU a recipe runs on here: the one named, else the best of this machine's GPUs the
-  recipe was measured on (a pair machine still runs single-node recipes on its own GPU)."""
+def recipe_gpu(profile, recipe, family=None, runtime=None):
+  """The GPU a recipe runs on here: the one named, else the best of this machine's GPUs its
+  runtime runs on (a pair machine still runs single-node recipes on its own GPU)."""
   if family:
     return choose_gpu(profile, family)
-  measured = {hw.get("gpu") for hw in recipe.get("hardware", [])}
-  matches = [gpu for gpu in profile["gpus"] if gpu["family"] in measured]
+  if runtime is not None:
+    matches = [gpu for gpu in profile["gpus"] if runtime_supports(runtime, gpu)]
+  else:
+    measured = {hw.get("gpu") for hw in recipe.get("hardware", [])}
+    matches = [gpu for gpu in profile["gpus"] if gpu["family"] in measured]
   if matches:
     return max(matches, key=lambda gpu: (gpu.get("nodes", 1), gpu["memory_gib"]))
   return choose_gpu(profile)
@@ -645,6 +692,17 @@ def validate_runtime(rid, runtime, root=None):
               errors.append(f"{where}.review: missing {field}")
         except tomllib.TOMLDecodeError as error:
           errors.append(f"{where}.review: {error}")
+  # The GPUs its image works on, each a vendor or a GPU class, and only what its devices reach:
+  # an NVIDIA GPU through CDI, an AMD or Intel one through the render node.
+  gpus = runtime.get("gpus")
+  devices = runtime.get("run", {}).get("devices", []) if isinstance(runtime.get("run"), dict) else []
+  if not isinstance(gpus, list) or not gpus or not all(isinstance(g, str) and (g in VENDORS or any(g.startswith(f"{v}-") for v in VENDORS)) for g in gpus):
+    errors.append(f"{where}.gpus: must list the vendors ({', '.join(VENDORS)}) or GPU classes (such as amd-strix-halo) its image works on")
+  else:
+    for entry in gpus:
+      vendor = entry.split("-")[0]
+      if (vendor == "nvidia") != ("cdi-nvidia" in devices) or (vendor != "nvidia" and "render" not in devices) or (vendor == "intel" and "kfd" in devices):
+        errors.append(f"{where}.gpus: {entry} can't be reached through devices {devices}")
   port = runtime.get("port")
   if not isinstance(port, int) or not 1 <= port <= 65535:
     errors.append(f"{where}.port: must be 1-65535")
@@ -726,6 +784,14 @@ def validate_runtime(rid, runtime, root=None):
   api = runtime.get("api", "openai")
   if api not in APIS:
     errors.append(f"{where}.api: must be one of {', '.join(APIS)}")
+  warmup = runtime.get("warmup")
+  if warmup is not None:
+    if api != "openai":
+      errors.append(f"{where}.warmup: only an OpenAI API takes warm-up prompts")
+    elif not (isinstance(warmup, dict) and set(warmup) == {"prompts", "pieces"}
+              and all(isinstance(warmup[k], int) and not isinstance(warmup[k], bool) for k in warmup)
+              and 1 <= warmup["prompts"] <= 16 and 256 <= warmup["pieces"] <= 65536):
+      errors.append(f"{where}.warmup: must be {{prompts = 1-16, pieces = 256-65536}}")
   # The OpenAI check finds the recipe by the alias the server is given; sd-server names no model.
   for required in ("model", "key") + (("alias",) if api == "openai" else ()):
     if required not in inputs:
@@ -829,6 +895,10 @@ def validate_recipe(rid, recipe, runtimes, root=None, user=False):
   # rather than redrawing it from a description.
   if "edit" in recipe and (not isinstance(recipe["edit"], bool) or kind != "image"):
     errors.append(f"{where}.edit: true or false, for image models only")
+  # What a setup downloads, for a first-run screen to say before it starts.
+  if "download_gib" in recipe and (not isinstance(recipe["download_gib"], (int, float)) or isinstance(recipe["download_gib"], bool)
+                                   or not math.isfinite(recipe["download_gib"]) or recipe["download_gib"] <= 0):
+    errors.append(f"{where}.download_gib: must be a finite positive number")
   # Dense or mixture of experts, shown on the recipe's card.
   if "architecture" in recipe and recipe["architecture"] not in ARCHITECTURES:
     errors.append(f"{where}.architecture: must be one of {', '.join(ARCHITECTURES)}")
@@ -919,6 +989,17 @@ def validate_recipe(rid, recipe, runtimes, root=None, user=False):
       errors.append(f"{at}: runtime '{runtime_id}' has no ctx input")
     if variant_source(variant) not in VARIANT_SOURCES:
       errors.append(f"{at}.source: must be one of {', '.join(VARIANT_SOURCES)}")
+  # A video model's clip lengths: the longest it makes, and how its GPU peak grows with the clip,
+  # from the variant's peak at reference_frames by gib_per_frame for each frame more.
+  if "video" in recipe:
+    video = recipe["video"]
+    if kind != "video" or not isinstance(video, dict):
+      errors.append(f"{where}.video: a table, for video models only")
+    else:
+      for field, number in (("max_seconds", int), ("reference_frames", int), ("fps", int), ("gib_per_frame", (int, float))):
+        value = video.get(field, 24 if field == "fps" else None)
+        if not isinstance(value, number) or isinstance(value, bool) or value <= 0:
+          errors.append(f"{where}.video.{field}: must be a positive number")
   sampling = recipe.get("sampling", {})
   if not isinstance(sampling, dict):
     errors.append(f"{where}.sampling: must be a table")
@@ -1108,21 +1189,11 @@ def load_catalog():
 
 
 def runtime_supports(runtime, gpu):
+  """Whether the runtime's image works on this GPU: its vendor, or its class, is in `gpus`."""
   if bool(runtime.get("pair")) != (gpu.get("nodes", 1) == 2):
     return False
-  devices = runtime.get("run", {}).get("devices", [])
-  if gpu["vendor"] == "amd":
-    return "cdi-nvidia" not in devices
-  if gpu["vendor"] == "nvidia":
-    return "kfd" not in devices and "render" not in devices
-  return False
-
-
-def qualified(recipe, profile, gpu):
-  return any(
-    gpu_class(hw.get("gpu")) == gpu_class(gpu["family"]) and hw.get("ram_class") == profile["ram_class"] and hw.get("platform") in (None, profile["platform"])
-    for hw in recipe.get("hardware", [])
-  )
+  gpus = runtime.get("gpus", [])
+  return gpu["vendor"] in gpus or gpu_class(gpu["family"]) in gpus
 
 
 def variant_key(variant):
@@ -1183,11 +1254,9 @@ def pick_variant(recipe, profile, gpu, ctx, rid):
 def compatibility(catalog, rid, profile, gpu, ctx=None):
   recipe = catalog.recipes[rid]
   runtime = catalog.runtimes.get(recipe.get("runtime"), {})
+  # Whether it works here and whether it fits: measurements decide only what best.toml recommends.
   if not runtime_supports(runtime, gpu):
     return None, f"runtime {recipe.get('runtime')} can't run on {gpu['family']}"
-  if not qualified(recipe, profile, gpu):
-    classes = ", ".join(f"{hw.get('gpu')} {hw.get('ram_class')} GB" for hw in recipe.get("hardware", []))
-    return None, f"not measured on {gpu['family']} {profile['ram_class']} GB (measured: {classes})"
   return pick_variant(recipe, profile, gpu, ctx, rid)
 
 
@@ -1257,7 +1326,7 @@ def recipe_listing(catalog, profile, running=(), machines=True):
     recipe = catalog.recipes[rid]
     runtime = catalog.runtimes.get(recipe.get("runtime"), {})
     if gpu:
-      own = recipe_gpu(profile, recipe)
+      own = recipe_gpu(profile, recipe, runtime=runtime)
       variant, reason = compatibility(catalog, rid, profile, own)
     else:
       own, variant, reason = None, None, gpu_error
@@ -1284,6 +1353,8 @@ def recipe_listing(catalog, profile, running=(), machines=True):
       # long prompt on this machine class.
       "source": variant_source(variant) if variant else None,
       "memory_gib": variant["peak_ram_gib"] if variant else None,
+      # What its setup downloads, when the recipe says.
+      "download_gib": recipe.get("download_gib"),
       "context": variant.get("ctx") if variant else None,
       "decode_tok_s": measured.get("long", {}).get("decode_tok_s"),
       "prefill_tok_s": measured.get("long", {}).get("prefill_tok_s"),
@@ -1306,14 +1377,16 @@ def recipe_installed(rid):
 
 
 def load_measurement(catalog, recipe, profile, gpu):
-  """The bench numbers the catalog recorded for this recipe on this machine class."""
-  for hw in recipe.get("hardware", []):
-    if gpu_class(hw.get("gpu")) == gpu_class(gpu["family"]) and hw.get("ram_class") == profile["ram_class"] and hw.get("platform") in (None, profile["platform"]):
-      try:
-        with open(os.path.join(catalog.root, hw["measured"]), "rb") as handle:
-          return tomllib.load(handle)
-      except (OSError, KeyError, tomllib.TOMLDecodeError):
-        return {}
+  """The bench numbers the catalog recorded for this recipe on this machine class: its own
+  family's where it has them, else those of a family sharing the class (a GB10's for an N1x)."""
+  matches = [hw for hw in recipe.get("hardware", [])
+             if gpu_class(hw.get("gpu")) == gpu_class(gpu["family"]) and hw.get("ram_class") == profile["ram_class"] and hw.get("platform") in (None, profile["platform"])]
+  for hw in sorted(matches, key=lambda hw: hw.get("gpu") != gpu["family"])[:1]:
+    try:
+      with open(os.path.join(catalog.root, hw["measured"]), "rb") as handle:
+        return tomllib.load(handle)
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+      return {}
   return {}
 
 
@@ -2001,7 +2074,9 @@ def failure_reason(rid, result):
       match = SERVER_ERROR_RE.match(line.strip())
       if match:
         return match.group(2).strip()[:160]
-  return f"Stopped unexpectedly ({result})"
+  # systemd's result ("exit-code", "signal") says nothing to the person reading the panel: the
+  # logs the line links to say what happened.
+  return "Stopped unexpectedly"
 
 
 def journal_tail(rid, lines=15, since_ms=None):
@@ -2189,13 +2264,96 @@ def post_start_checks(rid, key, runtime=None):
     raise LocalError(f"Port {port_for(rid)} is serving {', '.join(map(str, ids)) or 'an unknown model'}, not {rid}")
 
 
+def warmup_vocabulary(rid, fileset):
+  """The model's own vocabulary, from the tokenizer.json in its file set, as text pieces. Only the
+  file set: a rank folder's links into /models resolve inside the container, not here."""
+  base = os.path.join(data_dir(), "models", rid, fileset)
+  for directory, _, names in sorted(os.walk(base)):
+    if "tokenizer.json" not in names or directory.count(os.sep) - base.count(os.sep) > 2:
+      continue
+    try:
+      with open(os.path.join(directory, "tokenizer.json"), encoding="utf-8") as handle:
+        vocab = json.load(handle)["model"]["vocab"]
+    except (OSError, ValueError, KeyError, TypeError):
+      continue
+    return [piece.replace("\u0120", " ").replace("\u010a", "\n") for piece in vocab
+            if not piece.startswith("<") and "\ufffd" not in piece]
+  return []
+
+
+def warming_path(rid):
+  return os.path.join(state_dir(), "warming", rid)
+
+
+def warming(rid):
+  """Whether a warm-up holds the model back from running: its marker names a live process."""
+  pid = _read(warming_path(rid))
+  if not pid.isdigit():
+    return False
+  try:
+    os.kill(int(pid), 0)
+  except ProcessLookupError:
+    return False
+  except PermissionError:
+    pass
+  return True
+
+
+def warm_up(rid, fileset, key, runtime, publish=None):
+  """Some servers run their first prompts slowly while they settle in, by what the prompts route
+  through: DeepSeek's pair ran a quarter of its speed until it had met most of its experts. A
+  runtime naming warmup gets that many prompts of its own vocabulary drawn at random (pieces, which
+  tokenize to about four tokens each), each with a fresh start so nothing is cached, before the
+  model is reported running. A failed or impossible warm-up only says so: the model itself is up."""
+  warmup = runtime.get("warmup")
+  if not warmup:
+    return
+  pieces = warmup_vocabulary(rid, fileset)
+  if not pieces:
+    say("No tokenizer.json in the model's files to warm it up with")
+    return
+  say("Warming up")
+  started = time.time()
+  # Its unit is already active: the marker keeps status showing it loading until this is done.
+  ensure_dir(os.path.dirname(warming_path(rid)))
+  write_atomic(warming_path(rid), f"{os.getpid()}\n")
+  if publish:
+    publish()
+  try:
+    send_warmup(rid, key, warmup, pieces)
+  finally:
+    with contextlib.suppress(FileNotFoundError):
+      os.unlink(warming_path(rid))
+  say(f"Warmed up in {time.time() - started:.0f}s")
+
+
+def send_warmup(rid, key, warmup, pieces):
+  for n in range(warmup["prompts"]):
+    rng = random.Random(f"{rid}-{n}-{time.time()}")
+    text = f"Warm-up {n} {rng.random()}.\n" + "".join(rng.choice(pieces) for _ in range(warmup["pieces"]))
+    body = json.dumps({"model": rid, "messages": [{"role": "user", "content": text}], "max_tokens": 1,
+                       "temperature": 0, "chat_template_kwargs": {"enable_thinking": False}}).encode()
+    request = urllib.request.Request(f"{endpoint(rid)}/chat/completions", data=body, headers={
+      "Content-Type": "application/json", "Authorization": f"Bearer {key}", "User-Agent": "omarchy-agent-local"})
+    try:
+      with urllib.request.urlopen(request, timeout=600) as response:
+        response.read(HTTP_MAX_BYTES)
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+      say(f"  warm-up stopped after {n} prompts: {error}")
+      return
+
+
 def free_memory(gpu):
   mem = meminfo()
-  available = gib(mem.get("MemAvailable", 0))
+  # Pages a GPU driver has freed wait in its pool (GPUReclaim), which MemAvailable leaves out:
+  # the kernel gives them back under pressure, and the next model loads into them.
+  available = gib(mem.get("MemAvailable", 0) + mem.get("GPUReclaim", 0))
   gpu_free = gpu["memory_gib"]
   if gpu.get("sysfs"):
     used = int(_read(os.path.join(gpu["sysfs"], "mem_info_gtt_used"), "0") or 0) + int(_read(os.path.join(gpu["sysfs"], "mem_info_vram_used"), "0") or 0)
     gpu_free = gpu["memory_gib"] - gib(used)
+  elif gpu["vendor"] == "intel":
+    gpu_free = gpu["memory_gib"] - gib(mem.get("GPUActive", 0))
   return available, gpu_free
 
 
@@ -3114,26 +3272,33 @@ def clear_error(rid):
 
 
 class Lock:
-  """The engine's one lock. A holder that runs long says so in `note`, kept in the lock file
-  while it holds the lock, so a command that has to wait can tell the user why."""
+  """The engine's one lock. A command that holds the lock can run another that takes it (update
+  runs use): only the outermost one locks and unlocks the file. A holder that runs long says so
+  in `note`, kept in the lock file while it holds the lock, so a command that has to wait can tell
+  the user why."""
+  held = 0
+  handle = None
 
   def __init__(self, note=""):
     self.note = note
 
   def __enter__(self):
+    Lock.held += 1
+    if Lock.held > 1:
+      return self
     ensure_dir(state_dir())
-    self.handle = open(os.path.join(state_dir(), "lock"), "a+")
+    Lock.handle = open(os.path.join(state_dir(), "lock"), "a+")
     try:
-      fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+      fcntl.flock(Lock.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
       holder = self._holder_note()
       say(f"{holder}; waiting for it" if holder else "Another omarchy agent local command is running; waiting for it")
-      fcntl.flock(self.handle, fcntl.LOCK_EX)
-    self.handle.seek(0)
-    self.handle.truncate()
+      fcntl.flock(Lock.handle, fcntl.LOCK_EX)
+    Lock.handle.seek(0)
+    Lock.handle.truncate()
     if self.note:
-      self.handle.write(self.note)
-      self.handle.flush()
+      Lock.handle.write(self.note)
+      Lock.handle.flush()
     return self
 
   def _holder_note(self):
@@ -3141,11 +3306,13 @@ class Lock:
     return self.handle.read().strip()
 
   def __exit__(self, *exc):
-    if self.note:
-      self.handle.seek(0)
-      self.handle.truncate()
-    fcntl.flock(self.handle, fcntl.LOCK_UN)
-    self.handle.close()
+    Lock.held -= 1
+    if Lock.held == 0:
+      if self.note:
+        Lock.handle.seek(0)
+        Lock.handle.truncate()
+      fcntl.flock(Lock.handle, fcntl.LOCK_UN)
+      Lock.handle.close()
 
 
 def write_unit_files(rid, container_text):
@@ -3214,6 +3381,7 @@ def activate(manifest, recipe, runtime, gpu, key, catalog, profile):
     "ram_used_gib": ram_used_gib(manifest, before_ram, after_ram, before_peer, peer_free_gib(manifest)),
     "gpu_used_gib": round(before_gpu - after_gpu, 1),
   }
+  warm_up(rid, manifest["fileset"], key, runtime, publish=lambda: write_status(catalog, profile))
 
 
 # ---------------------------------------------------------------- commands
@@ -3232,7 +3400,6 @@ def cmd_use(argv):
   parser.add_argument("--ctx", type=int)
   parser.add_argument("--gpu")
   parser.add_argument("--seed", help="reuse matching files from this directory before downloading")
-  parser.add_argument("--unqualified", action="store_true", help="run a recipe not measured on this machine class")
   parser.add_argument("--detach", action="store_true", help="set it up in the background; the agents panel shows its progress")
   parser.add_argument("--on", metavar="HOST", help="run it on this machine (default: a machine only for what this one can't run)")
   parser.add_argument("--as-remote", action="store_true", help=argparse.SUPPRESS)
@@ -3248,21 +3415,17 @@ def cmd_use(argv):
   if args.target == "best":
     rid, variant, skipped = resolve_best(catalog, profile, gpu, args.ctx)
     require_yes_for_user_recipe(catalog, rid, args.yes)
-    gpu = recipe_gpu(profile, catalog.recipes[rid], args.gpu)
+    gpu = recipe_gpu(profile, catalog.recipes[rid], args.gpu, catalog.runtimes.get(catalog.recipes[rid].get("runtime")))
     for skipped_id, reason in skipped:
       say(f"Skipping {skipped_id}: {reason}")
     say(f"Best for this machine ({gpu['family']}, {profile['ram_class']} GB): {rid}")
   else:
     rid = args.target
-    gpu = recipe_gpu(profile, _lookup_recipe(catalog, rid), args.gpu)
+    recipe = _lookup_recipe(catalog, rid)
+    gpu = recipe_gpu(profile, recipe, args.gpu, catalog.runtimes.get(recipe.get("runtime")))
     variant, reason = compatibility(catalog, rid, profile, gpu, args.ctx)
     if variant is None:
-      if not args.unqualified:
-        raise LocalError(f"{rid} isn't qualified for this machine: {reason}\nRun with --unqualified to try anyway.")
-      variant, fit_reason = pick_variant(catalog.recipes[rid], profile, gpu, args.ctx, rid)
-      if variant is None:
-        raise LocalError(f"{rid} doesn't fit: {fit_reason}")
-      say(f"Warning: {reason}")
+      raise LocalError(f"{rid} can't run on this machine: {reason}")
   measured_load = load_measurement(catalog, catalog.recipes[rid], profile, gpu).get("load_seconds")
   # Before detaching: sudo needs this terminal.
   prepare_host(gpu)
@@ -3341,8 +3504,6 @@ def detach_use(rid, args, recipe, measured_load=None):
     command += ["--gpu", args.gpu]
   if args.seed:
     command += ["--seed", os.path.abspath(args.seed)]
-  if args.unqualified:
-    command.append("--unqualified")
   if getattr(args, "yes", False):
     command.append("--yes")
   if getattr(args, "on", None):
@@ -3513,6 +3674,56 @@ def start_fit(manifest, profile):
   return False, "Not enough memory"
 
 
+def clip_seconds(video, peak_gpu_gib, room_gib):
+  """The longest clip in whole seconds, up to the model's own limit, whose peak fits in room_gib of
+  GPU memory: the variant's peak is at video.reference_frames, and each frame past it costs
+  video.gib_per_frame more. 0 when not even a second fits."""
+  fps = video.get("fps", 24)
+  longest = 0
+  for seconds in range(1, int(video["max_seconds"]) + 1):
+    if peak_gpu_gib + (seconds * fps - video["reference_frames"]) * video["gib_per_frame"] <= room_gib:
+      longest = seconds
+  return longest
+
+
+def add_clip_lengths(record, catalog, profile, pending=None):
+  """Gives each video model the longest clip it can make here now: its GPU's memory less the
+  peaks of the other models on that GPU, any of which may be making something at the same time.
+  A model on its way down still holds its memory until its unit is gone, and one being set up
+  holds it from the start, before its setup is saved. A GPU that shares the machine's RAM is
+  bounded by that too: the RAM left once the desktop's reserve and the other models' peaks are
+  taken."""
+  pending = pending or {}
+  manifest_of = lambda rid: pending.get(rid) or load_model(rid)
+  def gpu_of(manifest):
+    try:
+      gpu = choose_gpu(profile, manifest.get("gpu"))
+    except LocalError:
+      return None
+    # A pair's entry is this machine's own GPU, with its memory per node: the same card.
+    family = next((single for single, pair in PAIR_FAMILIES.items() if pair == gpu["family"]), gpu["family"])
+    return gpu, (family, gpu.get("render_node", ""), gpu.get("sysfs", ""))
+  holding = {}
+  for rid, model in record["models"].items():
+    loaded = rid in pending or model["unit"] in ("active", "activating", "deactivating", "removing")
+    manifest = manifest_of(rid) if loaded else None
+    found = gpu_of(manifest) if manifest else None
+    if found:
+      holding[rid] = (found[1], manifest["variant"]["peak_gpu_gib"], manifest["variant"]["peak_ram_gib"])
+  for rid, model in record["models"].items():
+    recipe = catalog.recipes.get(rid) or {}
+    manifest = manifest_of(rid)
+    found = gpu_of(manifest) if model.get("kind") == "video" and recipe.get("video") and manifest else None
+    if not found:
+      continue
+    gpu, card = found
+    others = {other_id: held for other_id, held in holding.items() if other_id != rid}
+    room = gpu["memory_gib"] - sum(peak_gpu for other_card, peak_gpu, _ in others.values() if other_card == card)
+    if gpu.get("unified"):
+      room = min(room, profile["ram_gib"] - RESERVE_GIB - sum(peak_ram for _, _, peak_ram in others.values()))
+    model["max_seconds"] = clip_seconds(recipe["video"], manifest["variant"]["peak_gpu_gib"], room)
+
+
 def model_record(rid, manifest, profile):
   props = unit_props(rid, "ActiveState", "SubState", "Result", "InactiveExitTimestamp", "ActiveExitTimestamp", "StateChangeTimestamp")
   unit = props.get("ActiveState", "inactive") or "inactive"
@@ -3521,6 +3732,8 @@ def model_record(rid, manifest, profile):
   removing = _read(removing_path(rid))
   if removing:
     unit = "removing"
+  elif unit == "active" and warming(rid):
+    unit = "activating"
   recipe = manifest["recipe"]
   vendor = recipe.get("vendor", "")
   observed = manifest.get("observed") or {}
@@ -3533,7 +3746,7 @@ def model_record(rid, manifest, profile):
   if error.startswith(NOT_ENOUGH_MEMORY):
     error = ""
   if not error and unit == "failed":
-    error = f"Stopped unexpectedly ({props.get('Result') or 'failed'})"
+    error = "Stopped unexpectedly"
   return {
     # Why the last start failed, shown where the progress bar was.
     "error": error,
@@ -3570,8 +3783,171 @@ def model_record(rid, manifest, profile):
   }
 
 
+def pending_update(manifest, catalog, profile):
+  """What setting a model up again would change, now that the catalog has moved on from the one
+  it was set up from: its runtime image, its weights, or how its server is run. None when it
+  would change nothing, or when the catalog no longer has the recipe or a variant for it here.
+  Read from the catalog and the manifest alone, so every status write can afford it."""
+  try:
+    rid = manifest["recipe_id"]
+    recipe = catalog.recipes.get(rid)
+    runtime = catalog.runtimes.get((recipe or {}).get("runtime"))
+    if not recipe or not runtime:
+      return None
+    gpu = choose_gpu(profile, manifest["gpu"])
+    # The context it was set up with stays the user's choice.
+    variant, _ = compatibility(catalog, rid, profile, gpu, manifest["variant"].get("ctx"))
+    if variant is None:
+      return None
+    change = {
+      # By digest: an image that only moved to another name is the same image.
+      "image": runtime["image"].rpartition("@")[2] != manifest["image"].rpartition("@")[2],
+      "weights": recipe.get("artifacts") != manifest["recipe"].get("artifacts"),
+      "settings": False,
+    }
+    if not change["weights"]:
+      # The same files in the same roles: the units differ only by how the server is run.
+      setup = (manifest["roles"], gpu, manifest["fileset"])
+      # A pair's workers are started from its manifest's own pair table, not the unit.
+      change["settings"] = (runtime.get("pair") != manifest["runtime"].get("pair")
+                            or runtime.get("warmup") != manifest["runtime"].get("warmup")
+                            or render_container(rid, recipe, dict(runtime, image=manifest["image"]), variant, *setup)
+                            != render_container(rid, manifest["recipe"], dict(manifest["runtime"], image=manifest["image"]), manifest["variant"], *setup))
+  except (LocalError, KeyError, TypeError):
+    return None
+  if not any(change.values()):
+    return None
+  # How much it would fetch, once refresh has asked the registry and Hugging Face; null until then.
+  sized = update_sizes().get(rid) or {}
+  change["download_bytes"] = sized.get("bytes") if sized.get("for") == update_key(manifest, recipe, runtime) else None
+  return change
+
+
+def update_key(manifest, recipe, runtime):
+  """What a measured download was measured for: this setup moving to this image and these pins."""
+  return hashlib.sha256(json.dumps([manifest["image"], manifest["fileset"], runtime["image"], recipe.get("artifacts")], sort_keys=True).encode()).hexdigest()[:16]
+
+
+def update_sizes_path():
+  return os.path.join(state_dir(), "update-sizes.json")
+
+
+def update_sizes():
+  try:
+    with open(update_sizes_path()) as handle:
+      sizes = json.load(handle)
+    return sizes if isinstance(sizes, dict) else {}
+  except (OSError, ValueError):
+    return {}
+
+
+def registry_json(url, accept, timeout=15):
+  """A registry's answer, with the anonymous pull token its 401 asks for."""
+  headers = {"User-Agent": "omarchy-agent-local", "Accept": accept}
+  for _ in range(2):
+    try:
+      with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as response:
+        return json.load(response)
+    except urllib.error.HTTPError as error:
+      challenge = dict(re.findall(r'(\w+)="([^"]*)"', error.headers.get("WWW-Authenticate", "")))
+      if error.code != 401 or "Authorization" in headers or not challenge.get("realm", "").startswith("https://"):
+        raise LocalError(f"Can't read {url}: {error}")
+      query = urllib.parse.urlencode({key: challenge[key] for key in ("service", "scope") if key in challenge})
+      token = http_json(f"{challenge['realm']}?{query}", timeout)
+      headers["Authorization"] = f"Bearer {token.get('token') or token.get('access_token')}"
+    except (urllib.error.URLError, TimeoutError, ValueError) as error:
+      raise LocalError(f"Can't read {url}: {error}")
+  raise LocalError(f"Can't read {url}")
+
+
+IMAGE_MANIFESTS = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json"
+
+
+def image_layers(image):
+  """The compressed layers of a pinned image, by digest, as its registry lists them."""
+  name, _, digest = image.rpartition("@")
+  registry, _, repo = name.partition("/")
+  manifest = registry_json(f"https://{registry}/v2/{repo}/manifests/{digest}", IMAGE_MANIFESTS)
+  if "manifests" in manifest:
+    arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(os.uname().machine, os.uname().machine)
+    entry = next((m for m in manifest["manifests"] if (m.get("platform") or {}).get("architecture") == arch), None)
+    if entry is None:
+      raise LocalError(f"{image} has no build for {arch}")
+    manifest = registry_json(f"https://{registry}/v2/{repo}/manifests/{entry['digest']}", IMAGE_MANIFESTS)
+  return {layer["digest"]: int(layer["size"]) for layer in manifest.get("layers", [])}
+
+
+def update_download_bytes(manifest, recipe, runtime):
+  """What an update would fetch: the new image's layers the current one lacks, and the weights
+  not in the store yet. Asks the registry and Hugging Face, so only refresh runs it."""
+  need = 0
+  if runtime["image"].rpartition("@")[2] != manifest["image"].rpartition("@")[2] and subprocess.run(["podman", "image", "exists", runtime["image"]]).returncode != 0:
+    layers = image_layers(runtime["image"])
+    try:
+      have = image_layers(manifest["image"])
+    except LocalError:
+      have = {}
+    need += sum(size for digest, size in layers.items() if digest not in have)
+  if recipe.get("artifacts") != manifest["recipe"].get("artifacts"):
+    files, _ = build_artifacts(recipe)
+    need += sum(record["size"] for record in files if not os.path.isfile(blob_path(record)))
+  return need
+
+
+def measure_updates(catalog, profile):
+  """Size every pending update, for the panel to say before one is started. Each refresh measures
+  again, since what an update fetches also depends on what is in the store and among the images
+  now: removing another model can take the weights or layers it would have shared. A registry or
+  Hugging Face that can't be reached keeps the last size measured for the same update, or none."""
+  sizes = update_sizes()
+  kept = {}
+  for rid in known_models():
+    manifest = load_model(rid)
+    if not pending_update(manifest, catalog, profile):
+      continue
+    recipe = catalog.recipes[rid]
+    runtime = catalog.runtimes[recipe["runtime"]]
+    key = update_key(manifest, recipe, runtime)
+    try:
+      kept[rid] = {"for": key, "bytes": update_download_bytes(manifest, recipe, runtime)}
+    except (LocalError, KeyError, TypeError, ValueError):
+      if (sizes.get(rid) or {}).get("for") == key:
+        kept[rid] = sizes[rid]
+  if kept != sizes:
+    write_atomic(update_sizes_path(), json.dumps(kept, indent=2) + "\n")
+
+
+def update_fields(rid, manifest, catalog, profile):
+  """What an update would change (image, weights, settings, and its download once sized), or
+  null when the model is current, and whether one is under way."""
+  return {"update": pending_update(manifest, catalog, profile), "updating": updating(rid)}
+
+
+def updating_path(rid):
+  return os.path.join(state_dir(), "updating", rid)
+
+
+def updating(rid):
+  """Whether an update of this model is under way: its marker names the process doing it, or
+  was left by the caller of a detached update whose unit is doing it."""
+  pid = _read(updating_path(rid)).strip()
+  if not pid:
+    return False
+  if pid.isdigit() and os.path.exists(f"/proc/{pid}"):
+    return True
+  return systemctl("is-active", "--quiet", install_unit(rid)).returncode == 0
+
+
 def status_record(catalog, profile):
   models = {rid: model_record(rid, load_model(rid), profile) for rid in known_models()}
+  # A model runs as the recipe it was set up from, but its maker's mark
+  # follows the catalog, so a recipe that gains a vendor marks the models
+  # already set up from it.
+  for rid, row in models.items():
+    vendor = (catalog.recipes.get(rid) or {}).get("vendor", "")
+    if vendor:
+      row["vendor"] = vendor
+    row.update(update_fields(rid, load_model(rid), catalog, profile))
   for rid in installing_models():
     record = load_installing(rid)
     if record is not None and rid not in models:
@@ -3608,12 +3984,15 @@ def write_status(catalog, profile, transitions=None, pending=None, publish=True)
     for rid, manifest in (pending or {}).items():
       previous = load_model(rid) or {}
       record["models"][rid] = model_record(rid, {**manifest, "observed": previous.get("observed")}, profile)
+      # The setup being started is the catalog's, and an update stays one while it loads.
+      record["models"][rid].update(update_fields(rid, manifest, catalog, profile))
     for rid, unit in (transitions or {}).items():
       if rid in record["models"] and record["models"][rid]["unit"] != "removing":
         record["models"][rid]["unit"] = unit
         record["models"][rid]["since_ms"] = now if unit in ("activating", "deactivating") else None
         if unit == "active":
           record["models"][rid]["error"] = ""
+    add_clip_lengths(record, catalog, profile, pending)
     write_atomic(os.path.join(state_dir(), "status.json"), json.dumps(record, indent=2) + "\n")
     # The tailnet sees the same transitions: a shared model's listing is
     # republished with every status write that changes it.
@@ -3670,6 +4049,9 @@ def cmd_status(argv):
     state = {"active": "running", "activating": "loading", "deactivating": "stopping"}.get(model["unit"], model["unit"])
     say(f"{rid} ({model['name']}) on {model['runtime']}: {state}")
     say(f"  endpoint {model['endpoint']} · model id {rid}" + (f" · context {model['ctx']}" if model["ctx"] else f" · {model['kind']}"))
+    if model.get("update"):
+      size = f", {gib(model['update']['download_bytes']):.1f} GiB to download" if model["update"].get("download_bytes") else ""
+      say(f"  update available ({update_summary(model['update'])}{size}): omarchy agent local update {rid}")
     if model["unit"] == "failed":
       say(f"  last failure: {model['result']}")
       tail = journal_tail(rid, 5)
@@ -3678,6 +4060,91 @@ def cmd_status(argv):
   if record["best"] and record["best"] not in record["models"]:
     say(f"The recommendation for this machine is {record['best']}: omarchy agent local use best")
   return 0
+
+
+def update_summary(change):
+  names = {"image": "a new runtime", "weights": "new weights", "settings": "new settings"}
+  return ", ".join(text for key, text in names.items() if change.get(key))
+
+
+def cmd_update(argv):
+  """Set a model up again from the catalog, when the catalog has moved on from the one it was set
+  up from. The setup is use's: the old one keeps running until the new one has started, files
+  that didn't change aren't fetched again, and a model that was stopped is stopped again after."""
+  parser = argparse.ArgumentParser(prog="omarchy agent local update")
+  parser.add_argument("recipe", nargs="?", help="the model to update (default: every one with an update)")
+  parser.add_argument("--detach", action="store_true", help="update in the background; the agents panel shows it")
+  args = parser.parse_args(argv)
+  catalog = load_catalog()
+  profile = machine_profile()
+  targets = [resolve_model(args.recipe)["recipe_id"]] if args.recipe else sorted(known_models())
+  pending = {rid: change for rid in targets if (change := pending_update(load_model(rid), catalog, profile))}
+  if not pending:
+    say(f"{args.recipe} is up to date" if args.recipe else "Every model is up to date")
+    return 0
+  status = 0
+  for rid, change in pending.items():
+    say(f"Updating {rid}: {update_summary(change)}")
+    if args.detach:
+      detach_update(rid, catalog, profile)
+      continue
+    # Shown as updating from now on, while it waits for another setup too.
+    marker = f"{os.getpid()}\n"
+    write_atomic(updating_path(rid), marker)
+    write_status(catalog, profile)
+    try:
+      # One locked step with use's own: whether it runs and which model is the default are read
+      # once nothing else can start it or set another up, and put back before anything can.
+      with Lock():
+        manifest = load_model(rid)
+        if manifest is None or not pending_update(manifest, catalog, profile):
+          say(f"{rid} is up to date")
+          continue
+        was_running = unit_active(rid)
+        default = _read(os.path.join(state_dir(), "last"))
+        ctx = manifest["variant"].get("ctx")
+        code = cmd_use([rid, "--gpu", manifest["gpu"]] + (["--ctx", str(ctx)] if ctx else []))
+        if code == 0 and not was_running and unit_active(rid):
+          code = cmd_stop([rid])
+        # An update is upkeep: the agents' default stays the model the user last started.
+        if default and _read(os.path.join(state_dir(), "last")) != default:
+          write_atomic(os.path.join(state_dir(), "last"), default + "\n")
+        status = status or code
+    finally:
+      # Another update of the same model that took the marker over keeps it.
+      if _read(updating_path(rid)) == marker.strip():
+        os.unlink(updating_path(rid))
+      write_status(catalog, profile)
+  return status
+
+
+def detach_update(rid, catalog, profile):
+  """Run one model's update as the transient user unit a detached setup uses, so it outlives the
+  panel that asked for it; its output goes to the journal."""
+  unit = install_unit(rid)
+  if systemctl("is-active", "--quiet", unit).returncode == 0:
+    say(f"{rid} is already being set up; follow it with: journalctl --user -u {unit} -f")
+    return
+  systemctl("reset-failed", unit)
+  # The panel shows it from now on; the unit's own process takes the marker over.
+  write_atomic(updating_path(rid), "detached\n")
+  entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "omarchy-local-ai")
+  command = ["systemd-run", "--user", "--collect", "--quiet", f"--unit={unit}", f"--description=Update local model {rid}"]
+  env = dict(os.environ)
+  if env.get("OMARCHY_LOCAL_AI_CATALOG"):
+    env["OMARCHY_LOCAL_AI_CATALOG"] = os.path.abspath(env["OMARCHY_LOCAL_AI_CATALOG"])
+  for name in ("OMARCHY_LOCAL_AI_CATALOG", "HF_TOKEN"):
+    if env.get(name):
+      command.append(f"--setenv={name}")
+  result = subprocess.run(command + [entry, "update", rid], capture_output=True, text=True, env=env)
+  if result.returncode != 0:
+    try:
+      os.unlink(updating_path(rid))
+    except OSError:
+      pass
+    raise LocalError(f"Can't start the update of {rid}: {(result.stderr.strip().splitlines() or ['systemd-run failed'])[-1]}")
+  write_status(catalog, profile)
+  say(f"Updating {rid} in the background; the agents panel shows it, or follow it with: journalctl --user -u {unit} -f")
 
 
 def cmd_stop(argv):
@@ -3749,6 +4216,8 @@ def _start(args, catalog, profile):
   else:
     # Timed from the same moment the panel's bar starts from, the click.
     write_atomic(load_seconds_path(rid), f"{time.time() - started:.1f}\n")
+    # Still shown as starting while it warms up.
+    warm_up(rid, manifest["fileset"], ensure_key(), manifest.get("runtime") or {}, publish=lambda: write_status(catalog, profile))
   write_status(catalog, profile)
   if result.returncode != 0:
     raise LocalError(f"{rid} didn't start: {result.stderr.strip()}\n{journal_tail(rid)}")
@@ -4067,7 +4536,12 @@ def cmd_refresh(argv):
   profile = machine_profile()
   link_probe(profile)
   refresh_list_cache(catalog, profile)
+  # The updates show first, their download sizes once the registry and Hugging Face have answered.
   write_status(catalog, profile)
+  before = _read(update_sizes_path())
+  measure_updates(catalog, profile)
+  if _read(update_sizes_path()) != before:
+    write_status(catalog, profile)
   if not args.quiet:
     say("Refreshed what fits this machine")
   return 0
@@ -4474,7 +4948,7 @@ def cmd_measure(argv):
     say("Nothing was changed. Run again with --yes to do it.")
     return 0
   prepare_host(gpu)
-  setup_args = argparse.Namespace(ctx=args.ctx, gpu=None, seed=None, unqualified=True, detach=False, on=None, as_remote=False, yes=True)
+  setup_args = argparse.Namespace(ctx=args.ctx, gpu=None, seed=None, detach=False, on=None, as_remote=False, yes=True)
   sampler = MemorySampler(gpu)
   # The lock is held through the bench: another model starting meanwhile would be counted as this one's memory.
   with Lock(note=f"A measuring run of {rid} holds the lock (it can take {MEASURE_WAIT})"):
@@ -4673,6 +5147,8 @@ def shared_listing(record, catalog, profile, dns):
       # image model is for Fantasi, never for an agent.
       "kind": model.get("kind", "text"),
       "edit": bool(model.get("edit")),
+      # A video model's longest clip on the host.
+      **({"max_seconds": model["max_seconds"]} if "max_seconds" in model else {}),
       # Dense or mixture of experts, which a peer's panel shows beside the
       # speeds instead of this machine's memory.
       "architecture": recipe.get("architecture", ""),
@@ -5137,6 +5613,7 @@ def clean_listing(listing, dns):
       "vendor": model.get("vendor") if ID_RE.match(str(model.get("vendor", ""))) else "",
       "kind": model.get("kind") if model.get("kind") in KINDS else "text",
       "edit": model.get("edit") is True,
+      **({"max_seconds": int(model["max_seconds"])} if isinstance(model.get("max_seconds"), int) and not isinstance(model.get("max_seconds"), bool) and 0 <= model["max_seconds"] <= 600 else {}),
       "architecture": model.get("architecture") if model.get("architecture") in ARCHITECTURES else "",
       "ctx": int(ctx) if ctx and ctx > 0 else 0,
       "max_tokens": int(min(tokens, ctx or tokens)) if tokens and tokens > 0 else DEFAULT_MAX_OUTPUT_TOKENS,
@@ -5789,7 +6266,7 @@ def machine_use(host, args, catalog):
     with Lock():
       say(f"Setting up {rid} on {host}")
       sync_engine(host)
-      flags = (["--ctx", str(args.ctx)] if args.ctx else []) + (["--unqualified"] if args.unqualified else [])
+      flags = (["--ctx", str(args.ctx)] if args.ctx else [])
       done = threading.Event()
       mirror = threading.Thread(target=mirror_installing, args=(host, rid, done), daemon=True)
       if fresh:
@@ -5863,6 +6340,20 @@ def cmd_machine_add(argv):
       cmd_pair([host])
     except LocalError as error:
       say(f"Not paired yet: {error.short}")
+
+
+def cmd_dismiss(argv):
+  """Forget why a model last failed, once its logs have been read: the panel drops the error from
+  its line. The journal keeps the log itself."""
+  parser = argparse.ArgumentParser(prog="omarchy agent local dismiss")
+  parser.add_argument("recipe")
+  args = parser.parse_args(argv)
+  rid = resolve_model(args.recipe)["recipe_id"]
+  clear_error(rid)
+  # A unit left failed reads as stopped unexpectedly until it is reset.
+  if not unit_active(rid):
+    systemctl("reset-failed", unit_name(rid))
+  write_status(load_catalog(), machine_profile())
   return 0
 
 
@@ -5872,6 +6363,7 @@ COMMANDS = {
   "status": cmd_status,
   "start": cmd_start,
   "stop": cmd_stop,
+  "update": cmd_update,
   "remove": cmd_remove,
   "share": cmd_share,
   "network": cmd_network,
@@ -5882,6 +6374,7 @@ COMMANDS = {
   # maintainers; they run but aren't listed.
   "profile": cmd_profile,
   "refresh": cmd_refresh,
+  "dismiss": cmd_dismiss,
   "validate": cmd_validate,
   "overlay": cmd_overlay,
   "link": cmd_link,
@@ -5898,6 +6391,7 @@ SUMMARIES = {
   "status": "Show the models that are set up, and whether a better one is recommended",
   "start": "Start a model that's set up, the last one started by default",
   "stop": "Stop a model, or every running one",
+  "update": "Update a model that's set up to the catalog's runtime, weights and settings",
   "remove": "Remove a model's weights, manifests and unused image",
   "share": "Share a model with the other machines on your tailnet, or stop with --off",
   "network": "List the models shared on your tailnet, including hosts that are offline",

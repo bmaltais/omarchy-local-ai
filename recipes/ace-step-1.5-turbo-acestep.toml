@@ -6,6 +6,8 @@ name = "ACE-Step 1.5 Turbo"
 vendor = "ace-step"
 kind = "music"
 runtime = "acestep"
+# What a setup downloads: the files the artifacts below pin, not the runtime image.
+download_gib = 7.57
 
 [[hardware]]
 gpu = "amd-strix-halo"

@@ -1,0 +1,32 @@
+recipe = "ace-step-1.5-turbo-acestep-cuda"
+measured_at = "2026-11-20"
+image = "ghcr.io/omacom/omarchy-local-ai/acestep-cuda@sha256:e1a9da09b3a031afdaf89764d48e9e51d250d5a15b4596e63ffcf3edd66e758b"
+load_seconds = 2.0
+fileset = "75ca030f848772d4"
+method = "a 60 s and a 180 s song with given lyrics through /lm then /synth on the engine-run server, the turbo model's own 8 steps, to 128 kbit/s MP3; GPU memory from the driver's count for the server's processes, every half second"
+
+[machine]
+platform = "aarch64-n1x"
+gpu = "nvidia-n1x"
+ram_class = 128
+system = "ASUS ProArt P14 H7407BA"
+kernel = "7.3.0-73-omarchy"
+cpu = "Cortex-X925 + Cortex-A725"
+gpu_driver = "615.78.08"
+
+[memory]
+observed_at_load_gib = 0.1
+min_available_during_bench_gib = 101.1
+total_gib = 120.3
+peak_gpu_gib = 6.8
+
+# Writing a song out, then rendering it, for each length.
+[music]
+song_60s_written_s = 8.5
+song_60s_rendered_s = 3.9
+song_180s_written_s = 20.9
+song_180s_rendered_s = 10.3
+
+[[artifacts]]
+repo = "Serveurperso/ACE-Step-1.5-GGUF"
+revision = "666ac70204440867d8c01ba4b119cc79c95b370a"

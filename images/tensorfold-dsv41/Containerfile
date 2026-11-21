@@ -1,0 +1,99 @@
+# DeepSeek-V4.1-Flash-1017 across two DGX Sparks (tensor parallel, TP=2) on TensorFold's native Zig engine, for
+# omarchy-local-ai's paired-Spark runtime. One image serves both ranks.
+#
+# What is in it, each pinned:
+# - BertholomusAI's TensorFold fork, branch deepseek-v41-zig at TF_REF, with every patch in zig/patches of
+#   MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks at RECIPE_REF, built for sm_121. It gives
+#   tensorfold-native (rank 0, the API) and tf-dsv41-lanes (rank 1).
+# - The same fork's deepseek-v41-zig-tp4 branch at INPUTS_REF with the recipe's zig/patches-inputs, of which only tf-dsv41-rank-cache
+#   (a rank's weight file from the checkpoint, no GPU) and the token-map, RoPE and image-bias scripts are kept.
+# - BertholomusAI's kernel kit (kit/ of deepseek-v4.1-tensorfold-tp2-2xgb10 at KIT_REF) in /opt/tensorfold/kit; the
+#   RoPE tables and image routing bias it lacks are made from the checkpoint by /opt/omarchy/prepare.
+# - The recipe's chat template, which the checkpoint does not ship as Jinja.
+#
+# It builds on NVIDIA's PyTorch container: its CUDA toolchain compiles the kernels, its NCCL, cuBLAS and libibverbs are
+# what the engine loads, and its Python runs the kit scripts. No GPU is needed to build.
+#
+#   podman build -t tensorfold-dsv41 images/tensorfold-dsv41     (on an aarch64 machine; about 10 minutes on a Spark)
+
+# nvcr.io/nvidia/pytorch:26.07-py3 for arm64
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch@sha256:7531d90bcbe0e43e1f7363029c7e145ce90eebeb494a7b4695fdba0329d7c3c3
+FROM ${BASE_IMAGE}
+RUN python3 -m pip install --no-cache-dir safetensors
+
+ARG ZIG_VERSION=0.17.0
+ARG ZIG_SHA256=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
+ARG ZIG_MIRRORS="https://zig.linus.dev/zig"
+RUN ok=0; \
+    for base in ${ZIG_MIRRORS} "https://ziglang.org/download/${ZIG_VERSION}"; do \
+      url="${base%/}/zig-aarch64-linux-${ZIG_VERSION}.tar.xz"; echo "zig: trying ${url}"; \
+      if curl --connect-timeout 20 --max-time 300 --retry 3 --retry-delay 5 -fsSL -o /tmp/zig.tar.xz "${url}" && \
+         echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c -; then ok=1; break; fi; \
+      rm -f /tmp/zig.tar.xz; \
+    done; \
+    [ "$ok" = 1 ] || { echo "zig ${ZIG_VERSION}: no source served the pinned sha256" >&2; exit 1; }; \
+    mkdir -p /opt/zig && tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1 && rm /tmp/zig.tar.xz && \
+    /opt/zig/zig version
+ARG SM=121
+# The GB10's CPU, so the build is the same on any aarch64 machine (zig build defaults to the one it runs on).
+ARG ZIG_CPU=cortex_x925
+
+# MiaAI-Lab's pair recipe: its engine patches, the inputs' patches and the chat template.
+ARG RECIPE_REPO=https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks.git
+ARG RECIPE_REF=c7f2b85100f0a7b099c92a4e21825e30d93c9c51
+RUN git init -q /recipe && cd /recipe && git remote add origin "${RECIPE_REPO}" && \
+    git fetch -q --depth 1 origin "${RECIPE_REF}" && git checkout -q --detach FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "${RECIPE_REF}"
+
+# The serving engine.
+ARG TF_REPO=https://github.com/bertholomus/TensorFold.git
+ARG TF_REF=fbbc97132cd004237d9887b8d3185896efaedc5c
+RUN git init -q /tensorfold && cd /tensorfold && git remote add origin "${TF_REPO}" && \
+    git fetch -q --depth 1 origin "${TF_REF}" && git checkout -q --detach FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "${TF_REF}"
+RUN cd /tensorfold && \
+    for p in /recipe/zig/patches/*.patch; do echo "applying $p"; git apply --check "$p" && git apply "$p" || exit 1; done
+RUN cd /tensorfold && /opt/zig/zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=${SM} -Dcpu=${ZIG_CPU} -Doptimize=ReleaseFast \
+      --prefix /opt/tensorfold -j"$(nproc)" install native && \
+    test -x /opt/tensorfold/native/bin/tensorfold-native && test -x /opt/tensorfold/bin/tf-dsv41-lanes && \
+    mkdir -p /opt/tensorfold/share/doc/tensorfold && \
+    for f in LICENSE NOTICE ATTRIBUTION.md THIRD_PARTY_NOTICES.md LICENSES; do \
+      if [ -e "$f" ]; then cp -a "$f" /opt/tensorfold/share/doc/tensorfold/ || exit 1; fi; done && \
+    rm -rf /tensorfold /root/.cache/zig
+
+# The inputs' tools.
+ARG INPUTS_REF=59402086381a42c74d53053443224eec2790b4c5
+RUN git init -q /tf-inputs && cd /tf-inputs && git remote add origin "${TF_REPO}" && \
+    git fetch -q --depth 1 origin "${INPUTS_REF}" && git checkout -q --detach FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "${INPUTS_REF}"
+RUN cd /tf-inputs && \
+    for p in /recipe/zig/patches-inputs/*.patch; do echo "applying $p"; git apply --check "$p" && git apply "$p" || exit 1; done
+RUN cd /tf-inputs && /opt/zig/zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=${SM} -Dcpu=${ZIG_CPU} -Doptimize=ReleaseFast \
+      --prefix /opt/inputs -j"$(nproc)" install && \
+    cp /opt/inputs/bin/tf-dsv41-rank-cache /opt/tensorfold/bin/ && \
+    mkdir -p /opt/tensorfold/tools/inputs && \
+    cp tools/dsv41-zig/inputs/make_token_map.py tools/dsv41-zig/kit/make_rope.py tools/dsv41-zig/kit/make_bias_vl.py \
+       /opt/tensorfold/tools/inputs/ && \
+    cp LICENSE /opt/tensorfold/share/doc/tensorfold/LICENSE-inputs-branch && \
+    rm -rf /tf-inputs /opt/inputs /root/.cache/zig /opt/zig
+
+# The kernel kit.
+ARG KIT_REPO=https://github.com/bertholomus/deepseek-v4.1-tensorfold-tp2-2xgb10.git
+ARG KIT_REF=abe07c7d509a0199cc7fec15263be2aa52ac652f
+RUN git init -q /kit && cd /kit && git remote add origin "${KIT_REPO}" && \
+    git fetch -q --depth 1 origin "${KIT_REF}" && git checkout -q --detach FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "${KIT_REF}" && \
+    cp LICENSE /opt/tensorfold/share/doc/tensorfold/LICENSE-kit && \
+    mv kit /opt/tensorfold/kit && rm -rf /kit
+
+RUN install -D -m 0644 /recipe/model/chat_template.jinja /opt/omarchy/chat_template.jinja && \
+    cp /recipe/LICENSE /opt/tensorfold/share/doc/tensorfold/LICENSE-recipe && rm -rf /recipe
+COPY --chmod=755 scripts/prepare /opt/omarchy/prepare
+ARG TF_REF
+ARG INPUTS_REF
+ARG KIT_REF
+ARG RECIPE_REF
+LABEL org.omarchy.tf.ref=${TF_REF} org.omarchy.tf.inputs=${INPUTS_REF} org.omarchy.tf.kit=${KIT_REF} org.omarchy.tf.recipe=${RECIPE_REF}
+ENV PATH=/opt/tensorfold/native/bin:/opt/tensorfold/bin:${PATH} \
+    HOME=/tmp XDG_CACHE_HOME=/tmp/.cache TENSORFOLD_NO_UPDATE_CHECK=1 HF_HUB_OFFLINE=1
+WORKDIR /tmp

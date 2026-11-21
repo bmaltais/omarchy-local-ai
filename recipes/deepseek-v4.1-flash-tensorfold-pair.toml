@@ -31,25 +31,26 @@ license = "mit"
 files = ["model-00047-of-00048.safetensors", "model-00048-of-00048.safetensors", "model.safetensors.index.json", "config.json"]
 dest = "engram"
 
-# Rank 0 holds 98.8 GiB of weights and, with its KV pool, CUDA graphs and workspaces, 101.5 GiB once loaded at the full
-# 1M window with drafts off (the compressed KV pool is about 0.9 GiB a rank per million positions). Next to the Omarchy
-# desktop that leaves the head about 4 GiB available, and a 135K-token prompt took it to 3.8.
+# Rank 0 holds 102.3 GiB of weights, 3.5 of them the DSpark drafter's, and with its KV pool, CUDA graphs and workspaces
+# 105 GiB once loaded at the full 1M window (the compressed KV pool is about 0.9 GiB a rank per million positions). Next
+# to the Omarchy desktop, with the kernel's free-memory watermark at its GB10 setting, that leaves the head about 6 GiB
+# available, and a 135K-token prompt didn't take it lower.
 [[variant]]
 ctx = 1048576
-peak_ram_gib = 102
-peak_gpu_gib = 102
+peak_ram_gib = 105
+peak_gpu_gib = 105
 
 [[variant]]
 ctx = 262144
-peak_ram_gib = 101
-peak_gpu_gib = 101
+peak_ram_gib = 104
+peak_gpu_gib = 104
 
 [sampling]
 temperature = 1.0
 top_p = 0.95
 top_k = 20
 
-# Four streams share one pool of the window's positions. DSpark drafting is off: its 3.5 GiB of draft weights a rank
-# take a desktop head under 2 GiB available, too close to the point where a GB10 stops answering.
+# Four streams share one pool of the window's positions; drafting from the checkpoint's own DSpark blocks is exact, and
+# 2.3-3.6 times as fast as plain decoding.
 [server]
-args = ["--no-drafts", "--parallel", "4", "--max-tokens", "32768", "--thinking", "--reasoning-effort", "high"]
+args = ["--parallel", "4", "--max-tokens", "32768", "--thinking", "--reasoning-effort", "high"]

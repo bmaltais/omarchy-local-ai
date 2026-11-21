@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 
@@ -190,7 +191,7 @@ def cmd_bench(argv):
     "artifacts": pins,
     **timings,
     "method": f"tools/bench: 1 warmup, then {BENCH_IMAGES} {BENCH_IMAGE_SIZE}x{BENCH_IMAGE_SIZE} images through /v1/images/generations at the recipe's default steps, the median kept" if image else
-              "tools/bench: 1 warmup, then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed",
+              "tools/bench: 2 warmups (a 128-token reply, a ~4K-token prompt from the corpus tail), then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed",
   }
   text = toml_dumps(record)
   if args.output:
@@ -199,6 +200,26 @@ def cmd_bench(argv):
   else:
     print(text)
   return 0
+
+
+def bench_text(rid, key, corpus):
+  with open(corpus, encoding="utf-8") as handle:
+    context = handle.read()
+  say(f"Benchmarking {rid}: short prompt, ~32K-token prompt and a code edit (greedy, thinking off, 512 tokens out)")
+  # Warm what the measured requests use: a reply long enough to run speculative drafting, and a
+  # few thousand prompt tokens. The prompt is the corpus's tail, so it shares no prefix with the
+  # measured prompts and their prompt caches stay cold.
+  bench_request("Count from 1 to 60, separated by commas.", rid, key, max_tokens=128)
+  bench_request(context[-16000:] + "\n\nSummarize this in one sentence.", rid, key, max_tokens=32)
+  short = bench_request(BENCH_SHORT, rid, key)
+  say(f"  short: decode {short['decode_tok_s']} tok/s, first token {short['ttft_s']}s")
+  long = bench_request(context + "\n\n" + BENCH_LONG_QUESTION, rid, key)
+  say(f"  long ({long['prompt_tokens']} tokens): first token {long['ttft_s']}s, prefill {long['prefill_tok_s']} tok/s, decode {long['decode_tok_s']} tok/s")
+  with open(os.path.join(ROOT, "bench", "edit.py.txt"), encoding="utf-8") as handle:
+    code = handle.read()
+  edit = bench_request("```python\n" + code + "```\n\n" + BENCH_EDIT_QUESTION, rid, key)
+  say(f"  edit ({edit['prompt_tokens']} tokens): decode {edit['decode_tok_s']} tok/s")
+  return {"short": short, "long": long, "edit": edit}
 
 
 if __name__ == "__main__":

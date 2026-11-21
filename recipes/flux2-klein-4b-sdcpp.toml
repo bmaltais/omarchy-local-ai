@@ -6,6 +6,8 @@ vendor = "bfl"
 kind = "image"
 edit = true
 runtime = "sdcpp"
+# What a setup downloads: the files the artifacts below pin, not the runtime image.
+download_gib = 8.3
 
 [[hardware]]
 gpu = "amd-strix-halo"

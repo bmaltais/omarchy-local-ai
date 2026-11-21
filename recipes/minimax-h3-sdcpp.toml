@@ -6,6 +6,8 @@ name = "MiniMax H3"
 vendor = "minimax"
 kind = "video"
 runtime = "sdcpp"
+# What a setup downloads: the files the artifacts below pin, not the runtime image.
+download_gib = 22.64
 
 [[hardware]]
 gpu = "amd-strix-halo"
@@ -39,6 +41,14 @@ lora = "loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"
 [[variant]]
 peak_ram_gib = 38
 peak_gpu_gib = 38
+
+# Clips are 24 fps, up to the 15 s H3 is made for. GPU memory grows with the clip: 36.2 GiB at its
+# peak for 56 frames, 46.7 for 124, both at 864x480; about 0.155 GiB a frame, from the peak above.
+[video]
+fps = 24
+max_seconds = 15
+reference_frames = 56
+gib_per_frame = 0.155
 
 [server]
 args = ["--cfg-scale", "1.0", "--steps", "4", "--offload-to-cpu"]

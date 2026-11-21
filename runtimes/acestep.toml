@@ -1,17 +1,19 @@
-# acestep.cpp's ace-server, for music models, built by Omacom (omacom/acestep-image) from
+# acestep.cpp's ace-server, for music models, built by Omacom from images/acestep (first published from omacom/acestep-image) from
 # ServeurpersoCom/acestep.cpp with one patch: the key from ACE_API_KEY (or --api-key-file).
 # Vulkan on the render node only, no ROCm. It takes the folder holding its models, loads one only
 # when asked for a song and frees it after, so it holds no GPU memory between songs and is checked
 # by the models it found (api = "acestep") instead of /v1/models.
-image = "ghcr.io/omacom/acestep@sha256:cedcf4768ee0e4dce0751e3a5641bc083fd85ee6100a09b9be2e18875dc75220"
+image = "ghcr.io/omacom/omarchy-local-ai/acestep@sha256:93d2296c887c1973cde30944be7ea70dee11ed85942f255229c01e8aa50c69e4"
 tier = "third-party"
-review = "reviews/acestep-cedcf4768ee0.toml"
+review = "reviews/acestep-93d2296c887c.toml"
 api = "acestep"
 port = 8085
 command = ["ace-server", "--host", "0.0.0.0", "--port", "8085"]
 health = { probe = ["/bin/sh", "-c", "curl -fsS -H \"Authorization: Bearer $OMARCHY_LOCAL_KEY\" http://127.0.0.1:8085/health"] }
 # It writes nothing; the tmpfs is for the Vulkan driver's caches.
 run = { devices = ["render"], group_add = "keep-groups", tmpfs = "/tmp" }
+# Its image carries Mesa's RADV and ANV, so it runs on AMD and Intel GPUs.
+gpus = ["amd", "intel"]
 reserved = ["--host", "--port", "--api-key", "--api-key-file", "ACE_API_KEY"]
 
 [inputs]

@@ -1,0 +1,17 @@
+image = "ghcr.io/omacom/omarchy-local-ai/acestep@sha256:93d2296c887c1973cde30944be7ea70dee11ed85942f255229c01e8aa50c69e4"
+publisher = "Omacom (built from images/acestep by this repository's workflow: ServeurpersoCom/acestep.cpp 973517be with one patch)"
+reviewer = "Claude Code for David Heinemeier Hansson"
+date = "2026-11-20"
+version = "acestep.cpp 973517be024ff8b6bbd50e0adc9e308ab2ed71b3 + patch 0001 (API key from ACE_API_KEY or --api-key-file)"
+source = "open (MIT), https://github.com/ServeurpersoCom/acestep.cpp; image recipe images/acestep"
+license_url = "https://raw.githubusercontent.com/ServeurpersoCom/acestep.cpp/973517be024ff8b6bbd50e0adc9e308ab2ed71b3/LICENSE"
+license_sha256 = "43e5610846745c687f675badd848d769c8af0a671604efe45cb1466517fd3ddb"
+checked = [
+  "license: acestep.cpp is MIT (the LICENSE at 973517be hashes as above); its ggml, ServeurpersoCom's fork at ef4555b7, is MIT; its built-in third-party code keeps its notices: cpp-httplib (MIT), yyjson (MIT, in its sources) and minimp3 (CC0, in its header); the texts ship in /usr/share/licenses/acestep.cpp",
+  "build: images/acestep's Containerfile, built by the images workflow, builds ServeurpersoCom/acestep.cpp at commit 973517be024ff8b6bbd50e0adc9e308ab2ed71b3 with its patch on docker.io/library/archlinux@sha256:fcee73ea1b96e236248f53a213f71276cc9072d9025b58bce9915e32f19963ae, for any x86-64 CPU (GGML_NATIVE off), with vulkan-radeon and vulkan-intel (Mesa 26.3.1): Vulkan only, no ROCm",
+  "behavior: finds the language model, diffusion transformer, text encoder and VAE in the folder given as --models, loads each only while a song needs it and frees it after; the image carries no model weights, they arrive by the engine's read-only /models mount",
+  "acceptance (2026-11-20): serves with a read-only root and a tmpfs at /tmp, all capabilities dropped, no-new-privileges and only the render node (Vulkan/ANV on an Arc B390, 64 GB), making a 60 s song on the GPU (written by /lm, rendered by /synth) in 109 s; it writes nothing outside /tmp",
+  "acceptance (2026-11-20): with --network none outbound connections fail (DNS fails)",
+  "acceptance (2026-11-20): rejects requests without the key (401) and serves them with it (200) on /health and /props",
+  "acceptance (2026-11-20): stops on SIGTERM in about 0.1 s with status 0",
+]

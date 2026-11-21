@@ -1,7 +1,7 @@
 recipe = "nemotron-3.5-bolt-tensorfold"
 measured_at = "2026-11-02"
 catalog_version = "0.3.0"
-image = "ghcr.io/omacom/tensorfold-nemotron-bolt@sha256:9c248887748b5904c5b13998f6fc8eac6b225146daa4e898c5b066b0c8f212b5"
+image = "ghcr.io/omacom/omarchy-local-ai/tensorfold-nemotron-bolt@sha256:9c248887748b5904c5b13998f6fc8eac6b225146daa4e898c5b066b0c8f212b5"
 ctx = 262144
 load_seconds = 31.0
 fileset = "de7510e84456025e"

@@ -1,0 +1,76 @@
+# Nemotron 3.5 Bolt 74B-A9B on one DGX Spark: TensorFold's native Zig engine with the libbolt family, as
+# runtimes/tensorfold-bolt.toml runs it, published as ghcr.io/omacom/omarchy-local-ai/tensorfold-nemotron-bolt.
+# The inline Dockerfile of omacom/tensorfold-nemotron-bolt's scripts/prepare.sh (a fork of MiaAI-Lab's
+# Nemotron-3.5-Bolt-TensorFold-DGX-Spark), taking its patches and engine sources from BOLT_REF:
+#   podman build -t tensorfold-nemotron-bolt images/tensorfold-nemotron-bolt     (on an aarch64 machine)
+
+# The Bolt recipe's commit, declared here so the final stage's label sees it too.
+ARG BOLT_REF=578415f81ef0b1ac40e51b19449b78c0f64bae35
+# nvcr.io/nvidia/pytorch:26.07-py3 for arm64
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch@sha256:7531d90bcbe0e43e1f7363029c7e145ce90eebeb494a7b4695fdba0329d7c3c3
+FROM ${BASE_IMAGE} AS build
+ARG ZIG_VERSION=0.17.0
+ARG ZIG_SHA256=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
+RUN curl -fsSL -o /tmp/zig.tar.xz "https://ziglang.org/download/${ZIG_VERSION}/zig-aarch64-linux-${ZIG_VERSION}.tar.xz" && \
+    echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c - && \
+    mkdir -p /opt/zig && tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1 && rm /tmp/zig.tar.xz && \
+    /opt/zig/zig version
+ARG TF_REPO=https://github.com/ashhart/TensorFold.git
+ARG TF_REF=eea9dc9c9c8b459c0a03de7f6fe0c6f4835d69ab
+RUN git init -q /tensorfold && cd /tensorfold && git remote add origin "${TF_REPO}" && \
+    git fetch -q --depth 1 origin "${TF_REF}" && git checkout -q --detach FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "${TF_REF}"
+# the decoders libtfvideo needs (FFmpeg 9.0.2, upstream's script) and the JPEG library the pictures need (libjpeg-turbo 3.1.4.1)
+RUN cd /tensorfold && tools/zig/build_ffmpeg.sh /opt/ffmpeg >/tmp/ffmpeg.log 2>&1 && \
+    curl -fsSL -o /tmp/jt.tgz https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.1.4.1/libjpeg-turbo-3.1.4.1.tar.gz && \
+    echo "ecae8008e2cc9ade2f2c1bb9d5e6d4fb73e7c433866a056bd82980741571a022  /tmp/jt.tgz" | sha256sum -c - && \
+    tar -xzf /tmp/jt.tgz -C /tmp && cd /tmp/libjpeg-turbo-3.1.4.1 && \
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_STATIC=0 -DWITH_TURBOJPEG=1 -DCMAKE_INSTALL_PREFIX=/opt/jpeg >/dev/null && \
+    cmake --build build -j"$(nproc)" >/dev/null && cmake --install build >/dev/null && \
+    mkdir -p /opt/tensorfold/share/doc/tensorfold/LICENSES && \
+    cp LICENSE.md /opt/tensorfold/share/doc/tensorfold/LICENSES/libjpeg-turbo-LICENSE.md && \
+    cp README.ijg /opt/tensorfold/share/doc/tensorfold/LICENSES/libjpeg-turbo-README.ijg && \
+    rm -rf /tmp/jt.tgz /tmp/libjpeg-turbo-3.1.4.1
+# structured output (response_format, forced tool_choice) loads libtfgrammar, built from the xgrammar release the pinned tree
+# names (zig/src/platform/grammar_library.zig since TensorFold 1.1.3; zig/build/grammar.zig imports it from there)
+RUN tag="$(sed -n 's/^pub const pinned = "\(.*\)";/\1/p' /tensorfold/zig/src/platform/grammar_library.zig)" && test -n "$tag" && \
+    git clone -q --branch "$tag" --recurse-submodules https://github.com/mlc-ai/xgrammar /opt/xgrammar && \
+    test "$(git -C /opt/xgrammar describe --tags --exact-match)" = "$tag"
+# The Bolt recipe: its TensorFold patches and the libbolt engine sources (engine/tools holds microbenchmarks, left out).
+ARG BOLT_REPO=https://github.com/omacom/tensorfold-nemotron-bolt.git
+ARG BOLT_REF
+RUN git init -q /bolt && cd /bolt && git remote add origin "${BOLT_REPO}" && \
+    git fetch -q --depth 1 origin "${BOLT_REF}" && git checkout -q --detach FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "${BOLT_REF}" && \
+    mkdir -p /opt/bolt-engine && cp engine/*.cu engine/*.h engine/*.inc engine/*.zig /opt/bolt-engine/ && \
+    mkdir -p /opt/tensorfold/share/doc/tensorfold/LICENSES && \
+    cp LICENSE /opt/tensorfold/share/doc/tensorfold/LICENSES/bolt-LICENSE && \
+    cp NOTICE /opt/tensorfold/share/doc/tensorfold/LICENSES/bolt-NOTICE && \
+    cd /tensorfold && \
+    for p in /bolt/patches/*.patch; do [ -e "$p" ] || continue; echo "applying $p"; git apply --check "$p" && git apply "$p" || exit 1; done && \
+    cp /opt/bolt-engine/bolt_native.zig /opt/bolt-engine/bolt_api.zig zig/src/families/nemotron/ && rm -rf /bolt
+# The GB10's and N1x's CPU, so the build is the same on any aarch64 machine.
+ARG ZIG_CPU=cortex_x925
+RUN cd /tensorfold && /opt/zig/zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dcpu=${ZIG_CPU} -Dbolt-src=/opt/bolt-engine -Dffmpeg=/opt/ffmpeg \
+      -Dxgrammar=/opt/xgrammar -Doptimize=fast --prefix /opt/tensorfold -j"$(nproc)" install native bolt video grammar && \
+    cp -a /opt/jpeg/lib/libturbojpeg.so.0* /opt/tensorfold/native/lib/ && \
+    test -x /opt/tensorfold/native/bin/tensorfold-native && \
+    test -f /opt/tensorfold/native/lib/libbolt.so && test -f /opt/tensorfold/native/lib/libtfvideo.so && \
+    test -f /opt/tensorfold/native/lib/libturbojpeg.so.0 && test -f /opt/tensorfold/native/lib/libtfgrammar.so
+RUN mkdir -p /opt/tensorfold/share/doc/tensorfold && cd /tensorfold && \
+    for f in LICENSE LICENSE.md LICENSES NOTICE THIRD_PARTY_NOTICES.md; do \
+      if [ -e "$f" ]; then cp -a "$f" /opt/tensorfold/share/doc/tensorfold/ || exit 1; fi; done && \
+    mkdir -p /opt/tensorfold/share/doc/tensorfold/LICENSES && \
+    cp /opt/xgrammar/LICENSE /opt/tensorfold/share/doc/tensorfold/LICENSES/xgrammar-Apache-2.0.txt && \
+    cp /opt/xgrammar/NOTICE /opt/tensorfold/share/doc/tensorfold/LICENSES/xgrammar-NOTICE.txt && \
+    cp /opt/xgrammar/3rdparty/dlpack/LICENSE /opt/tensorfold/share/doc/tensorfold/LICENSES/dlpack-Apache-2.0.txt && \
+    cp /opt/ffmpeg/src/ffmpeg-*/COPYING.LGPLv2.1 /opt/tensorfold/share/doc/tensorfold/LICENSES/ffmpeg-COPYING.LGPLv2.1
+
+FROM ${BASE_IMAGE}
+COPY --from=build /opt/tensorfold /opt/tensorfold
+RUN ln -s /opt/tensorfold/native/bin/tensorfold-native /usr/local/bin/tensorfold-native && \
+    pip install --no-cache-dir "huggingface_hub>=1.0"
+ARG BOLT_REF
+LABEL tf.gate=bolt tf.bolt=${BOLT_REF}
+ENV HF_HOME=/root/.cache/huggingface CUDA_CACHE_PATH=/cache/nv LD_LIBRARY_PATH=/opt/tensorfold/native/lib
+WORKDIR /workspace

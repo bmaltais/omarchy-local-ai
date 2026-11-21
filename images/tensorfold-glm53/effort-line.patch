@@ -1,0 +1,10 @@
+# The effort line MiaAI-Lab's start.sh rewrites at every start (EFFORT_LINE=thinking), rewritten once here.
+--- a/templates/glm-5.3-flash-vision.jinja	2026-11-19 12:17:46.101865654 +0100
++++ b/templates/glm-5.3-flash-vision.jinja	2026-11-19 12:17:46.103731220 +0100
+@@ -1,5 +1,5 @@
+ [gMASK]<sop>
+-{%- set effective_reasoning_effort = reasoning_effort if reasoning_effort is defined and reasoning_effort in ['low', 'high'] else 'max' -%}
++{%- set effective_reasoning_effort = (reasoning_effort if reasoning_effort in ['low', 'high'] else 'max') if (reasoning_effort is defined and reasoning_effort is not none) else none -%}
+ {%- if effective_reasoning_effort is not none -%}<|system|>Reasoning Effort: {{ effective_reasoning_effort | capitalize }}{%- endif -%}
+ {%- if tools -%}
+ {%- macro tool_to_json(tool) -%}

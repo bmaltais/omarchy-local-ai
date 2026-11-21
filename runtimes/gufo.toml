@@ -11,6 +11,8 @@ shell = "/bin/bash"
 key_on_cmdline = true
 health = { probe = ["/bin/sh", "-c", "curl -fsS -o /dev/null -H \"Authorization: Bearer $OMARCHY_LOCAL_KEY\" http://127.0.0.1:8080/ready"] }
 run = { devices = ["render", "kfd"], group_add = "keep-groups", memlock = "unlimited" }
+# Built for the Strix Halo's gfx1151 only.
+gpus = ["amd-strix-halo"]
 reserved = ["--api-key", "--host", "-i", "--port", "-p", "--trace", "--cache-disk"]
 
 [inputs]

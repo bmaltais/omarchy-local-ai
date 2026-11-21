@@ -1,0 +1,40 @@
+# stable-diffusion.cpp's sd-server, built with Vulkan for AMD and Intel GPUs, as
+# omarchy-local-ai runs it. Built from leejet/stable-diffusion.cpp at a pinned
+# commit with the patches in patches/, which are open as upstream pull
+# requests: an API key (--api-key-file, SD_API_KEY) and a clean stop on
+# SIGTERM. Everything is from Arch Linux's packages at the pinned base.
+
+ARG BASE=docker.io/library/archlinux@sha256:fcee73ea1b96e236248f53a213f71276cc9072d9025b58bce9915e32f19963ae
+
+FROM ${BASE} AS build
+RUN pacman -Syu --noconfirm --needed base-devel cmake git vulkan-headers vulkan-icd-loader shaderc spirv-headers
+ARG COMMIT=532d2c15c430a785a712b2d94281f04e733008a4
+RUN git clone https://github.com/leejet/stable-diffusion.cpp /src \
+ && git -C /src checkout --quiet "$COMMIT" \
+ && git -C /src submodule update --quiet --init --recursive
+COPY patches/ /patches/
+# ggml's CPU code is built for any x86-64 with AVX2, not the builder's own CPU: one built
+# with AVX-512 dies on an illegal instruction on Intel laptops before the GPU is reached.
+RUN git -C /src apply /patches/*.patch \
+ && cmake -S /src -B /build -DSD_VULKAN=ON -DGGML_NATIVE=OFF -DCMAKE_BUILD_TYPE=Release \
+ && cmake --build /build --target sd-server -j"$(nproc)"
+# The licenses of stable-diffusion.cpp, ggml and the third-party code built in.
+RUN mkdir -p /licenses \
+ && cd /src \
+ && find . -path ./thirdparty/cutlass -prune -o -path ./src/core/cuda -prune -o \
+      -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' \) -print \
+    | while read -r file; do install -Dm644 "$file" "/licenses/${file#./}"; done
+
+FROM ${BASE}
+# The Vulkan loader and Mesa's RADV and ANV drivers, which run AMD and Intel
+# GPUs; curl for the health probe.
+RUN pacman -Syu --noconfirm --needed vulkan-icd-loader vulkan-radeon vulkan-intel curl \
+ && pacman -Scc --noconfirm
+COPY --from=build /build/bin/sd-server /usr/bin/sd-server
+COPY --from=build /licenses /usr/share/licenses/stable-diffusion.cpp
+COPY patches/ /usr/share/doc/stable-diffusion.cpp/patches/
+LABEL org.opencontainers.image.source="https://github.com/omacom/omarchy-local-ai"
+LABEL org.opencontainers.image.description="stable-diffusion.cpp's sd-server, built with Vulkan for omarchy-local-ai"
+LABEL org.opencontainers.image.licenses="MIT"
+EXPOSE 1234
+CMD ["sd-server", "--listen-ip", "0.0.0.0", "--listen-port", "1234"]

@@ -1,0 +1,19 @@
+image = "ghcr.io/omacom/omarchy-local-ai/acestep-cuda@sha256:e1a9da09b3a031afdaf89764d48e9e51d250d5a15b4596e63ffcf3edd66e758b"
+publisher = "Omacom (built from images/acestep-cuda: ServeurpersoCom/acestep.cpp 973517be with two patches)"
+reviewer = "Claude Code for David Heinemeier Hansson"
+date = "2026-11-20"
+version = "acestep.cpp 973517be024ff8b6bbd50e0adc9e308ab2ed71b3 + patches 0001 (API key from ACE_API_KEY or --api-key-file) and 0002 (weights reach the GPU through ordinary memory), built with CUDA 13.4.3 for compute capability 12.1"
+source = "open (MIT), https://github.com/ServeurpersoCom/acestep.cpp; image recipe images/acestep-cuda in https://github.com/omacom/omarchy-local-ai"
+license_url = "https://raw.githubusercontent.com/ServeurpersoCom/acestep.cpp/973517be024ff8b6bbd50e0adc9e308ab2ed71b3/LICENSE"
+license_sha256 = "43e5610846745c687f675badd848d769c8af0a671604efe45cb1466517fd3ddb"
+checked = [
+  "license: acestep.cpp is MIT (the LICENSE at 973517be hashes as above); its ggml, ServeurpersoCom's fork at ef4555b7, is MIT; its built-in third-party code keeps its notices: cpp-httplib (MIT), yyjson (MIT, in its sources) and minimp3 (CC0, in its header); the texts ship in /usr/share/licenses/acestep.cpp",
+  "license: libcudart.so.13, libcublas.so.13 and libcublasLt.so.13 (CUDA 13.4.3) are redistributables under NVIDIA's CUDA EULA, Attachment A, shipped inside this value-added runtime with the EULA text from their packages in /usr/share/licenses/acestep.cpp/nvidia",
+  "build: images/acestep-cuda's Containerfile builds ServeurpersoCom/acestep.cpp at commit 973517be024ff8b6bbd50e0adc9e308ab2ed71b3 with its two patches on docker.io/nvidia/cuda@sha256:5626a7d0ecafe3e7c115a452f6b05f20f214f8509346196a7835b205dc5b7fd9 (13.4.3-devel-ubuntu24.04), with GGML_CUDA for compute capability 12.1, no NCCL and a generic ARMv8 CPU side, built with Podman on an N1x; the runtime layer is docker.io/library/ubuntu@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8 with libgomp1, curl and ca-certificates, and carries no CUDA toolkit: libcuda comes from the CDI spec",
+  "patch 0002: copies each tensor from the model file's mapping into ordinary memory before handing it to the backend; without it the 615 driver copies from the mapping at about 50 MB/s and the 4B language model takes 83 s to load before every song, with it 0.7 s",
+  "behavior: finds the language model, diffusion transformer, text encoder and VAE in the folder given as --models, loads each only while a song needs it and frees it after; the image carries no model weights, they arrive by the engine's read-only /models mount",
+  "acceptance (2026-11-20): serves with a read-only root and a tmpfs at /tmp, all capabilities dropped (CapEff 0), no-new-privileges and the GPU through CDI on an N1x, making a 60 s song on the GPU in 12 s; it writes nothing outside /tmp",
+  "acceptance (2026-11-20): with --network none it still serves locally and outbound connections fail (DNS fails)",
+  "acceptance (2026-11-20): rejects requests without the key (401) and serves them with it (200) on /props and /health; the web page it serves at / needs the key too",
+  "acceptance (2026-11-20): stops on SIGTERM in about 0.2 s",
+]

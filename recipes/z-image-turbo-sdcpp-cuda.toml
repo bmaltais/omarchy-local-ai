@@ -5,6 +5,8 @@
 name = "Z-Image Turbo"
 kind = "image"
 runtime = "sdcpp-cuda"
+# What a setup downloads: the files the artifacts below pin, not the runtime image.
+download_gib = 10.07
 vendor = "alibaba"
 
 [[hardware]]

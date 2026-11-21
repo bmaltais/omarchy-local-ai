@@ -51,9 +51,9 @@ The real records are the examples and source of values:
 | --- | --- |
 | [catalog.toml](../catalog.toml) | The catalog schema, 1. |
 | [recipes/](../recipes/) | Name, runtime, pinned artifacts, measured hardware, context variants, sampling and optional server arguments. `kind` is `text` (the default: chat models for the agents) `image` (image generation, whose variants may omit `ctx`), `video` (clips) or `music` (songs), which run like image models. Vendor names the panel logo; architecture is `dense` or `moe`; `input` is `["text"]` (the default) or `["text", "image"]`, which the agent overlays declare so agents can send screenshots. |
-| [runtimes/](../runtimes/) | Digest-pinned image, tier, port, command, standard input mappings, reserved options, nonempty `health.probe` argv and `api` (`openai`, the default, `sdcpp` or `acestep`), which selects the post-start check; an `openai` runtime must map `alias`. A paired runtime adds `listen` (its bind flags), `@PORT@` in its probe and a `[pair]` table: `nodes = 2`, `master_port`, optional `prepare` and `worker` commands (without one, rank 1 runs the head's own invocation, for servers that compare the ranks' arguments), an optional served `model` under `/prepared`, an optional `state` path where each rank's folder is mounted writable for the server's caches (else read-only at `/prepared`), and `env`, `head_env` and `worker_env` (any names but the link's `NCCL_SOCKET_IFNAME`, `NCCL_IB_HCA` and `NCCL_IB_GID_INDEX`, which the engine sets), whose values may hold `@RANK@`, `@WORLD@`, `@MASTER_ADDR@`, `@MASTER_PORT@`, `@CTX@`, `@RDMA_DEVICES@`, `@GID_INDEX@` and `@SOCKET_IFNAME@`. |
+| [runtimes/](../runtimes/) | Digest-pinned image, `gpus` (the vendors, `amd`, `intel` or `nvidia`, or the GPU classes such as `amd-strix-halo` its image works on, each reachable through its devices), tier, port, command, standard input mappings, reserved options, nonempty `health.probe` argv and `api` (`openai`, the default, `sdcpp` or `acestep`), which selects the post-start check; an `openai` runtime must map `alias`. A paired runtime adds `listen` (its bind flags), `@PORT@` in its probe and a `[pair]` table: `nodes = 2`, `master_port`, optional `prepare` and `worker` commands (without one, rank 1 runs the head's own invocation, for servers that compare the ranks' arguments), an optional served `model` under `/prepared`, an optional `state` path where each rank's folder is mounted writable for the server's caches (else read-only at `/prepared`), and `env`, `head_env` and `worker_env` (any names but the link's `NCCL_SOCKET_IFNAME`, `NCCL_IB_HCA` and `NCCL_IB_GID_INDEX`, which the engine sets), whose values may hold `@RANK@`, `@WORLD@`, `@MASTER_ADDR@`, `@MASTER_PORT@`, `@CTX@`, `@RDMA_DEVICES@`, `@GID_INDEX@` and `@SOCKET_IFNAME@`. |
 | [reviews/](../reviews/) | Third-party image digest, publisher, reviewer, date, license URL/hash and checked properties. |
-| [measurements/](../measurements/) | Hardware evidence, artifact identities, context, memory, load time and short, long and code-edit prompt timings; for an image model, seconds per image at a size and step count instead. |
+| [measurements/](../measurements/) | Speed and memory on one machine class, the evidence `best.toml` recommends by, artifact identities, context, memory, load time and short, long and code-edit prompt timings; for an image model, seconds per image at a size and step count instead. |
 | [best.toml](../best.toml) | Unique classes requiring both `gpu` and `ram_class`, with an ordered list of measured text recipes (`recipes`) and optionally of measured image models (`images`), each holding only its kind. |
 
 IDs contain lowercase alphanumeric components separated by single dots or hyphens.
@@ -126,12 +126,19 @@ boundary: the folder is yours, and a file you place there by hand is read as wri
 ## Lifecycle
 
 `use best` matches the GPU class and RAM class, tries the class's text recipes
-in order, checks runtime compatibility and measured hardware qualification, and
+in order, checks that the runtime runs on the GPU and that the recipe fits, and
 chooses the largest fitting context, and at the same context the variant with the larger memory peak that fits.
 A GPU class is its family, except that the N1x (`nvidia-n1x`) shares the GB10's (`nvidia-gb10`): the same
 chip, so what either can run depends only on memory. Measurements keep the family they ran on. `use <recipe>` supports `--ctx`, `--gpu`,
-`--seed` and explicit `--unqualified`; static memory limits still apply. Admission
+`--seed`. Two questions decide which recipes a machine is offered (`list`'s `available`): whether
+the runtime's image works on the GPU (its `gpus`) and whether a variant fits the GPU's memory and
+RAM. A measurement on the machine's class is not needed; it gives the panel speeds to show, and
+`best.toml`, kept by hand and only for measured classes, decides what is recommended. Admission
 also checks current free RAM and GPU memory and reserves 8 GiB for the desktop.
+An Intel GPU is integrated graphics on the `xe` kernel driver (Lunar Lake and newer), named by
+`INTEL_FAMILIES` or else `intel-xe-<device id>`, addressing
+three quarters of RAM up to the kernel's `ttm.pages_limit`. Memory a GPU driver freed and still
+holds in its pool (`GPUReclaim` in `/proc/meminfo`) counts as free RAM: the next model loads into it.
 Use, start and removal are serialized. Several models can run at once on distinct,
 stable loopback ports, beginning at 11435.
 
@@ -165,6 +172,25 @@ flag for a retry. Autostart cannot be enabled before that first checked start.
 `start` defaults to the last started text model; `stop [recipe]` defaults to all running
 models. Image models are set up, started and stopped like any other, but never become `last`,
 the agents' default or an overlay, pi provider or tailnet share.
+
+A model that failed to start, or stopped on its own, keeps its reason as its `error` until its
+next start. `dismiss <recipe>` forgets it sooner, and resets the failed unit: the panel runs it
+once the model's logs have been opened, so an error that has been read leaves the model's line.
+
+A model keeps running as it was set up: a newer package changes nothing for it. Every status
+write compares each set-up model with what the catalog would now set up, from the manifest and
+the catalog alone, and reports the difference as its `update`: a new runtime image (by digest, so
+an image that only moved to another name is no update), new weights pins, or a different server
+invocation. `update [recipe]` then sets the model, or every model with an update, up again with
+the context and GPU it has. That is `use`'s setup: unchanged files aren't fetched again, the old
+setup stays until the new one has started, and a failed update leaves the old one in place. A
+model that was stopped is stopped again afterwards, and the agents' default model stays the one
+last started. `update --detach` runs in the setup's transient unit, for the panel. `refresh`,
+which runs after a package update, sizes each update's download for the panel to show: the new
+image's layers the current image lacks, as the registry lists them, and the weights not in the
+store. Each refresh measures again, as that depends on what is stored now, and keeps the last
+answer in `update-sizes.json` for when the registry can't be reached. Nothing updates on its own: an update restarts the model, which
+ends what its agents were doing and drops its prompt cache.
 
 `remove <recipe>` stops it, removes its unit and file sets, drops blobs unused by
 other recipes and removes its image only if no surviving current manifest uses
@@ -268,6 +294,9 @@ with a notification whose action opens `link setup` in a terminal. Each model co
 - Identity: `recipe`, `kind` (`text` or `image`; installing rows too), `name`, `vendor`, `runtime`, `image`, `ctx` (null for an image model).
 - Connection: `port`, `endpoint` (including `/v1`).
 - State: `unit`, `sub_state`, `result`, `error`, `fits`, `fit_reason`.
+- Updates: `update`, null when the model is as the catalog would set it up, else which of
+  `image`, `weights` and `settings` would change and its `download_bytes`, null until sized, and
+  `updating`, true while an update runs or waits its turn.
 - Progress: `since_ms`, `expected_load_seconds`, `expected_stop_seconds`,
   `expected_remove_seconds`, and nullable `observed` (`load_seconds`,
   `ram_used_gib`, `gpu_used_gib`) and `ram_total_gib`, the memory of the

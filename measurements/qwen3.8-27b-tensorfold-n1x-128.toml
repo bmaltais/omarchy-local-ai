@@ -1,0 +1,53 @@
+recipe = "qwen3.8-27b-tensorfold"
+measured_at = "2026-11-19"
+image = "ghcr.io/omacom/omarchy-local-ai/tensorfold@sha256:795038783aaf902bcd8b377f73beae8224e75a83e7dbcdb783521ef46bf25aa2"
+ctx = 262144
+load_seconds = 64.0
+fileset = "dab67b7a287bcf57"
+method = "tools/bench: 2 warmups (a 128-token reply, a ~4K-token prompt from the corpus tail), then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
+
+[machine]
+platform = "aarch64-n1x"
+gpu = "nvidia-n1x"
+ram_class = 128
+system = "ASUS ProArt P14 H7407BA"
+kernel = "7.3.0-72-omarchy"
+cpu = "Cortex-X925 + Cortex-A725"
+gpu_driver = "615.78.08"
+
+[memory]
+observed_at_load_gib = 69.5
+min_available_during_bench_gib = 36.2
+total_gib = 120.3
+
+[short]
+prompt_tokens = 41
+completion_tokens = 99
+ttft_s = 0.16
+prefill_tok_s = 257.3
+decode_tok_s = 51.2
+total_s = 2.07
+
+[long]
+prompt_tokens = 31705
+completion_tokens = 512
+ttft_s = 46.43
+prefill_tok_s = 682.8
+decode_tok_s = 42.5
+total_s = 58.47
+
+[edit]
+prompt_tokens = 2306
+completion_tokens = 512
+ttft_s = 3.22
+prefill_tok_s = 715.6
+decode_tok_s = 283.1
+total_s = 5.03
+
+[[artifacts]]
+repo = "TensorFold/Qwen3.8-27B-MLX-4bit"
+revision = "22d8d538154e0e5b6f8dcb1fcc74a60a0798104c"
+
+[[artifacts]]
+repo = "z-lab/Qwen3.8-27B-DFlash2"
+revision = "50307d4c4cde6860d4eee73e2547cd786fe8e8a4"
