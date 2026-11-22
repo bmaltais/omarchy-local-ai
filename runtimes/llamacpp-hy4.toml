@@ -5,9 +5,9 @@
 # libcuda arrives through CDI; the image carries only cudart and cuBLAS.
 # The key comes from LLAMA_API_KEY and covers every route but /health, which says only whether
 # the model has loaded. --offline keeps the server from fetching anything of its own accord.
-image = "localhost/llamacpp-hy4@sha256:38f38825f793916b72a8e8fc0dbd9b38a88bd460c30faf1251571b76023372ec"
+image = "ghcr.io/omacom/omarchy-local-ai/llamacpp-hy4@sha256:b146b900da90ef4311660df4286e779e5c18acb0a0d2ee792c378d941c34860e"
 tier = "third-party"
-review = "reviews/llamacpp-hy4-38f38825f793.toml"
+review = "reviews/llamacpp-hy4-b146b900da90.toml"
 port = 8080
 command = ["llama-server", "--host", "0.0.0.0", "--port", "8080", "--offline", "--no-webui", "--gpu-layers", "all"]
 # Healthy once the model has loaded: /health answers 503 until then.

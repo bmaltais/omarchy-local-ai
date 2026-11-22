@@ -44,5 +44,7 @@ vae = "split_files/vae/ae.safetensors"
 peak_ram_gib = 14
 peak_gpu_gib = 14
 
+# The VAE decodes in 512-pixel tiles: on an Arc B390 a whole 1024x1024 image takes 16 s, as its
+# buffer can't be pinned, and tiles 6 s, with no seam to see.
 [server]
-args = ["--cfg-scale", "1.0", "--steps", "8"]
+args = ["--cfg-scale", "1.0", "--steps", "8", "--vae-tiling", "--vae-tile-size", "512"]

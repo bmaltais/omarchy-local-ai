@@ -1,0 +1,48 @@
+name = "Inkling 2 Small"
+runtime = "inkling2-exl3-pair"
+vendor = "thinkingmachines"
+architecture = "moe"
+# Slower than DeepSeek V4.1 Flash on the same pair (half the prefill, a third to half the decode) and behind it on
+# every coding benchmark both report, so it's kept for trying by name. It leads on search, tool use, pictures and
+# hallucination, by Thinking Machines' own numbers.
+experimental = true
+# Screenshots and photos through the original vision tower, on rank 0.
+input = ["text", "image"]
+
+# Two Sparks cabled through their ConnectX-7 ports: this one serves rank 0 and the API, the other rank 1. Memory
+# figures are per Spark.
+[[hardware]]
+gpu = "nvidia-gb10-pair"
+ram_class = 128
+measured = "measurements/inkling-2-small-exl3-pair-gb10x2-128.toml"
+
+# Evanguo12's EXL3 requantization of Thinking Machines' 594B-A17B model for two Sparks: routed experts at 2.55 bits
+# a weight on average, 1.5 to 4 per expert by measured KL and routing share, attention at 6 and the head at 8; the
+# embeddings, vision tower and MTP drafter as released. Against the original on held-out text, served on two Sparks
+# as here: KL 0.014, the same top token 96.8% of the time. Each rank reads its half of every layer's experts.
+[[artifacts]]
+repo = "Evanguo12/Inkling-2-Small-EXL3-2.55bpw-2Spark"
+revision = "70442b516538ea1911cded1c796e876ff41334d5"
+license = "apache-2.0"
+files = ["*.safetensors", "*.json", "*.jinja"]
+dest = "model"
+model = "."
+
+[[variant]]
+ctx = 524288
+peak_ram_gib = 104
+peak_gpu_gib = 104
+
+# The checkpoint's generation default.
+[sampling]
+temperature = 1.0
+
+# The engine's two-Spark settings: four requests at once; 6 GiB kept free beside the weights, the rest to the K/V
+# cache (4-bit global layers, 8-bit sliding ones); prompts read 2,048 rows a chunk, about twice as fast as 512; the
+# MTP drafter used per step when it pays; prefix snapshots every 16K tokens for agent sessions; and the chat template
+# the engine pins for this revision of the model.
+[server]
+args = ["--slots", "4", "--reserve-gb", "6", "--chunk", "2048", "--spec-mode", "auto",
+        "--default-max-tokens", "32768", "--default-thinking-budget", "60000",
+        "--prefix-snapshots", "24", "--prefix-every", "16384",
+        "--chat-template", "/opt/inkling2/engine/server/chat_template-2ad1157.jinja"]

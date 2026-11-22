@@ -1,0 +1,55 @@
+# Inkling 2 Small across two DGX Sparks: oracle9i88/inkling2-exl3 (0xSero's Inkling-2 overlay for exllamav3, with
+# the two-Spark server) on exllamav3 v1.6.6, as runtimes/inkling2-exl3-pair.toml runs it, published as
+# ghcr.io/omacom/omarchy-local-ai/inkling2-exl3. Both at pinned commits, with the engine's own patch and overlay and
+# one change of ours. Built on NVIDIA's PyTorch container, which the extension is built against. The server checks no
+# key, so on the rank that serves the API, Caddy answers on the engine's port, refuses any request without the key in
+# I2_API_KEY and streams the rest to the server over a Unix socket in the container's own /tmp: a paired model shares
+# the host's network, where a port on loopback would let any local account past the key.
+
+# nvcr.io/nvidia/pytorch:26.07-py3 for arm64
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch@sha256:7531d90bcbe0e43e1f7363029c7e145ce90eebeb494a7b4695fdba0329d7c3c3
+
+FROM ${BASE_IMAGE} AS caddy
+# Caddy's release, checked by the SHA-512 its checksums file gives.
+ARG CADDY_VERSION=2.11.9
+ARG CADDY_SHA512=9e5e76d7888542924de2c25353ae87c5f77e2a22c5b1198633cae13688922282e05383d142599205c88d8d80eee5e967d291214d7abce4835329a191b20dd6e0
+RUN curl -fsSLo /caddy.tar.gz "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_arm64.tar.gz" \
+ && echo "${CADDY_SHA512}  /caddy.tar.gz" | sha512sum -c - \
+ && mkdir /caddy && tar -xzf /caddy.tar.gz -C /caddy caddy LICENSE
+
+FROM ${BASE_IMAGE}
+# The engine's commit, which tags the published image (d9e41c98-<n>).
+ARG COMMIT=d9e41c98186c9ed74ca7659e3246136185bad6b5
+ARG EXLLAMAV3=v1.6.6
+RUN git init --quiet /opt/inkling2/engine \
+ && git -C /opt/inkling2/engine fetch --quiet --depth 1 https://github.com/oracle9i88/inkling2-exl3 "$COMMIT" \
+ && git -C /opt/inkling2/engine checkout --quiet FETCH_HEAD \
+ && git clone --quiet --branch "$EXLLAMAV3" --depth 1 https://github.com/turboderp-org/exllamav3 /opt/inkling2/exllamav3 \
+ && git -C /opt/inkling2/exllamav3 apply /opt/inkling2/engine/patches/upstream-modifications.patch \
+ && cp -r /opt/inkling2/engine/overlay/exllamav3/. /opt/inkling2/exllamav3/exllamav3/
+# Our one change: the server's API on the Unix socket I2_UDS names instead of a TCP port. The grep fails the build
+# if the line it replaces ever changes.
+RUN sed -i 's|^uvicorn.run(app, host=args.host, port=args.port, log_level="warning")$|uvicorn.run(app, uds=os.environ["I2_UDS"], log_level="warning")|' \
+      /opt/inkling2/engine/server/i2_server.py \
+ && grep -qx 'uvicorn.run(app, uds=os.environ\["I2_UDS"\], log_level="warning")' /opt/inkling2/engine/server/i2_server.py
+# The server's wheels, by the hashes the engine's lock file pins, and the few it leaves out, by ours. The import is
+# what the server imports, so a missing one fails here rather than at the end of a ten-minute start.
+COPY requirements-extra.txt /opt/inkling2/requirements-extra.txt
+RUN pip install --no-cache-dir --no-deps --require-hashes -r /opt/inkling2/engine/spark/requirements-spark.lock \
+ && pip install --no-cache-dir --no-deps --require-hashes -r /opt/inkling2/requirements-extra.txt \
+ && python3 -c "import transformers, fastapi, uvicorn, starlette, marisa_trie, jinja2, PIL, safetensors, tokenizers"
+# The CUDA extension for the GB10 (compute capability 12.1), four files at a time: more runs the 16 GB build runner out
+# of memory.
+RUN cd /opt/inkling2/exllamav3 \
+ && TORCH_CUDA_ARCH_LIST=12.1 MAX_JOBS=4 python setup.py build_ext --inplace \
+ && rm -rf build
+COPY --from=caddy /caddy/caddy /usr/bin/caddy
+COPY --from=caddy /caddy/LICENSE /usr/share/licenses/caddy/LICENSE
+COPY Caddyfile /etc/caddy/Caddyfile
+COPY serve /usr/bin/serve
+ENV PYTHONPATH=/opt/inkling2/exllamav3
+LABEL org.opencontainers.image.source="https://github.com/omacom/omarchy-local-ai"
+LABEL org.opencontainers.image.description="Inkling 2 Small's EXL3 server for two DGX Sparks, for omarchy-local-ai"
+LABEL org.opencontainers.image.licenses="MIT"
+ENTRYPOINT []
+CMD ["serve"]

@@ -1,0 +1,17 @@
+# The key check in front of the server, which has none of its own: every route needs the key in I2_API_KEY, and the
+# rest streams to the server, on its Unix socket, as it comes. serve sets where each listens. The site answers any Host,
+# since a shared model's requests arrive under the tailnet name, and bind keeps it on the address it's given.
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+http://:{$CADDY_PORT} {
+	bind {$CADDY_HOST}
+	@refused not header Authorization "Bearer {$I2_API_KEY}"
+	respond @refused 401
+	reverse_proxy {$CADDY_UPSTREAM} {
+		flush_interval -1
+	}
+}

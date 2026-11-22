@@ -48,15 +48,19 @@ SECRET = "omarchy-agent-local-key"
 KEY_ENV = "OMARCHY_LOCAL_KEY"
 KEY_PLACEHOLDER = "@OMARCHY_LOCAL_KEY@"
 RESERVE_GIB = 8
+# This engine's own entry script, which the units and detached setups it writes run by path.
+ENGINE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "omarchy-local-ai")
 # How often a setup rewrites its progress for the panel, and the window its speed is averaged over.
 PROGRESS_PUBLISH_SECONDS = 0.5
 PROGRESS_WINDOW_SECONDS = 4
 NOT_ENOUGH_MEMORY = "Not enough memory to start model"
 REBOOT_FOR_GPU_MEMORY = "Reboot to raise the GPU memory limit"
-# The kernel lets a GPU map at most half of RAM. A unified-memory AMD GPU has next to no VRAM of
-# its own, so that is all it can use; use raises the cap to all of RAM but the desktop's reserve,
-# through a kernel parameter in this drop-in that applies at the next boot.
-# The same drop-in Omarchy writes on AMD machines (omarchy-apply-amd-gpu-memory).
+# The kernel lets a GPU map at most half of RAM. A unified-memory AMD or Intel GPU has next to no
+# VRAM of its own, so that is all it can use; use raises the cap to all of RAM but the desktop's
+# reserve, through a kernel parameter in this drop-in that applies at the next boot.
+# The same drop-in Omarchy writes on AMD and Intel machines (omarchy-apply-gpu-memory; before
+# omacom/omarchy#19765, omarchy-apply-amd-gpu-memory), named from when only AMD got it, so a raise
+# already waiting is found whichever wrote it.
 GPU_MEMORY_DROP_IN = "/etc/limine-entry-tool.d/amd-gpu-memory.conf"
 TTM_PAGES_LIMIT = "/sys/module/ttm/parameters/pages_limit"
 GPU_TOO_SMALL = "Not enough GPU memory"
@@ -341,9 +345,13 @@ def intel_gpus(ram_gib, drm_root="/sys/class/drm"):
 
 def gpu_memory_ceiling_gib(gpu, ram_gib):
   """The most memory this GPU can be given to address: a unified AMD GPU's cap can rise to all of
-  RAM but the desktop's reserve, any other GPU has what it has."""
+  RAM but the desktop's reserve, an Intel one's to the three quarters Mesa lets it address (xe sizes
+  its own share at all of RAM, so the kernel's page limit is all that holds it lower), any other GPU
+  has what it has."""
   if gpu["vendor"] == "amd" and gpu.get("unified"):
     return round(max(gpu["memory_gib"], ram_gib - RESERVE_GIB), 2)
+  if gpu["vendor"] == "intel":
+    return round(max(gpu["memory_gib"], min(ram_gib * INTEL_MEMORY_SHARE, ram_gib - RESERVE_GIB)), 2)
   return gpu["memory_gib"]
 
 
@@ -374,15 +382,15 @@ def gpu_short_error(variant, gpu):
 
 
 def raise_gpu_memory(variant, gpu, detach=False):
-  """Raises a unified AMD GPU's memory cap when the variant needs more than the GPU addresses now.
+  """Raises a unified GPU's memory cap when the variant needs more than the GPU addresses now.
   It applies at the next boot, so the model starts once the machine has rebooted. The panel's
   setup has no terminal for sudo, so polkit asks for the password instead."""
   if variant["peak_gpu_gib"] <= gpu["memory_gib"] or variant["peak_gpu_gib"] > gpu.get("max_memory_gib", gpu["memory_gib"]):
     return
   pages = gpu_pages_limit(meminfo().get("MemTotal", 0))
   if int(_read(TTM_PAGES_LIMIT, "0") or 0) >= pages:
-    raise LocalError(f"The kernel already lets the GPU map {gib(pages * os.sysconf('SC_PAGE_SIZE')):.0f} GiB, but it addresses {gpu['memory_gib']:.0f}: "
-                     "amdgpu.gttsize on the kernel command line may be holding it lower")
+    hint = ": amdgpu.gttsize on the kernel command line may be holding it lower" if gpu["vendor"] == "amd" else ""
+    raise LocalError(f"The kernel already lets the GPU map {gib(pages * os.sysconf('SC_PAGE_SIZE')):.0f} GiB, but it addresses {gpu['memory_gib']:.0f}{hint}")
   if pending_pages_limit() >= pages:
     return
   if not shutil.which("limine-mkinitcpio"):
@@ -413,7 +421,9 @@ def machine_profile():
   gpus = amd_gpus()
   for gpu in gpus:
     gpu["max_memory_gib"] = gpu_memory_ceiling_gib(gpu, ram)
-  gpus += intel_gpus(ram)
+  for gpu in intel_gpus(ram):
+    gpu["max_memory_gib"] = gpu_memory_ceiling_gib(gpu, ram)
+    gpus.append(gpu)
   if platform in NVIDIA_UNIFIED_FAMILIES:
     gpus.append({"vendor": "nvidia", "family": NVIDIA_UNIFIED_FAMILIES[platform], "render_node": "", "vram_gib": 0, "gtt_gib": 0, "unified": True, "memory_gib": round(ram, 2), "sysfs": ""})
   profile = {"platform": platform, "ram_gib": round(ram, 2), "ram_class": ram_class(ram), "gpus": gpus}
@@ -898,6 +908,9 @@ def validate_recipe(rid, recipe, runtimes, root=None, user=False):
   # rather than redrawing it from a description.
   if "edit" in recipe and (not isinstance(recipe["edit"], bool) or kind != "image"):
     errors.append(f"{where}.edit: true or false, for image models only")
+  # A model kept for trying by name: out of the listings until it's set up, and never recommended.
+  if "experimental" in recipe and not isinstance(recipe["experimental"], bool):
+    errors.append(f"{where}.experimental: true or false")
   # What a setup downloads, for a first-run screen to say before it starts.
   if "download_gib" in recipe and (not isinstance(recipe["download_gib"], (int, float)) or isinstance(recipe["download_gib"], bool)
                                    or not math.isfinite(recipe["download_gib"]) or recipe["download_gib"] <= 0):
@@ -1089,6 +1102,9 @@ def validate_best(best, recipes):
         continue
       if recipe_kind(recipe) != kind:
         errors.append(f"{where}.{field}: '{name}' is of kind {recipe_kind(recipe)}, not {kind}")
+        continue
+      if recipe.get("experimental"):
+        errors.append(f"{where}.{field}: '{name}' is experimental, so it can't be recommended")
         continue
       qualified = any(
         hw.get("ram_class") == entry.get("ram_class")
@@ -1319,7 +1335,9 @@ def _resolve_class(catalog, profile, gpu, ctx=None, field="recipes"):
   raise LocalError(f"No recommended recipe fits this machine: {details}")
 
 
-def recipe_listing(catalog, profile, running=(), machines=True):
+def recipe_listing(catalog, profile, running=(), machines=True, experimental=False):
+  """The catalog's recipes for this machine. An experimental one is left out unless it's set up
+  here, so it can still be started, stopped and removed, or experimental asks for them all."""
   rows = []
   try:
     gpu = choose_gpu(profile)
@@ -1334,6 +1352,8 @@ def recipe_listing(catalog, profile, running=(), machines=True):
         pass
   for rid in sorted(catalog.recipes):
     recipe = catalog.recipes[rid]
+    if recipe.get("experimental") and not experimental and not recipe_installed(rid):
+      continue
     runtime = catalog.runtimes.get(recipe.get("runtime"), {})
     if gpu:
       own = recipe_gpu(profile, recipe, runtime=runtime)
@@ -1354,6 +1374,7 @@ def recipe_listing(catalog, profile, running=(), machines=True):
       "architecture": recipe.get("architecture", ""),
       "user": rid in catalog.user,
       "installed": recipe_installed(rid),
+      "experimental": bool(recipe.get("experimental")),
       "available": variant is not None,
       "reason": "" if variant else reason,
       # The recommendation of its kind: the agents' model, or the image model beside it.
@@ -1847,13 +1868,6 @@ def device_lines(runtime, gpu):
 QUADLET_SECTION = ["[Quadlet]", "DefaultDependencies=false"]
 
 
-def hook_command():
-  """How a unit calls back into the engine: Omarchy's wrapper, else (DGX OS) this checkout's entry script."""
-  if shutil.which("omarchy-models"):
-    return "/usr/bin/env omarchy-models"
-  return _systemd_escape(os.path.join(os.path.dirname(os.path.realpath(__file__)), "omarchy-local-ai"))
-
-
 def render_network():
   return "\n".join(QUADLET_SECTION + ["", "[Network]", f"NetworkName={NETWORK_NAME}", "Internal=true"]) + "\n"
 
@@ -1951,21 +1965,22 @@ def render_container(rid, recipe, runtime, variant, roles, gpu, fileset):
     "Restart=on-failure",
     "RestartSec=10s",
   ]
+  # The hooks run this engine by its own path: the systemd user manager's PATH needn't hold
+  # Omarchy's bin, and the engine that wrote the unit is the one that knows it.
+  engine = _quote(ENGINE)
   if pair:
     # Rank 1 starts on the peer first and stops with this unit, however it ends; the start also
     # writes this unit's environment file, the link as it is now.
     lines += [
-      f"ExecStartPre={hook_command()} link-worker start {rid}",
-      f"ExecStopPost=-{hook_command()} link-worker stop {rid}",
+      f"ExecStartPre={engine} link-worker start {rid}",
+      f"ExecStopPost=-{engine} link-worker stop {rid}",
     ]
   lines += [
     # The local models panel watches status.json; every start, stop and crash rewrites it.
-    # systemd resolves a bare name in its own search path, not PATH; env uses the
-    # unit's PATH, which holds Omarchy's bin. Without Omarchy, hook_command() names the entry script.
     # Each hook says how the transition ended: systemd still reports it as
     # activating or deactivating while its Post commands run.
-    f"ExecStartPost=-{hook_command()} status --write --started {rid}",
-    f"ExecStopPost=-{hook_command()} status --write --stopped {rid}",
+    f"ExecStartPost=-{engine} status --write --started {rid}",
+    f"ExecStopPost=-{engine} status --write --stopped {rid}",
   ]
   return "\n".join(lines) + "\n"
 
@@ -3281,6 +3296,10 @@ def clear_error(rid):
     os.unlink(error_path(rid))
 
 
+class LockBusy(Exception):
+  """Another command holds the lock, and the caller said not to wait for it."""
+
+
 class Lock:
   """The engine's one lock. A command that holds the lock can run another that takes it (update
   runs use): only the outermost one locks and unlocks the file. A holder that runs long says so
@@ -3289,8 +3308,9 @@ class Lock:
   held = 0
   handle = None
 
-  def __init__(self, note=""):
+  def __init__(self, note="", wait=True):
     self.note = note
+    self.wait = wait
 
   def __enter__(self):
     Lock.held += 1
@@ -3301,6 +3321,10 @@ class Lock:
     try:
       fcntl.flock(Lock.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
+      if not self.wait:
+        Lock.held -= 1
+        Lock.handle.close()
+        raise LockBusy() from None
       holder = self._holder_note()
       say(f"{holder}; waiting for it" if holder else "Another omarchy models command is running; waiting for it")
       fcntl.flock(Lock.handle, fcntl.LOCK_EX)
@@ -3323,6 +3347,33 @@ class Lock:
         Lock.handle.truncate()
       fcntl.flock(Lock.handle, fcntl.LOCK_UN)
       Lock.handle.close()
+
+
+# A model unit's hooks: the command each runs the engine by, then the engine's subcommand. Units
+# an older engine wrote run it through Omarchy's wrapper on the user manager's PATH, which needn't
+# hold Omarchy's bin; others name the path of whichever engine wrote them.
+UNIT_HOOK_RE = re.compile(r'^(Exec(?:StartPre|StartPost|StopPost)=-?)(?:"(?:[^"\\]|\\.)*"|/usr/bin/env \S+|\S+) (link-worker|status) ', re.M)
+
+
+def repair_unit_hooks(wait=True):
+  """Points the hooks of every model unit at this engine, whatever ran them before. A running
+  model keeps its unit as it started; the hooks apply from its next start or stop. Under the lock,
+  so a unit that use, update or remove is replacing is never written back; without wait it raises
+  LockBusy rather than waiting. Returns the models changed."""
+  repaired = []
+  with Lock(wait=wait):
+    for rid in known_models():
+      path = quadlet_path(rid)
+      text = _read(path)
+      if not text:
+        continue
+      fixed = UNIT_HOOK_RE.sub(lambda match: f"{match[1]}{_quote(ENGINE)} {match[2]} ", text)
+      if fixed != text:
+        write_atomic(path, fixed if fixed.endswith("\n") else fixed + "\n")
+        repaired.append(rid)
+    if repaired:
+      systemctl("daemon-reload")
+  return repaired
 
 
 def write_unit_files(rid, container_text):
@@ -3448,6 +3499,8 @@ def cmd_use(argv):
     variant, reason = compatibility(catalog, rid, profile, gpu, args.ctx)
     if variant is None:
       raise LocalError(f"{rid} can't run on this machine: {reason}")
+    if recipe.get("experimental"):
+      say(f"{rid} is experimental: kept for trying, and not recommended for any machine")
   measured_load = load_measurement(catalog, catalog.recipes[rid], profile, gpu).get("load_seconds")
   # Before detaching: sudo needs this terminal.
   prepare_host(gpu)
@@ -3508,7 +3561,7 @@ def detach_use(rid, args, recipe, measured_load=None):
   systemctl("reset-failed", unit)
   if load_model(rid) is None and installing_idle(rid):
     begin_installing(rid, recipe, measured_load)
-  entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "omarchy-local-ai")
+  entry = ENGINE
   command = ["systemd-run", "--user", "--collect", "--quiet", f"--unit={unit}", f"--description=Set up local model {rid}"]
   # The unit takes these from systemd-run's own environment by name, so the
   # token's value never appears in a process's arguments. The catalog is made
@@ -3653,13 +3706,18 @@ def refresh_list_cache(catalog, profile):
 def cmd_list(argv):
   parser = argparse.ArgumentParser(prog="omarchy models list")
   parser.add_argument("--json", action="store_true")
+  parser.add_argument("--experimental", action="store_true", help="also list the experimental models, which are kept for trying by name")
   args = parser.parse_args(argv)
   profile = machine_profile()
   catalog = load_catalog()
   for errors in catalog.user_errors.values():
     print("Skipped a recipe of yours:\n  " + "\n  ".join(errors), file=sys.stderr)
-  rows = recipe_listing(catalog, profile, running_models())
+  running = running_models()
+  rows = recipe_listing(catalog, profile, running)
+  # The panel's cache stays the default listing, whatever this one shows.
   write_list_cache(rows)
+  if args.experimental:
+    rows = recipe_listing(catalog, profile, running, experimental=True)
   if args.json:
     print(json.dumps(rows, indent=2))
     return 0
@@ -3669,7 +3727,7 @@ def cmd_list(argv):
                      for host, there in load_machines().items())
   say(f"This machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}{paired}{machines}")
   for row in rows:
-    marks = [mark for mark, on in (("yours", row["user"]), ("best", row["best"]), ("running", row["active"]), ("installed", row["installed"])) if on]
+    marks = [mark for mark, on in (("yours", row["user"]), ("best", row["best"]), ("experimental", row["experimental"]), ("running", row["active"]), ("installed", row["installed"])) if on]
     tier = f" · third-party ({row['publisher']})" if row["tier"] == "third-party" else ""
     say(f"{'●' if row['available'] else '○'} {row['id']}{' [' + ', '.join(marks) + ']' if marks else ''}")
     say(f"    {row['name']} on {row['runtime']}{tier}")
@@ -4220,7 +4278,7 @@ def detach_update(rid, catalog, profile, yes=False):
   write_atomic(updating_path(rid), "detached\n")
   if installing_idle(rid):
     begin_installing(rid, (load_model(rid) or {}).get("recipe") or {})
-  entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "omarchy-local-ai")
+  entry = ENGINE
   command = ["systemd-run", "--user", "--collect", "--quiet", f"--unit={unit}", f"--description=Update local model {rid}"]
   env = dict(os.environ)
   if env.get("OMARCHY_LOCAL_AI_CATALOG"):
@@ -4284,6 +4342,8 @@ def _start(args, catalog, profile):
   if unit_active(rid):
     say(f"{rid} is already running at {endpoint(rid)}")
     return 0
+  # Here too, not only at refresh: refresh may be what the old hooks failed to run.
+  repair_unit_hooks()
   gpu = choose_gpu(profile, manifest["gpu"])
   # Shown as loading from the click on; the memory checks below take seconds.
   clear_error(rid)
@@ -4631,6 +4691,10 @@ def cmd_refresh(argv):
   args = parser.parse_args(argv)
   catalog = load_catalog()
   profile = machine_profile()
+  # Not while a setup, update or removal holds the lock, which can be for a long download: the
+  # next refresh or start repairs them.
+  with contextlib.suppress(LockBusy):
+    repair_unit_hooks(wait=False)
   link_probe(profile)
   refresh_list_cache(catalog, profile)
   # The updates show first, their download sizes once the registry and Hugging Face have answered.
@@ -5395,7 +5459,7 @@ def ensure_share_proxy():
     "Description=Omarchy local AI: count who uses the shared models",
     "",
     "[Service]",
-    "ExecStart=/usr/bin/env omarchy-models share-proxy",
+    f"ExecStart={_quote(ENGINE)} share-proxy",
     "Restart=on-failure",
     "",
   ])
@@ -5882,7 +5946,8 @@ def ssh_command(remote, *argv, interactive=False):
   # A host met for the first time is trusted on sight, as the tailnet vouches
   # for who it is; one whose key has changed since is still refused.
   options = ["-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new"] + ([] if interactive else ["-o", "BatchMode=yes"])
-  return ["ssh", *options, "--", target, shlex.join(["omarchy-models", *argv])]
+  # The engine's own command, in /usr/bin wherever it's installed: a command over SSH gets no login PATH.
+  return ["ssh", *options, "--", target, shlex.join(["omarchy-local-ai", *argv])]
 
 
 def cmd_pair(argv):
@@ -5925,7 +5990,7 @@ def cmd_pair(argv):
   if result.returncode == 255:
     raise LocalError(f"Can't reach {name} over SSH\nTurn on SSHD on {target} in Setup > Security")
   if result.returncode != 0:
-    raise LocalError(f"Can't run omarchy-models on {name}")
+    raise LocalError(f"Can't run omarchy-local-ai on {name}")
   try:
     export = json.loads(result.stdout.strip().splitlines()[-1])
     host, dns, key = export["host"], export["dns"], export["key"]

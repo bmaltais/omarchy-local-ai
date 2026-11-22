@@ -50,7 +50,7 @@ The real records are the examples and source of values:
 | Path | Rules |
 | --- | --- |
 | [catalog.toml](../catalog.toml) | The catalog schema, 1. |
-| [recipes/](../recipes/) | Name, runtime, pinned artifacts, measured hardware, context variants, sampling and optional server arguments. `kind` is `text` (the default: chat models for the agents) `image` (image generation, whose variants may omit `ctx`), `video` (clips) or `music` (songs), which run like image models. Vendor names the panel logo; architecture is `dense` or `moe`; `input` is `["text"]` (the default) or `["text", "image"]`, which the agent overlays declare so agents can send screenshots. |
+| [recipes/](../recipes/) | Name, runtime, pinned artifacts, measured hardware, context variants, sampling and optional server arguments. `kind` is `text` (the default: chat models for the agents) `image` (image generation, whose variants may omit `ctx`), `video` (clips) or `music` (songs), which run like image models. Vendor names the panel logo; architecture is `dense` or `moe`; `input` is `["text"]` (the default) or `["text", "image"]`, which the agent overlays declare so agents can send screenshots. `experimental = true` keeps a recipe for trying by name: `list` and the panel leave it out until it's set up (`list --experimental` shows it), `use <recipe>` says so, and `best.toml` can't recommend it. It needs the same pinned image, review and measurement as any other. |
 | [runtimes/](../runtimes/) | Digest-pinned image, `gpus` (the vendors, `amd`, `intel` or `nvidia`, or the GPU classes such as `amd-strix-halo` its image works on, each reachable through its devices), tier, port, command, standard input mappings, reserved options, nonempty `health.probe` argv and `api` (`openai`, the default, `sdcpp` or `acestep`), which selects the post-start check; an `openai` runtime must map `alias`. A paired runtime adds `listen` (its bind flags), `@PORT@` in its probe and a `[pair]` table: `nodes = 2`, `master_port`, optional `prepare` and `worker` commands (without one, rank 1 runs the head's own invocation, for servers that compare the ranks' arguments), an optional served `model` under `/prepared`, an optional `state` path where each rank's folder is mounted writable for the server's caches (else read-only at `/prepared`), and `env`, `head_env` and `worker_env` (any names but the link's `NCCL_SOCKET_IFNAME`, `NCCL_IB_HCA` and `NCCL_IB_GID_INDEX`, which the engine sets), whose values may hold `@RANK@`, `@WORLD@`, `@MASTER_ADDR@`, `@MASTER_PORT@`, `@CTX@`, `@RDMA_DEVICES@`, `@GID_INDEX@` and `@SOCKET_IFNAME@`. |
 | [reviews/](../reviews/) | Third-party image digest, publisher, reviewer, date, license URL/hash and checked properties. |
 | [measurements/](../measurements/) | Speed and memory on one machine class, the evidence `best.toml` recommends by, artifact identities, context, memory, load time and short, long and code-edit prompt timings; for an image model, seconds per image at a size and step count instead. |
@@ -138,7 +138,7 @@ RAM. A measurement on the machine's class is not needed; it gives the panel spee
 also checks current free RAM and GPU memory and reserves 8 GiB for the desktop.
 An Intel GPU is integrated graphics on the `xe` kernel driver (Lunar Lake and newer), named by
 `INTEL_FAMILIES` or else `intel-xe-<device id>`, addressing
-three quarters of RAM up to the kernel's `ttm.pages_limit`. Memory a GPU driver freed and still
+three quarters of RAM up to the kernel's `ttm.pages_limit`; `use` raises that limit as it does for a unified AMD GPU, so a model fits by the three quarters. Memory a GPU driver freed and still
 holds in its pool (`GPUReclaim` in `/proc/meminfo`) counts as free RAM: the next model loads into it.
 Use, start and removal are serialized. Several models can run at once on distinct,
 stable loopback ports, beginning at 11435.
@@ -320,8 +320,9 @@ log from the peer. Transition timestamps are Unix milliseconds. Pending activati
 the current manifest's observations until the new setup has been measured.
 
 `list.json` rows contain `id`, `kind`, `name`, `user`, `runtime`, `tier`, `publisher`,
-`vendor`, `architecture`, `installed`, `available`, `reason`, `best`, `active`,
-`source`, `memory_gib`, `context`, `decode_tok_s` and `prefill_tok_s`. `best` marks the
+`vendor`, `architecture`, `installed`, `experimental`, `available`, `reason`, `best`, `active`,
+`source`, `memory_gib`, `context`, `decode_tok_s` and `prefill_tok_s`. An experimental recipe has a row only
+once it's set up. `best` marks the
 recommendation of the row's kind: the class's first fitting text recipe and, apart from it,
 its first fitting image model. Unavailable variants have null memory/context, as image models
 always have a null context; missing measurements have null speeds.
@@ -330,7 +331,11 @@ The panel calls plain `start <recipe>`, `stop <recipe>`, `remove <recipe>`,
 `use --detach <recipe>`, `refresh --quiet` on opening the add view, and
 `status --write` when refreshing admission state, and opens `logs <recipe>` in a
 terminal from a failure's error line. Units call `status --write`
-with `--started <recipe>` or `--stopped <recipe>` from their hooks.
+with `--started <recipe>` or `--stopped <recipe>` from their hooks. The hooks, the share proxy and
+detached setups run the engine by the path of its own entry script, never through the PATH, which a
+systemd user manager needn't share with the desktop; `refresh` and `start` point the hooks of units
+an older engine wrote at the engine running. The cable hook runs `/usr/bin/omarchy-local-ai`, and
+commands for paired machines run `omarchy-local-ai` over SSH.
 `list --json` and `status --json` print the corresponding shapes; `profile`
 prints the machine profile. `refresh` rebuilds both caches using the installed
 catalog without changing running models.
@@ -374,7 +379,7 @@ leaves the picker whole.
 
 The share proxy (`share-proxy`, run as the `omarchy-agent-local-share.service` user unit while anything is shared, and stopped once nothing is) counts who uses each shared model. A request the model accepted counts the machine that sent it, by the tailnet address `tailscale serve` puts in `X-Forwarded-For`, for five minutes after its last one; a refused request counts nothing. `.local/state/omarchy/agent-local/clients.json` is `{models: {<recipe>: <machines>}}`, rewritten only when a count changes, as a machine starts or lapses, and removed when the proxy stops. The local models panel watches it to say how many machines use a shared model.
 
-`pair <host>` runs `omarchy-models share --export` on the host over SSH, which prints its tailnet name and key, and stores them in `.config/omarchy/agent-local/remotes/<host>.{json,key}` (mode 0600). SSH is the only way a key leaves its machine. `forget <host>` deletes both and drops the host's models.
+`pair <host>` runs `omarchy-local-ai share --export` on the host over SSH, which prints its tailnet name and key, and stores them in `.config/omarchy/agent-local/remotes/<host>.{json,key}` (mode 0600). SSH is the only way a key leaves its machine. `forget <host>` deletes both and drops the host's models.
 
 `network` asks the local tailscaled for its online Linux peers, fetches each one's `models.json` in parallel (4s timeout) and writes `network.json`: `{schema, updated_ms, tailnet, self, hosts, models}`. Models are keyed `host/recipe` and carry the local model fields plus `host`, `dns`, `paired`, `endpoint`, `ram_total_gib`, `last_seen_ms` and `offline`. A host that drops off keeps its models, with `offline` set to `offline` (Tailscale says so) or `unreachable` (online but not answering) and `last_seen_ms` from its last answer. Paired hosts are kept until forgotten; unpaired ones for a week. An online host serving no listing shares nothing and its models go. Listings are untrusted input: only known states, kinds, recipe IDs and inputs survive, and text loses control characters. A row without a `kind`, from a host older than image sharing, is a text model. A paired host's image model is for Fantasi, which reaches it at its endpoint with that host's key; pi's providers and the launch overlays leave it out, as they do a local image model.
 

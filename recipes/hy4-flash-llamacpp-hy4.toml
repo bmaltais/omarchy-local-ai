@@ -2,6 +2,9 @@ name = "Hy4 flash"
 runtime = "llamacpp-hy4"
 vendor = "tencent"
 architecture = "moe"
+# About a third of Qwen3.8 Flash Next's speed on the same Spark, and in Tencent's own comparison it leads on none of the
+# public coding and agent benchmarks, so it's kept for trying by name rather than offered.
+experimental = true
 # Screenshots and photos through the checkpoint's SigLIP2 tower, from AngelSlim's projector.
 input = ["text", "image"]
 

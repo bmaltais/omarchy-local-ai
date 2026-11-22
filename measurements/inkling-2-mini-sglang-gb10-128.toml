@@ -1,0 +1,49 @@
+recipe = "inkling-2-mini-sglang"
+measured_at = "2026-11-21"
+image = "docker.io/lmsysorg/sglang@sha256:bc811ac7ac68c6fca116a49750baca817b8613a30abface8a347682b55d132e3"
+ctx = 262144
+load_seconds = 273.0
+fileset = "7a9eaaa9bfb36b0e"
+method = "tools/bench: 2 warmups (a 128-token reply, a ~4K-token prompt from the corpus tail), then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
+
+[machine]
+platform = "aarch64-gb10"
+gpu = "nvidia-gb10"
+ram_class = 128
+system = "NVIDIA NVIDIA_DGX_Spark"
+kernel = "7.3.0-72-omarchy"
+cpu = "Cortex-X925 + Cortex-A725"
+gpu_driver = "615.78.08"
+
+[memory]
+observed_at_load_gib = 61.4
+min_available_during_bench_gib = 55.6
+total_gib = 121.9
+
+[short]
+prompt_tokens = 46
+completion_tokens = 512
+ttft_s = 0.18
+prefill_tok_s = 260.5
+decode_tok_s = 44.4
+total_s = 11.67
+
+[long]
+prompt_tokens = 38587
+completion_tokens = 512
+ttft_s = 11.9
+prefill_tok_s = 3242.9
+decode_tok_s = 73.4
+total_s = 18.86
+
+[edit]
+prompt_tokens = 2891
+completion_tokens = 512
+ttft_s = 1.03
+prefill_tok_s = 2797.2
+decode_tok_s = 74.4
+total_s = 7.9
+
+[[artifacts]]
+repo = "thinkingmachines/Inkling-2-Mini"
+revision = "ed40e7da625f594fc9c4990f5f66be24873c22d7"

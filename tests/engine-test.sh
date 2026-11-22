@@ -219,6 +219,12 @@ with patch.object(a, "platform_name", return_value="x86"), patch.object(a, "amd_
   halo = a.machine_profile()["gpus"][0]
 needs_more = dict(variant, peak_gpu_gib=38, peak_ram_gib=38)
 check("a unified AMD GPU fits by the cap use can raise it to", halo["max_memory_gib"] == 54 and a.fits(needs_more, profile, halo, "model")[0])
+# A 64 GB Arc B390 on a stock kernel: the page limit holds it to half of RAM, Mesa to three quarters.
+arc_b390 = {"vendor": "intel", "family": "intel-arc-b390", "memory_gib": 31.15, "unified": True}
+with patch.object(a, "platform_name", return_value="x86"), patch.object(a, "amd_gpus", return_value=[]), patch.object(a, "intel_gpus", return_value=[dict(arc_b390)]), patch.object(a, "meminfo", return_value={"MemTotal": 62.3 * 2**30}):
+  arc_b390 = a.machine_profile()["gpus"][0]
+check("an Intel GPU fits by the three quarters Mesa lets it address once use raises the cap", abs(arc_b390["max_memory_gib"] - 46.7) < 0.1 and a.fits(needs_more, profile, arc_b390, "model")[0]
+      and not a.fits(dict(needs_more, peak_gpu_gib=48), profile, arc_b390, "model")[0])
 check("a GPU with VRAM of its own fits only by what it has", not a.fits(needs_more, profile, dict(halo, max_memory_gib=a.gpu_memory_ceiling_gib(dict(halo, unified=False), 62)), "model")[0])
 page = os.sysconf("SC_PAGE_SIZE")
 with patch.object(a, "pending_pages_limit", return_value=54 * 2**30 // page), patch.object(a, "_read", return_value=str(31 * 2**30 // page)), patch.object(a, "choose_gpu", return_value=halo):
@@ -484,7 +490,41 @@ pair_port = a.port_for("paired")
 check("the pair unit shares the host network and publishes nothing", "Network=host" in pair_text and "PublishPort" not in pair_text)
 check("the pair unit binds its API to loopback on the model's port", f'"--host" "127.0.0.1" "--port" "{pair_port}"' in pair_text and f"127.0.0.1:{pair_port}/health" in pair_text)
 check("the pair unit mounts rank 0's inputs and reads the link from its environment file", f"models/paired/{a.rank_folder('b' * 16, 0, pair_rt)}:/prepared:ro" in pair_text and "EnvironmentFile=%h/.local/state/omarchy/agent-local/pair/paired.env" in pair_text)
-check("the pair unit starts and stops rank 1 with itself", f"ExecStartPre={a.hook_command()} link-worker start paired" in pair_text and f"ExecStopPost=-{a.hook_command()} link-worker stop paired" in pair_text)
+engine = a._quote(a.ENGINE)
+check("the pair unit starts and stops rank 1 with itself, run by the engine's own path",
+      f"ExecStartPre={engine} link-worker start paired" in pair_text and f"ExecStopPost=-{engine} link-worker stop paired" in pair_text
+      and a.ENGINE.startswith("/") and os.path.basename(a.ENGINE) == "omarchy-local-ai", pair_text)
+check("no unit hook goes through the PATH", "/usr/bin/env" not in pair_text and f"ExecStartPost=-{engine} status --write --started paired" in pair_text)
+# Units an older engine wrote reach it through Omarchy's wrapper on the PATH, or by another engine's
+# path, such as a checkout's; refresh and start point them at the engine running.
+a.write_atomic(a.models_dir() + "/paired.json", "{}")
+for old in ("/usr/bin/env omarchy-models", "/usr/bin/env omarchy-agent-local", '"/home/me/src/omarchy local ai/omarchy-local-ai"'):
+  a.write_atomic(a.quadlet_path("paired"), pair_text.replace(f"{engine} ", f"{old} "))
+  with patch.object(a, "systemctl") as reloaded:
+    first = a.repair_unit_hooks()
+    second = a.repair_unit_hooks()
+  check(f"an older unit's hooks through {old} are pointed at this engine once, and the rest left as it was",
+        first == ["paired"] and second == [] and a._read(a.quadlet_path("paired")) == pair_text.strip() and reloaded.call_count == 1, repr((first, second)))
+# Under the lock: refresh leaves the units alone while another command holds it, as an update may be
+# replacing one, and repairs them once it's free.
+a.write_atomic(a.quadlet_path("paired"), pair_text.replace(f"{engine} ", "/usr/bin/env omarchy-models "))
+import fcntl
+holder = open(os.path.join(a.state_dir(), "lock"), "w")
+fcntl.flock(holder, fcntl.LOCK_EX)
+try:
+  a.repair_unit_hooks(wait=False)
+  busy = False
+except a.LockBusy:
+  busy = True
+check("the repair doesn't wait for a held lock when told not to", busy)
+untouched = "omarchy-models" in a._read(a.quadlet_path("paired")) and a.Lock.held == 0
+fcntl.flock(holder, fcntl.LOCK_UN)
+holder.close()
+with patch.object(a, "systemctl"):
+  freed = a.repair_unit_hooks(wait=False)
+check("while the lock is held it writes nothing; once free it repairs", untouched and freed == ["paired"] and a._read(a.quadlet_path("paired")) == pair_text.strip())
+os.unlink(a.quadlet_path("paired"))
+os.unlink(a.models_dir() + "/paired.json")
 check("a paired runtime may serve its prepared folder", '"--model" "/prepared/model"' in a.render_container("paired", paired, dict(pair_rt, pair=dict(pair_rt["pair"], model="/prepared/model")), paired["variant"][0], {"model": "model"}, pair_gpu, "b" * 16))
 same_rt = copy.deepcopy(pair_rt)
 for key in ("worker", "prepare"):
@@ -1375,7 +1415,7 @@ a.write_atomic(a.remote_key_path("away"), "k" * 32, mode=0o600)
 a.write_atomic(os.path.join(a.remotes_dir(), "away.json"), json.dumps({"host": "away", "dns": "away.tail.ts.net", "ssh": "away"}))
 raises("a network model is named host/recipe", lambda: a.split_remote_id("box/../x"), "host/recipe")
 raises("an SSH target can't smuggle options", lambda: a.ssh_command({"ssh": "-oProxyCommand=x", "dns": ""}, "share", "--export"), "Not an SSH target")
-check("remote commands quote their arguments", a.ssh_command({"ssh": "box", "dns": "box.tail.ts.net"}, "share", "--export")[-2:] == ["box", "omarchy-models share --export"])
+check("remote commands run the engine by its own command, quoted", a.ssh_command({"ssh": "box", "dns": "box.tail.ts.net"}, "share", "--export")[-2:] == ["box", "omarchy-local-ai share --export"])
 
 # A paired, running remote model becomes an overlay with its own provider.
 a.write_atomic(a.remote_key_path("box"), "b" * 32, mode=0o600)
@@ -2020,6 +2060,28 @@ check("best stays the text recommendation, and image models resolve on their own
 rows = {row["id"]: row for row in a.recipe_listing(img_catalog, profile)}
 check("list rows carry their kind and the best of each kind", (rows["picture"]["kind"], rows["model"]["kind"]) == ("image", "text") and rows["picture"]["best"] and rows["model"]["best"]
       and rows["picture"]["available"] and rows["picture"]["context"] is None and rows["picture"]["reason"] == "", repr(rows["picture"]))
+# An experimental recipe is kept for trying by name: listed once set up or when asked for, never recommended.
+trial = dict(copy.deepcopy(recipe), experimental=True)
+trial_catalog = SimpleNamespace(root=str(repo), recipes={"model": recipe, "trial": trial}, runtimes=both, best=images_best, user=set(), user_errors={})
+check("experimental takes only true or false", any(".experimental: true or false" in e for e in a.validate_recipe("trial", dict(trial, experimental="yes"), {"server": runtime})))
+check("an experimental recipe is otherwise valid", not a.validate_recipe("trial", trial, {"server": runtime}))
+check("best.toml can't recommend an experimental recipe", any("'trial' is experimental" in e for e in a.validate_best({"class": [dict(entry, recipes=["trial", "model"])]}, {"model": recipe, "trial": trial})))
+with patch.object(a, "recipe_installed", return_value=False):
+  hidden = {row["id"] for row in a.recipe_listing(trial_catalog, profile)}
+  asked = {row["id"]: row for row in a.recipe_listing(trial_catalog, profile, experimental=True)}
+check("the listing leaves an experimental recipe out", hidden == {"model"}, repr(hidden))
+check("asked for, it lists it and says it's experimental", asked["trial"]["experimental"] and not asked["model"]["experimental"], repr(asked))
+with patch.object(a, "recipe_installed", side_effect=lambda rid: rid == "trial"):
+  installed = {row["id"] for row in a.recipe_listing(trial_catalog, profile)}
+check("once set up, it's listed so it can be started, stopped and removed", installed == {"model", "trial"}, repr(installed))
+printed, saved = [], []
+with patch.object(a, "load_catalog", return_value=trial_catalog), patch.object(a, "machine_profile", return_value=profile), \
+     patch.object(a, "running_models", return_value=set()), patch.object(a, "recipe_installed", return_value=False), \
+     patch.object(a, "write_list_cache", side_effect=saved.append), patch("builtins.print", side_effect=printed.append):
+  a.cmd_list(["--json", "--experimental"])
+shown = {row["id"] for row in json.loads(printed[0])}
+check("list --experimental shows it, and the panel's saved listing still leaves it out",
+      shown == {"model", "trial"} and len(saved) == 1 and {row["id"] for row in saved[0]} == {"model"}, repr((shown, saved)))
 # Video and music models are recommended beside them the same way, each kind its own use best.
 check("best.toml lists video models of their own", not a.validate_best({"class": [dict(entry, videos=["clip"])]}, {"model": recipe, "clip": clip}))
 check("a kind's list takes only that kind", any(".music: 'picture' is of kind image, not music" in e for e in a.validate_best({"class": [dict(entry, music=["picture"])]}, {"model": recipe, "picture": picture})))

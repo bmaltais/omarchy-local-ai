@@ -49,13 +49,13 @@ jobs:
           declare -A runner=(
             [llamacpp]=ubuntu-latest [sdcpp]=ubuntu-latest [acestep]=ubuntu-latest
             [sdcpp-cuda]=ubuntu-24.04-arm [acestep-cuda]=ubuntu-24.04-arm [tensorfold]=ubuntu-24.04-arm
-            [tensorfold-dsv41]=ubuntu-24.04-arm [tensorfold-glm53]=ubuntu-24.04-arm [tensorfold-nemotron-bolt]=ubuntu-24.04-arm [llamacpp-hy4]=ubuntu-24.04-arm
+            [tensorfold-dsv41]=ubuntu-24.04-arm [tensorfold-glm53]=ubuntu-24.04-arm [tensorfold-nemotron-bolt]=ubuntu-24.04-arm [llamacpp-hy4]=ubuntu-24.04-arm [inkling2-exl3]=ubuntu-24.04-arm
           )
           declare -A check=(
             [llamacpp]="llama-server --version" [sdcpp]="command -v sd-server" [acestep]="command -v ace-server"
             [sdcpp-cuda]="command -v sd-server" [acestep-cuda]="command -v ace-server" [tensorfold]="command -v tensorfold-native"
             [tensorfold-dsv41]="command -v tensorfold-native" [tensorfold-glm53]="command -v tensorfold-native"
-            [tensorfold-nemotron-bolt]="command -v tensorfold-native" [llamacpp-hy4]="command -v llama-server"
+            [tensorfold-nemotron-bolt]="command -v tensorfold-native" [llamacpp-hy4]="command -v llama-server" [inkling2-exl3]="command -v serve && python3 -c 'import exllamav3, fastapi, transformers'"
           )
           all=$(ls images)
           case $EVENT in
@@ -151,6 +151,27 @@ jobs:
           TAG: ${{ steps.name.outputs.tag }}
           CHECK: ${{ matrix.check }}
         run: podman run --rm --network none --entrypoint sh "$TAG" -c "$CHECK"
+
+      # The Inkling 2 server checks no key, so the image's Caddy is the only thing that does: with a
+      # stub in the server's place, it has to refuse no key and a wrong one, pass the right one under
+      # any Host (a shared model's requests carry the tailnet name), and listen on loopback only, as
+      # the engine binds a paired model's API on the host's network.
+      - name: Check Caddy refuses requests without the key
+        if: matrix.name == 'inkling2-exl3'
+        env:
+          TAG: ${{ steps.name.outputs.tag }}
+        run: |
+          podman run --rm --network none --entrypoint sh "$TAG" -c '
+            I2_API_KEY=right CADDY_HOST=127.0.0.1 CADDY_PORT=8080 CADDY_UPSTREAM=127.0.0.1:8081 \
+              caddy run --config /etc/caddy/Caddyfile --adapter caddyfile 2>/dev/null &
+            caddy respond --listen 127.0.0.1:8081 --body ok 2>/dev/null &
+            for _ in $(seq 20); do curl -s -o /dev/null http://127.0.0.1:8080/ && break; sleep 0.5; done
+            code() { curl -s -o /dev/null -w "%{http_code}" "$@" http://127.0.0.1:8080/v1/models; }
+            none=$(code); wrong=$(code -H "Authorization: Bearer wrong"); right=$(code -H "Authorization: Bearer right")
+            shared=$(code -H "Authorization: Bearer right" -H "Host: spark.example.ts.net")
+            bound=$(grep -h ":1F90 0*:0000 0A" /proc/net/tcp /proc/net/tcp6 | tr -s " " | cut -d " " -f 3 | tr "\n" " ")
+            echo "no key $none, wrong key $wrong, right key $right, another Host $shared, listening on $bound"
+            [ "$none" = 401 ] && [ "$wrong" = 401 ] && [ "$right" = 200 ] && [ "$shared" = 200 ] && [ "$bound" = "0100007F:1F90 " ]'
 
       # The runner's own CPU may have AVX-512, so running the server here proves nothing about
       # the laptops it ships to: its code must stop at AVX2.

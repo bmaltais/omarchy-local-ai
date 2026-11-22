@@ -1,0 +1,42 @@
+name = "Inkling 2 Mini"
+runtime = "sglang-inkling2"
+vendor = "thinkingmachines"
+architecture = "moe"
+# Screenshots and photos through the checkpoint's vision tower.
+input = ["text", "image"]
+
+[[hardware]]
+gpu = "nvidia-gb10"
+ram_class = 128
+measured = "measurements/inkling-2-mini-sglang-gb10-128.toml"
+
+# Thinking Machines' own checkpoint, at the precision it was trained in: NVFP4 experts in layers 0-19, MXFP8
+# in 20-23, the rest BF16 (19.5 GB), and the 3-layer DSpark drafter beside it. A 26.4B-A3.4B looped
+# mixture of experts: its middle 12 layers run three times a token.
+[[artifacts]]
+repo = "thinkingmachines/Inkling-2-Mini"
+revision = "ed40e7da625f594fc9c4990f5f66be24873c22d7"
+license = "apache-2.0"
+files = ["*.safetensors", "*.json", "*.jinja", "tiktoken/*"]
+dest = "model"
+model = "."
+
+# Measured on a DGX Spark running the Omarchy desktop. SGLang takes 45% of the memory up front for the
+# weights, the CUDA graphs and one shared K/V pool of about 518K tokens, the cookbook's setting: 61.4 GiB,
+# which left 55 GiB free beside the desktop. The model takes 1M tokens; the cookbook, like this, serves 262K.
+[[variant]]
+ctx = 262144
+peak_ram_gib = 62
+peak_gpu_gib = 58
+
+# The cookbook's DGX Spark settings: FlashAttention-4, the only backend with Inkling's relative position
+# bias; the DSpark drafter at the 8-token block it was trained for, the only block it takes; Inkling's
+# reasoning and tool-call parsers; xgrammar for constrained output. Weights are read into memory rather
+# than mapped: the 615 driver copies from a file's mapping so slowly that loading hadn't finished after
+# 15 minutes, against seconds this way.
+[server]
+args = ["--tp", "1", "--ep", "1", "--attention-backend", "fa4", "--dtype", "bfloat16", "--page-size", "128",
+        "--speculative-algorithm", "DSPARK", "--speculative-num-draft-tokens", "8",
+        "--mem-fraction-static", "0.45", "--grammar-backend", "xgrammar",
+        "--reasoning-parser", "inkling", "--tool-call-parser", "inkling2",
+        "--weight-loader-disable-mmap", "--enable-multimodal"]
