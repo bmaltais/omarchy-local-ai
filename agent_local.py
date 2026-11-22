@@ -322,21 +322,27 @@ def nvidia_gpus(smi_output=None):
   memory is their own VRAM, apart from the system's, unlike the GB10's."""
   if smi_output is None:
     try:
-      smi_output = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10).stdout
+      smi_output = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total,uuid", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
       return []
   gpus = []
-  for index, line in enumerate(smi_output.splitlines()):
-    name, _, total = line.partition(",")
+  for line in smi_output.splitlines():
+    name, _, rest = line.partition(",")
+    total, _, uuid = rest.partition(",")
+    uuid = uuid.strip()
     try:
       mib = float(total)
     except ValueError:
+      continue
+    # Cards are known by UUID, not by number: a number can change with a reboot or another card, and the saved unit
+    # must keep binding the card whose memory later starts check.
+    if not uuid:
       continue
     gpus.append({
       "vendor": "nvidia",
       "family": nvidia_family(name),
       "name": name.strip(),
-      "nvidia_index": index,
+      "nvidia_uuid": uuid,
       "render_node": "",
       "vram_gib": round(mib / 1024, 2),
       "gtt_gib": 0,
@@ -348,9 +354,9 @@ def nvidia_gpus(smi_output=None):
   return gpus
 
 
-def nvidia_free_gib(index):
+def nvidia_free_gib(uuid):
   try:
-    out = subprocess.run(["nvidia-smi", f"--id={index}", "--query-gpu=memory.free", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10).stdout
+    out = subprocess.run(["nvidia-smi", f"--id={uuid}", "--query-gpu=memory.free", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10).stdout
     return float(out.strip()) / 1024
   except (OSError, subprocess.SubprocessError, ValueError):
     return None
@@ -1633,7 +1639,7 @@ def device_lines(runtime, gpu):
       lines.append("AddDevice=/dev/kfd")
     elif device == "cdi-nvidia":
       # A discrete card gets only the one whose memory was checked; a unified GPU is the only one.
-      lines.append(f"AddDevice=nvidia.com/gpu={gpu['nvidia_index'] if gpu.get('nvidia_index') is not None else 'all'}")
+      lines.append(f"AddDevice=nvidia.com/gpu={gpu.get('nvidia_uuid') or 'all'}")
     elif device == "infiniband":
       lines.append("AddDevice=/dev/infiniband")
   return lines
@@ -2033,10 +2039,10 @@ def free_memory(gpu):
   if gpu.get("sysfs"):
     used = int(_read(os.path.join(gpu["sysfs"], "mem_info_gtt_used"), "0") or 0) + int(_read(os.path.join(gpu["sysfs"], "mem_info_vram_used"), "0") or 0)
     gpu_free = gpu["memory_gib"] - gib(used)
-  elif gpu.get("nvidia_index") is not None:
+  elif gpu.get("nvidia_uuid"):
     # A reading that fails counts as no free memory, so admission waits and then refuses
     # instead of approving a start on a card that may be full.
-    free = nvidia_free_gib(gpu["nvidia_index"])
+    free = nvidia_free_gib(gpu["nvidia_uuid"])
     gpu_free = free if free is not None else 0.0
   return available, gpu_free
 

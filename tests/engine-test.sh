@@ -288,11 +288,11 @@ env_rt = copy.deepcopy(rt)
 env_rt["inputs"]["model"] = {"env": "MODEL_PATH"}
 env_text = a.render_container("model", changed, env_rt, variant, roles, gpu, "a" * 16)
 check("environment values are quoted and escaped", 'Environment="MODEL_PATH=/models/50%% $$HOME \\"quoted space\\" \\\\tail"' in env_text)
-smi = "NVIDIA GeForce RTX 3090, 24576\nNVIDIA GeForce RTX 3090, 24576\n"
+smi = "NVIDIA GeForce RTX 3090, 24576, GPU-aaaa\nNVIDIA GeForce RTX 3090, 24576, GPU-bbbb\n"
 found = a.nvidia_gpus(smi)
-check("discrete NVIDIA GPUs are listed from nvidia-smi", [g["family"] for g in found] == ["nvidia-rtx3090"] * 2 and found[1]["nvidia_index"] == 1)
+check("discrete NVIDIA GPUs are listed from nvidia-smi", [g["family"] for g in found] == ["nvidia-rtx3090"] * 2 and found[1]["nvidia_uuid"] == "GPU-bbbb")
 check("a discrete GPU's memory is its VRAM, not unified", found[0]["memory_gib"] == 24 and found[0]["unified"] is False)
-check("nvidia-smi output that isn't a table lists nothing", a.nvidia_gpus("") == [] and a.nvidia_gpus("No devices were found\n") == [])
+check("nvidia-smi output that isn't a table lists nothing", a.nvidia_gpus("") == [] and a.nvidia_gpus("No devices were found\n") == [] and a.nvidia_gpus("NVIDIA GeForce RTX 3090, 24576\n") == [])
 check("a workstation card keeps its words in the family", a.nvidia_family("NVIDIA RTX PRO 6000 Blackwell Workstation Edition") == "nvidia-rtxpro6000blackwellworkstationedition")
 with patch.object(a, "platform_name", return_value="x86"), patch.object(a, "amd_gpus", return_value=[]), patch.object(a, "nvidia_gpus", return_value=found[:1]), patch.object(a, "meminfo", return_value={"MemTotal": 78 * 2**30}):
   prof = a.machine_profile()
@@ -304,7 +304,7 @@ with patch.object(a, "nvidia_free_gib", return_value=20.5), patch.object(a, "mem
 with patch.object(a, "nvidia_free_gib", return_value=None), patch.object(a, "meminfo", return_value={"MemAvailable": 60 * 2**30}):
   check("a failed VRAM reading counts as no free memory, not a free card", a.free_memory(found[0]) == (60.0, 0.0))
 cdi_rt = {"run": {"devices": ["cdi-nvidia"]}}
-check("a discrete GPU's container gets only that card", a.device_lines(cdi_rt, found[1]) == ["AddDevice=nvidia.com/gpu=1"])
+check("a discrete GPU's container gets only that card, bound by UUID so a renumbering can't move it", a.device_lines(cdi_rt, found[1]) == ["AddDevice=nvidia.com/gpu=GPU-bbbb"])
 check("a unified GPU's container gets the whole device", a.device_lines(cdi_rt, {"vendor": "nvidia", "family": "nvidia-gb10", "unified": True}) == ["AddDevice=nvidia.com/gpu=all"])
 check("VRAM rounds up to its class (23.99 GiB is 24, 200 caps at 96)", a.vram_class(24) == 24 and a.vram_class(23.99) == 24 and a.vram_class(11) == 12 and a.vram_class(200) == 96)
 vgpu, rgpu = found[0], {"vendor": "nvidia", "family": "nvidia-gb10", "unified": True, "memory_gib": 120}
