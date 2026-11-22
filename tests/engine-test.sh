@@ -966,6 +966,14 @@ rec = cat.recipes[rid]
 rt = cat.runtimes[rec["runtime"]]
 with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "compatibility", return_value=(variant, "")), patch.object(a, "preflight"), patch.object(a, "build_artifacts", return_value=([], {"model": "model.gguf"})), patch.object(a, "materialize", return_value="a" * 16), patch.object(a, "ensure_image"), patch.object(a, "ensure_key", return_value="test-key"), patch.object(a, "unit_active", return_value=False), patch.object(a, "check_headroom", side_effect=a.LocalError(a.NOT_ENOUGH_MEMORY)), patch.object(a, "write_unit_files"), patch.object(a, "refresh_list_cache"), patch.object(a, "write_status"), patch.object(a, "prune_filesets"):
   check("memory-busy first setup succeeds without activation", a.cmd_use([rid]) == 0 and a.load_model(rid)["unchecked"])
+  # An update of a stopped model is kept the same way (it would only start it to stop it again), not refused for memory.
+  before = a.load_model(rid); before.pop("unchecked")
+  a.save_model(before)
+  with patch.object(a, "updating", return_value=True):
+    check("memory-busy update of a stopped model succeeds without activation", a.cmd_use([rid]) == 0 and a.load_model(rid)["unchecked"])
+  a.save_model(before)
+  raises("a stopped model that isn't being updated is still refused for memory", lambda: a.cmd_use([rid]))
+  a.save_model(dict(before, unchecked=True))
 for response, succeeds in (([(200, b"")], False),
                            ([(401, b""), (200, b'{"data":[{"id":"other"}]}')], False),
                            ([(401, b""), (200, json.dumps({"data": [{"id": rid}]}).encode())], True)):

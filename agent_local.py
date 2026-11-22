@@ -3588,8 +3588,10 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
   if skipped:
     say(f"Note: runtime {recipe['runtime']} takes no {', '.join(skipped)} default; clients choose their own")
   # Downloaded is installed: when other models hold the memory it needs,
-  # the setup is kept, stopped, and starts later from the panel's play.
-  if not unit_active(rid) and load_model(rid) is None:
+  # the setup is kept, stopped, and starts later from the panel's play. An update of a model
+  # that is stopped is the same: it only starts the model to stop it again, so it must not
+  # need the memory free.
+  if not unit_active(rid) and (load_model(rid) is None or updating(rid)):
     try:
       check_headroom(variant, gpu)
     except LocalError as error:
