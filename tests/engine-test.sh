@@ -872,6 +872,19 @@ for was_running, stops in ((False, 1), (True, 0)):
         f"{use.call_args} {stop.call_count}")
   check("an update leaves the agents' default model alone", last.read_text() == "other\n")
   check("a model loading its update says it is updating", set_up.loading["updating"] is True and set_up.loading["unit"] == "activating", str(set_up.loading))
+# A recipe of the user's is set up again only on their say-so, as use is: update refuses without --yes
+# before marking or fetching anything, and passes it on (also to the detached unit) with it.
+mine = SimpleNamespace(user={"current": recipe}, recipes={"current": recipe}, runtimes={"server": runtime})
+with patch.object(a, "load_catalog", return_value=mine), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "write_status"), \
+     patch.object(a, "pending_update", return_value={"image": True, "weights": False, "settings": False}), patch.object(a, "detach_update") as detached, patch.object(a, "cmd_use", return_value=0) as use:
+  try:
+    a.cmd_update(["current", "--detach"])
+    refused = False
+  except a.LocalError as error:
+    refused = "recipe of yours" in str(error)
+  check("update of a recipe of yours is refused without --yes", refused and not detached.called and not use.called)
+  a.cmd_update(["current", "--detach", "--yes"])
+  check("update --yes reaches the detached unit", detached.call_args.args[-1] is True)
 last.unlink()
 with patch.object(a, "known_models", return_value=["current", "survivor"]), patch.object(a, "write_unit_files"), patch.object(a.subprocess, "run") as rmi:
   a._remove_files("current")

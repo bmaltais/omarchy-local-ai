@@ -4154,6 +4154,7 @@ def cmd_update(argv):
   parser = argparse.ArgumentParser(prog="omarchy models update")
   parser.add_argument("recipe", nargs="?", help="the model to update (default: every one with an update)")
   parser.add_argument("--detach", action="store_true", help="update in the background; the local models panel shows it")
+  parser.add_argument("--yes", action="store_true", help="confirm setting up again a recipe of your own (it downloads and runs what you wrote)")
   args = parser.parse_args(argv)
   catalog = load_catalog()
   profile = machine_profile()
@@ -4165,8 +4166,10 @@ def cmd_update(argv):
   status = 0
   for rid, change in pending.items():
     say(f"Updating {rid}: {update_summary(change)}")
+    # A recipe of the user's is set up again only on their say-so, as use does; refuse before anything is marked or fetched.
+    require_yes_for_user_recipe(catalog, rid, args.yes)
     if args.detach:
-      detach_update(rid, catalog, profile)
+      detach_update(rid, catalog, profile, args.yes)
       continue
     # Shown as updating from now on, while it waits for another setup too, with
     # its progress from the first moment: waiting, then the download, which
@@ -4187,7 +4190,7 @@ def cmd_update(argv):
         was_running = unit_active(rid)
         default = _read(os.path.join(state_dir(), "last"))
         ctx = manifest["variant"].get("ctx")
-        code = cmd_use([rid, "--gpu", manifest["gpu"]] + (["--ctx", str(ctx)] if ctx else []))
+        code = cmd_use([rid, "--gpu", manifest["gpu"]] + (["--ctx", str(ctx)] if ctx else []) + (["--yes"] if args.yes else []))
         if code == 0 and not was_running and unit_active(rid):
           code = cmd_stop([rid])
         # An update is upkeep: the agents' default stays the model the user last started.
@@ -4203,7 +4206,7 @@ def cmd_update(argv):
   return status
 
 
-def detach_update(rid, catalog, profile):
+def detach_update(rid, catalog, profile, yes=False):
   """Run one model's update as the transient user unit a detached setup uses, so it outlives the
   panel that asked for it; its output goes to the journal."""
   unit = install_unit(rid)
@@ -4223,7 +4226,7 @@ def detach_update(rid, catalog, profile):
   for name in ("OMARCHY_LOCAL_AI_CATALOG", "HF_TOKEN"):
     if env.get(name):
       command.append(f"--setenv={name}")
-  result = subprocess.run(command + [entry, "update", rid], capture_output=True, text=True, env=env)
+  result = subprocess.run(command + [entry, "update", rid] + (["--yes"] if yes else []), capture_output=True, text=True, env=env)
   if result.returncode != 0:
     try:
       os.unlink(updating_path(rid))
