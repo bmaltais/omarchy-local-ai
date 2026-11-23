@@ -545,7 +545,8 @@ def ports():
 def node():
   name = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True).stdout.strip()
   mem = {line.split(":")[0]: int(line.split()[1]) * 1024 for line in open("/proc/meminfo") if line.split()[1:2]}
-  return {"gpu": name, "ram_total": mem.get("MemTotal", 0), "ram_available": mem.get("MemAvailable", 0), "home": os.path.expanduser("~"), "host": os.uname().nodename}
+  return {"gpu": name, "ram_total": mem.get("MemTotal", 0), "ram_available": mem.get("MemAvailable", 0),
+          "ram_free": mem.get("MemFree", 0) + mem.get("GPUReclaim", 0), "home": os.path.expanduser("~"), "host": os.uname().nodename}
 '''
 
 
@@ -2335,12 +2336,12 @@ def drop_page_cache(need_gib):
   it back only under pressure, page by page. With Omarchy's zram swap (vm.swappiness 150) that
   pressure compresses apps into zram before it drops the cache, and on unified NVIDIA memory
   (GB10, N1x) CUDA doesn't count it as reclaimable at all, so a model that fits can fail to load.
-  Dropping it first hands the model that memory whole. Without the passwordless rule nothing
-  is dropped and the start goes ahead as before."""
+  Dropping it first hands the model that memory whole. Dirty pages aren't synced to drop them
+  too: a sync could wait on every disk while start holds the lock, for little gain. Without the
+  passwordless rule nothing is dropped and the start goes ahead as before."""
   mem = meminfo()
   if gib(mem.get("MemFree", 0) + mem.get("GPUReclaim", 0)) >= need_gib:
     return False
-  os.sync()
   try:
     dropped = subprocess.run(DROP_CACHES, capture_output=True, timeout=60).returncode == 0
   except (OSError, subprocess.TimeoutExpired):
@@ -2462,6 +2463,10 @@ def peer_headroom(peer, variant):
       f"Not enough free memory on the peer {node['host']}: rank 1 needs {variant['peak_ram_gib']:g} GiB plus {RESERVE_GIB} GiB, {available:.1f} GiB are free there.",
       short=f"{NOT_ENOUGH_MEMORY} on {node['host']} (needs {need:g} GiB)",
     )
+  # Rank 1 loads through CUDA too, so the peer's cache goes the same way, as best it can.
+  if gib(node.get("ram_free", 0)) < variant["peak_ram_gib"]:
+    with contextlib.suppress(LocalError, ValueError):
+      pair_python(peer, f"subprocess.run({DROP_CACHES!r}, capture_output=True, timeout=60).returncode", timeout=70)
   return available
 
 

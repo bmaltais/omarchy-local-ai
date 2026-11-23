@@ -212,11 +212,11 @@ with patch.object(a, "free_memory", return_value=(48.6, 54)), patch.object(a, "c
   check("start counts the desktop's reserve once", a.check_headroom(long_ctx, dict(gpu, memory_gib=54)) == (48.6, 54)
         and a.start_fit({"variant": long_ctx}, profile) == (True, ""))
 # Its 48.6 GiB free is 20 not cached and 28.6 of cache: a 42 GiB start drops the cache, a 16 GiB one doesn't.
-with patch.object(a, "meminfo", return_value={"MemFree": 16 * 2**30, "GPUReclaim": 4 * 2**30}), patch.object(a.os, "sync"), \
+with patch.object(a, "meminfo", return_value={"MemFree": 16 * 2**30, "GPUReclaim": 4 * 2**30}), \
      patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
   check("a start drops the page cache only when the memory not cached is short of the model",
         a.drop_page_cache(42) and run.call_args.args[0] == a.DROP_CACHES and not a.drop_page_cache(16) and run.call_count == 1)
-with patch.object(a, "meminfo", return_value={"MemFree": 16 * 2**30}), patch.object(a.os, "sync"), patch.object(a.subprocess, "run", side_effect=FileNotFoundError):
+with patch.object(a, "meminfo", return_value={"MemFree": 16 * 2**30}), patch.object(a.subprocess, "run", side_effect=FileNotFoundError):
   check("without sudo the start goes ahead with the cache in place", a.drop_page_cache(42) is False)
 
 # A 64 GB Strix Halo on a stock kernel: the GPU maps half of RAM until use raises the cap.
