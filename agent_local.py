@@ -356,10 +356,10 @@ def gpu_short_error(variant, gpu):
   """Why a variant can't start on what the GPU addresses now: a reboot when a raised cap is
   waiting for it, otherwise the shortfall, and that use raises the cap where it can."""
   if gpu_memory_pending(variant, gpu):
-    return LocalError(f"the GPU addresses {gpu['memory_gib']:.0f} GiB and the model needs {variant['peak_gpu_gib']:g}, until a reboot raises its memory limit",
+    return LocalError(f"the GPU addresses {gpu['memory_gib']:.1f} GiB and the model needs {variant['peak_gpu_gib']:g}, until a reboot raises its memory limit",
                       short=REBOOT_FOR_GPU_MEMORY)
   hint = "; omarchy models use raises its memory limit" if variant["peak_gpu_gib"] <= gpu.get("max_memory_gib", gpu["memory_gib"]) else ""
-  return LocalError(f"the GPU addresses {gpu['memory_gib']:.0f} GiB and the model needs {variant['peak_gpu_gib']:g}{hint}", short=GPU_TOO_SMALL)
+  return LocalError(f"the GPU addresses {gpu['memory_gib']:.1f} GiB and the model needs {variant['peak_gpu_gib']:g}{hint}", short=GPU_TOO_SMALL)
 
 
 def raise_gpu_memory(variant, gpu, detach=False):
@@ -371,11 +371,11 @@ def raise_gpu_memory(variant, gpu, detach=False):
   pages = gpu_pages_limit(meminfo().get("MemTotal", 0))
   if int(_read(TTM_PAGES_LIMIT, "0") or 0) >= pages:
     hint = ": amdgpu.gttsize on the kernel command line may be holding it lower" if gpu["vendor"] == "amd" else ""
-    raise LocalError(f"The kernel already lets the GPU map {gib(pages * os.sysconf('SC_PAGE_SIZE')):.0f} GiB, but it addresses {gpu['memory_gib']:.0f}{hint}")
+    raise LocalError(f"The kernel already lets the GPU map {gib(pages * os.sysconf('SC_PAGE_SIZE')):.1f} GiB, but it addresses {gpu['memory_gib']:.1f}{hint}")
   if pending_pages_limit() >= pages:
     return
   if not shutil.which("limine-mkinitcpio"):
-    raise LocalError(f"The model needs {variant['peak_gpu_gib']:g} GiB of GPU-addressable memory and the kernel lets this GPU map {gpu['memory_gib']:.0f}. "
+    raise LocalError(f"The model needs {variant['peak_gpu_gib']:g} GiB of GPU-addressable memory and the kernel lets this GPU map {gpu['memory_gib']:.1f}. "
                      f"Add ttm.pages_limit={pages} to the kernel command line and reboot.")
   say(f"Raising the GPU memory limit to {gib(pages * os.sysconf('SC_PAGE_SIZE')):.0f} GiB from the next boot, which rebuilds the boot image")
   argv = ["pkexec" if detach else "sudo", "/usr/bin/bash", "-c", GPU_MEMORY_SCRIPT, "omarchy-local-ai", GPU_MEMORY_DROP_IN, str(pages)]
@@ -1165,9 +1165,9 @@ def fits(variant, profile, gpu):
   # Judged by the most the GPU can be given: use raises a cap that's lower.
   ceiling = gpu.get("max_memory_gib", gpu["memory_gib"])
   if variant["peak_gpu_gib"] > ceiling:
-    return False, f"needs {variant['peak_gpu_gib']:g} GiB GPU-addressable memory, this GPU has {ceiling:.0f}"
+    return False, f"needs {variant['peak_gpu_gib']:g} GiB GPU-addressable memory, this GPU has {ceiling:.1f}"
   if variant["peak_ram_gib"] + RESERVE_GIB > profile["ram_gib"]:
-    return False, f"needs {variant['peak_ram_gib']:g} GiB RAM plus {RESERVE_GIB} GiB for the desktop, this machine has {profile['ram_gib']:.0f}"
+    return False, f"needs {variant['peak_ram_gib']:g} GiB RAM plus {RESERVE_GIB} GiB for the desktop, this machine has {profile['ram_gib']:.1f}"
   return True, ""
 
 
