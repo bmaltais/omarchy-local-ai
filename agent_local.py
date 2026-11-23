@@ -62,6 +62,10 @@ REBOOT_FOR_GPU_MEMORY = "Reboot to raise the GPU memory limit"
 GPU_MEMORY_DROP_IN = "/etc/limine-entry-tool.d/amd-gpu-memory.conf"
 TTM_PAGES_LIMIT = "/sys/module/ttm/parameters/pages_limit"
 GPU_TOO_SMALL = "Not enough GPU memory"
+# Drops the clean page cache and reclaimable slab, the memory MemAvailable counts as free. Omarchy
+# lets this exact command run without a password (its etc/sudoers.d/omarchy-drop-caches); where
+# nothing does, sudo -n fails at once and the start goes ahead as before.
+DROP_CACHES = ["sudo", "-n", "/usr/bin/sysctl", "vm.drop_caches=3"]
 # Run as root with the drop-in and the page count. A failed rebuild puts the drop-in back as it
 # was, so the next use rebuilds again rather than finding its value already saved.
 GPU_MEMORY_SCRIPT = r"""
@@ -2324,6 +2328,28 @@ def start_needs_gib(variant):
   return variant["peak_ram_gib"]
 
 
+def drop_page_cache(need_gib):
+  """Drops the page cache when the model needs memory only the cache holds: whether it did.
+
+  MemAvailable counts clean cache as free, so fit already treats it as room, but the kernel hands
+  it back only under pressure, page by page. With Omarchy's zram swap (vm.swappiness 150) that
+  pressure compresses apps into zram before it drops the cache, and on unified NVIDIA memory
+  (GB10, N1x) CUDA doesn't count it as reclaimable at all, so a model that fits can fail to load.
+  Dropping it first hands the model that memory whole. Without the passwordless rule nothing
+  is dropped and the start goes ahead as before."""
+  mem = meminfo()
+  if gib(mem.get("MemFree", 0) + mem.get("GPUReclaim", 0)) >= need_gib:
+    return False
+  os.sync()
+  try:
+    dropped = subprocess.run(DROP_CACHES, capture_output=True, timeout=60).returncode == 0
+  except (OSError, subprocess.TimeoutExpired):
+    return False
+  if dropped:
+    say("Dropped the page cache to make room for the model")
+  return dropped
+
+
 def check_headroom(variant, gpu):
   if variant["peak_gpu_gib"] > gpu["memory_gib"]:
     raise gpu_short_error(variant, gpu)
@@ -2333,6 +2359,8 @@ def check_headroom(variant, gpu):
   for _ in range(15):
     available, gpu_free = free_memory(gpu)
     if available >= start_needs_gib(variant) and gpu_free >= variant["peak_gpu_gib"]:
+      if drop_page_cache(start_needs_gib(variant)):
+        available, gpu_free = free_memory(gpu)
       return available, gpu_free
     time.sleep(1)
   running = [rid for rid in known_models() if unit_active(rid)]
