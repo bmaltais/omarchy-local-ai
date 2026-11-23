@@ -1,6 +1,6 @@
 recipe = "minimax-h3-sdcpp-cuda"
-measured_at = "2026-11-18"
-image = "ghcr.io/omacom/omarchy-local-ai/sdcpp-cuda@sha256:0571b9ddbb8ad78fddb0bc6909eb4ddd7f3d4c1d23828c14309bbf9f1783ef7d"
+measured_at = "2026-11-22"
+image = "ghcr.io/omacom/omarchy-local-ai/sdcpp-cuda@sha256:946494cb833b513f10916867779f2f3833b37b8eb5bc7f68a5fb486e64777274"
 load_seconds = 4.0
 fileset = "840a2240ff853392"
 method = "three 864x480, 56-frame (2.3 s at 24 fps) clips with sound through /sdcpp/v1/vid_gen on the engine-run server, at its default 4 steps with the turbo LoRA it lists, VAE tiling on, the median kept; GPU memory from nvidia-smi's count for the server's process, every half second"
@@ -10,13 +10,13 @@ platform = "aarch64-n1x"
 gpu = "nvidia-n1x"
 ram_class = 128
 system = "ASUS ProArt P14 H7407BA"
-kernel = "7.3.0-72-omarchy"
+kernel = "7.3.0-75-omarchy"
 cpu = "Cortex-X925 + Cortex-A725"
 gpu_driver = "615.78.08"
 
 [memory]
 observed_at_load_gib = 0.4
-min_available_during_bench_gib = 62.3
+min_available_during_bench_gib = 61.3
 total_gib = 120.3
 peak_gpu_gib = 44.6
 
@@ -25,8 +25,8 @@ width = 864
 height = 480
 steps = 4
 images = 3
-first_image_s = 64.1
-seconds_per_image = 55.1
+first_image_s = 72.2
+seconds_per_image = 56.6
 
 [[artifacts]]
 repo = "Comfy-Org/MiniMax-H3"

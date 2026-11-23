@@ -30,7 +30,7 @@ license = "apache-2.0"
 files = ["Qwen3-4B-Instruct-2507-Q8_0.gguf"]
 text_encoder = "Qwen3-4B-Instruct-2507-Q8_0.gguf"
 
-# Measured: 13.3 GiB of GPU memory at its peak, generating at 1024x1024 in 9.9 s.
+# Measured: 13.3 GiB of GPU memory at its peak, generating at 1024x1024 in 10.0 s.
 [[variant]]
 peak_ram_gib = 15
 peak_gpu_gib = 15

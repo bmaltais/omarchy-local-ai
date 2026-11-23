@@ -34,7 +34,7 @@ license = "other: minimax-h3-community-license-agreement"
 files = ["text_encoders/p-h3-image_text_encoder_int8_convrot.safetensors"]
 text_encoder = "text_encoders/p-h3-image_text_encoder_int8_convrot.safetensors"
 
-# Measured: 44.6 GiB of GPU memory at its peak, making a 2.3 s 864x480 clip in 55 s.
+# Measured: 44.6 GiB of GPU memory at its peak, making a 2.3 s 864x480 clip in 57 s.
 [[variant]]
 peak_ram_gib = 46
 peak_gpu_gib = 46
