@@ -1468,7 +1468,7 @@ def serve(handler):
 now = [1_000_000]
 tracker = a.ClientTracker(a.clients_path(), window_ms=1000, clock=lambda: now[0])
 model = serve(FakeModel)
-proxy = serve(a.make_share_proxy(tracker, ports=lambda: {"shared": model.server_address[1], "private": model.server_address[1]}, shares=lambda: ["shared"]))
+proxy = serve(a.make_share_proxy(tracker, ports=lambda: {"shared": model.server_address[1], "private": model.server_address[1]}, shares=lambda: ["shared"], key=lambda: "k"))
 
 def ask(path, key="k", client="100.64.0.2"):
   connection = http.client.HTTPConnection("127.0.0.1", proxy.server_address[1], timeout=10)
@@ -1506,7 +1506,16 @@ import socket
 stalled = socket.create_connection(("127.0.0.1", proxy.server_address[1]))
 stalled.sendall(b"POST /shared/v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nhel")
 a.time.sleep(0.2)
-check("an upload that never finishes holds nothing", not locked("shared"))
+check("an upload without the key that never finishes holds nothing", not locked("shared"))
+stalled.close()
+# With the key, the hold is taken before the request reaches the model.
+stalled = socket.create_connection(("127.0.0.1", proxy.server_address[1]))
+stalled.sendall(b"POST /shared/v1/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer k\r\nContent-Length: 100\r\n\r\nhel")
+for _ in range(100):
+  if locked("shared"):
+    break
+  a.time.sleep(0.02)
+check("a request with the key holds the model before it reaches it", locked("shared"))
 stalled.close()
 release.clear()
 release.set()

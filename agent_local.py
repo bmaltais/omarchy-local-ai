@@ -4977,11 +4977,17 @@ def proxy_client(headers, address):
     return address
 
 
-def make_share_proxy(tracker, ports=None, shares=None):
+def make_share_proxy(tracker, ports=None, shares=None, key=None):
+  import hmac
   import http.client
   import http.server
   ports = ports or load_ports
   shares = shares or shared_recipes
+
+  def read_key():
+    with open(key_path()) as handle:
+      return handle.read().strip()
+  key = key or read_key
 
   class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -5023,6 +5029,12 @@ def make_share_proxy(tracker, ports=None, shares=None):
 
       return Remaining(), False
 
+    def _keyed(self):
+      try:
+        return hmac.compare_digest(str(self.headers.get("Authorization") or "").encode(), f"Bearer {key()}".encode())
+      except OSError:
+        return False
+
     def _refuse(self, status):
       # The body is left unread, so the connection can't be reused for another request.
       self.close_connection = True
@@ -5037,14 +5049,16 @@ def make_share_proxy(tracker, ports=None, shares=None):
       if not ID_RE.match(rid) or rid not in shares() or not port:
         return self._refuse(404)
       with contextlib.ExitStack() as held:
+        # A caller with the key holds the model from before its request reaches it until the
+        # answer is through, so stop --unless-used leaves a model at work alone. One without it
+        # holds nothing: the model refuses it, and stalling can't keep a model running.
+        if self._keyed():
+          held.enter_context(holding([rid]))
         body, chunked = self._body()
         headers = {name: value for name, value in self.headers.items() if name.lower() not in HOP_HEADERS and name.lower() != "host"}
         upstream = http.client.HTTPConnection("127.0.0.1", port, timeout=600)
         try:
           upstream.request(self.command, "/" + rest, body=body, headers=headers, encode_chunked=chunked)
-          # Held from once the request is in until the answer is through, so stop --unless-used
-          # leaves a model at work alone; an upload that never finishes holds nothing.
-          held.enter_context(holding([rid]))
           answer = upstream.getresponse()
         except OSError:
           upstream.close()
