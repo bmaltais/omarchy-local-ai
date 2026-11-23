@@ -1468,7 +1468,7 @@ def serve(handler):
 now = [1_000_000]
 tracker = a.ClientTracker(a.clients_path(), window_ms=1000, clock=lambda: now[0])
 model = serve(FakeModel)
-proxy = serve(a.make_share_proxy(tracker, ports=lambda: {"shared": model.server_address[1], "private": model.server_address[1]}, shares=lambda: ["shared"]))
+proxy = serve(a.make_share_proxy(tracker, ports=lambda: {"shared": model.server_address[1], "private": model.server_address[1]}, shares=lambda: ["shared"], key=lambda: "k"))
 
 def ask(path, key="k", client="100.64.0.2"):
   connection = http.client.HTTPConnection("127.0.0.1", proxy.server_address[1], timeout=10)
@@ -1485,10 +1485,38 @@ connection = http.client.HTTPConnection("127.0.0.1", proxy.server_address[1], ti
 connection.request("POST", "/shared/v1/chat/completions", body=iter([b"hel", b"lo"]), encode_chunked=True, headers={"Authorization": "Bearer k", "X-Forwarded-For": "100.64.0.2"})
 answer = connection.getresponse()
 first = answer.read1(65536)
+def locked(rid):
+  with open(a.hold_path(rid), "a") as probe:
+    try:
+      a.fcntl.flock(probe, a.fcntl.LOCK_EX | a.fcntl.LOCK_NB)
+      return False
+    except BlockingIOError:
+      return True
+working = locked("shared")
 release.set()
 rest = answer.read()
 connection.close()
 check("the proxy streams each part of the answer as the model sends it", answer.status == 200 and first == b"data: hello\n\n" and rest == b"data: [DONE]\n\n", f"{answer.status} {first!r} {rest!r}")
+for _ in range(100):
+  if not locked("shared"):
+    break
+  a.time.sleep(0.02)
+check("the proxy holds the model until the answer is through", working and not locked("shared"))
+import socket
+stalled = socket.create_connection(("127.0.0.1", proxy.server_address[1]))
+stalled.sendall(b"POST /shared/v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nhel")
+a.time.sleep(0.2)
+check("an upload without the key that never finishes holds nothing", not locked("shared"))
+stalled.close()
+# With the key, the hold is taken before the request reaches the model.
+stalled = socket.create_connection(("127.0.0.1", proxy.server_address[1]))
+stalled.sendall(b"POST /shared/v1/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer k\r\nContent-Length: 100\r\n\r\nhel")
+for _ in range(100):
+  if locked("shared"):
+    break
+  a.time.sleep(0.02)
+check("a request with the key holds the model before it reaches it", locked("shared"))
+stalled.close()
 release.clear()
 release.set()
 status, body = ask("/shared/v1/chat/completions")
@@ -1740,4 +1768,29 @@ with patch.object(a.urllib.request, "urlopen", side_effect=a.urllib.error.URLErr
 check("a failed warm-up leaves no marker behind", not a.warming("warm"))
 Path(a.warming_path("warm")).write_text("999999999\n")
 check("a marker whose process is gone holds nothing back", not a.warming("warm"))
+# An app holds a model while it runs; stop --unless-used leaves a held model, or one a tailnet
+# machine used lately, and stops the rest. The hold ends when the holder's input closes.
+holder = subprocess.Popen([sys.executable, "-I", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import agent_local as a; a.resolve_model = lambda rid: {'recipe_id': rid}; sys.exit(a.main(['hold', 'held']))", os.environ["ENGINE_ROOT"]],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+for _ in range(200):
+  if a.hold_exclusively("held", []) is False:
+    break
+  __import__("time").sleep(0.05)
+Path(a.clients_path()).write_text(json.dumps({"models": {"shared": 1}}))
+stopped = []
+def stop_unless_used(*rids):
+  with patch.object(a, "resolve_model", side_effect=lambda rid: {"recipe_id": rid}), patch.object(a, "running_models", return_value={"held", "shared", "idle"}), \
+       patch.object(a, "load_catalog", return_value={}), patch.object(a, "machine_profile", return_value={}), patch.object(a, "write_status"), \
+       patch.object(a, "evict_idle_weights"), patch.object(a, "stop_unit", side_effect=stopped.append):
+    return a.cmd_stop(["--unless-used", *rids])
+stop_unless_used()
+check("stop --unless-used stops only what no app holds and no tailnet machine uses", stopped == ["idle"], repr(stopped))
+stopped.clear()
+stop_unless_used("idle", "idle")
+check("a model named twice is stopped once", stopped == ["idle"], repr(stopped))
+holder.communicate(b"", timeout=10)
+stopped.clear()
+stop_unless_used("held", "shared")
+check("a hold ends when the holder's input closes", holder.returncode == 0 and stopped == ["held"], repr((holder.returncode, stopped)))
+os.unlink(a.clients_path())
 PY

@@ -4102,13 +4102,22 @@ def detach_update(rid, catalog, profile):
 
 def cmd_stop(argv):
   parser = argparse.ArgumentParser(prog="omarchy models stop")
-  parser.add_argument("recipe", nargs="?", help="the model to stop (default: every running one)")
+  parser.add_argument("recipes", nargs="*", metavar="recipe", help="the models to stop (default: every running one)")
+  parser.add_argument("--unless-used", action="store_true", help="leave running a model an app holds or a tailnet machine uses")
   args = parser.parse_args(argv)
   catalog = load_catalog()
   profile = machine_profile()
-  targets = [resolve_model(args.recipe)["recipe_id"]] if args.recipe else sorted(running_models())
+  targets = list(dict.fromkeys(resolve_model(rid)["recipe_id"] for rid in args.recipes)) if args.recipes else sorted(running_models())
+  # A model held stays held through the stop: an app taking a hold meanwhile waits for it.
+  held = []
+  if args.unless_used:
+    kept = [rid for rid in targets if not hold_exclusively(rid, held)]
+    targets = [rid for rid in targets if rid not in kept]
+    for rid in kept:
+      say(f"{rid} is in use; leaving it running")
   if not targets:
-    say("No local model is running")
+    if not args.unless_used:
+      say("No local model is running")
     return 0
   # A model takes seconds to let go of its memory; the panel says so meanwhile.
   write_status(catalog, profile, {rid: "deactivating" for rid in targets})
@@ -4123,6 +4132,61 @@ def cmd_stop(argv):
   evict_idle_weights()
   write_status(catalog, profile)
   say(f"Stopped {', '.join(targets)}")
+  return 0
+
+
+# ---------------------------------------------------------------- holds
+#
+# An app using a model holds it: `hold` keeps a shared lock on the model's hold file until its
+# standard input closes, which it does when the app quits or dies, so a crashed app never keeps
+# a model running. The share proxy holds a model the same way for each tailnet request it relays.
+# `stop --unless-used` stops only what it can lock exclusively, and what no tailnet machine has
+# used lately.
+
+
+def hold_path(rid):
+  return os.path.join(state_dir(), "holds", rid)
+
+
+def hold_exclusively(rid, handles):
+  """Whether nothing uses the model: no app holds it, nor did a tailnet machine lately. The
+  exclusive lock that says so is kept in handles until the caller is done."""
+  try:
+    with open(clients_path()) as file:
+      if json.load(file).get("models", {}).get(rid, 0) > 0:
+        return False
+  except (OSError, ValueError):
+    pass
+  ensure_dir(os.path.dirname(hold_path(rid)))
+  handle = open(hold_path(rid), "a")
+  try:
+    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+  except BlockingIOError:
+    handle.close()
+    return False
+  handles.append(handle)
+  return True
+
+
+@contextlib.contextmanager
+def holding(rids):
+  ensure_dir(os.path.join(state_dir(), "holds"))
+  handles = [open(hold_path(rid), "a") for rid in rids]
+  try:
+    for handle in handles:
+      fcntl.flock(handle, fcntl.LOCK_SH)
+    yield
+  finally:
+    for handle in handles:
+      handle.close()
+
+
+def cmd_hold(argv):
+  parser = argparse.ArgumentParser(prog="omarchy models hold", description="Hold models as in use until standard input closes, so stop --unless-used leaves them running")
+  parser.add_argument("recipes", nargs="+", metavar="recipe", help="the models to hold")
+  args = parser.parse_args(argv)
+  with holding([resolve_model(rid)["recipe_id"] for rid in args.recipes]):
+    sys.stdin.buffer.read()
   return 0
 
 
@@ -4913,11 +4977,17 @@ def proxy_client(headers, address):
     return address
 
 
-def make_share_proxy(tracker, ports=None, shares=None):
+def make_share_proxy(tracker, ports=None, shares=None, key=None):
+  import hmac
   import http.client
   import http.server
   ports = ports or load_ports
   shares = shares or shared_recipes
+
+  def read_key():
+    with open(key_path()) as handle:
+      return handle.read().strip()
+  key = key or read_key
 
   class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -4959,6 +5029,12 @@ def make_share_proxy(tracker, ports=None, shares=None):
 
       return Remaining(), False
 
+    def _keyed(self):
+      try:
+        return hmac.compare_digest(str(self.headers.get("Authorization") or "").encode(), f"Bearer {key()}".encode())
+      except OSError:
+        return False
+
     def _refuse(self, status):
       # The body is left unread, so the connection can't be reused for another request.
       self.close_connection = True
@@ -4972,43 +5048,49 @@ def make_share_proxy(tracker, ports=None, shares=None):
       port = ports().get(rid)
       if not ID_RE.match(rid) or rid not in shares() or not port:
         return self._refuse(404)
-      body, chunked = self._body()
-      headers = {name: value for name, value in self.headers.items() if name.lower() not in HOP_HEADERS and name.lower() != "host"}
-      upstream = http.client.HTTPConnection("127.0.0.1", port, timeout=600)
-      try:
-        upstream.request(self.command, "/" + rest, body=body, headers=headers, encode_chunked=chunked)
-        answer = upstream.getresponse()
-      except OSError:
-        upstream.close()
-        return self._refuse(502)
-      # Only a request the model accepted counts: a wrong key or a bad path doesn't.
-      if answer.status < 400:
-        tracker.saw(rid, proxy_client(self.headers, self.client_address[0]))
-      try:
-        self.send_response(answer.status, answer.reason)
-        for name, value in answer.getheaders():
-          if name.lower() not in HOP_HEADERS and name.lower() != "content-length":
-            self.send_header(name, value)
-        length = answer.getheader("Content-Length")
-        if self.command == "HEAD":
-          self.send_header("Content-Length", length or "0")
-          self.end_headers()
-        elif length is not None:
-          self.send_header("Content-Length", length)
-          self.end_headers()
-          while chunk := answer.read1(65536):
-            self.wfile.write(chunk)
-        else:
-          # A streamed reply (server-sent events) goes out chunk by chunk as it arrives.
-          self.send_header("Transfer-Encoding", "chunked")
-          self.end_headers()
-          while chunk := answer.read1(65536):
-            self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
-            self.wfile.flush()
-          self.wfile.write(b"0\r\n\r\n")
-        self.wfile.flush()
-      finally:
-        upstream.close()
+      with contextlib.ExitStack() as held:
+        # A caller with the key holds the model from before its request reaches it until the
+        # answer is through, so stop --unless-used leaves a model at work alone. One without it
+        # holds nothing: the model refuses it, and stalling can't keep a model running.
+        if self._keyed():
+          held.enter_context(holding([rid]))
+        body, chunked = self._body()
+        headers = {name: value for name, value in self.headers.items() if name.lower() not in HOP_HEADERS and name.lower() != "host"}
+        upstream = http.client.HTTPConnection("127.0.0.1", port, timeout=600)
+        try:
+          upstream.request(self.command, "/" + rest, body=body, headers=headers, encode_chunked=chunked)
+          answer = upstream.getresponse()
+        except OSError:
+          upstream.close()
+          return self._refuse(502)
+        # Only a request the model accepted counts: a wrong key or a bad path doesn't.
+        if answer.status < 400:
+          tracker.saw(rid, proxy_client(self.headers, self.client_address[0]))
+        try:
+          self.send_response(answer.status, answer.reason)
+          for name, value in answer.getheaders():
+            if name.lower() not in HOP_HEADERS and name.lower() != "content-length":
+              self.send_header(name, value)
+          length = answer.getheader("Content-Length")
+          if self.command == "HEAD":
+            self.send_header("Content-Length", length or "0")
+            self.end_headers()
+          elif length is not None:
+            self.send_header("Content-Length", length)
+            self.end_headers()
+            while chunk := answer.read1(65536):
+              self.wfile.write(chunk)
+          else:
+            # A streamed reply (server-sent events) goes out chunk by chunk as it arrives.
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            while chunk := answer.read1(65536):
+              self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+              self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+          self.wfile.flush()
+        finally:
+          upstream.close()
 
     do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_HEAD = _forward
 
@@ -5731,6 +5813,7 @@ COMMANDS = {
   "status": cmd_status,
   "start": cmd_start,
   "stop": cmd_stop,
+  "hold": cmd_hold,
   "update": cmd_update,
   "remove": cmd_remove,
   "share": cmd_share,
@@ -5757,6 +5840,7 @@ SUMMARIES = {
   "status": "Show the models that are set up, and whether a better one is recommended",
   "start": "Start a model that's set up, the last one started by default",
   "stop": "Stop a model, or every running one",
+  "hold": "Hold models as in use until standard input closes",
   "update": "Update a model that's set up to the catalog's runtime, weights and settings",
   "remove": "Remove a model's weights, manifests and unused image",
   "share": "Share a model with the other machines on your tailnet, or stop with --off",
