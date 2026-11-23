@@ -1485,10 +1485,23 @@ connection = http.client.HTTPConnection("127.0.0.1", proxy.server_address[1], ti
 connection.request("POST", "/shared/v1/chat/completions", body=iter([b"hel", b"lo"]), encode_chunked=True, headers={"Authorization": "Bearer k", "X-Forwarded-For": "100.64.0.2"})
 answer = connection.getresponse()
 first = answer.read1(65536)
+def locked(rid):
+  with open(a.hold_path(rid), "a") as probe:
+    try:
+      a.fcntl.flock(probe, a.fcntl.LOCK_EX | a.fcntl.LOCK_NB)
+      return False
+    except BlockingIOError:
+      return True
+working = locked("shared")
 release.set()
 rest = answer.read()
 connection.close()
 check("the proxy streams each part of the answer as the model sends it", answer.status == 200 and first == b"data: hello\n\n" and rest == b"data: [DONE]\n\n", f"{answer.status} {first!r} {rest!r}")
+for _ in range(100):
+  if not locked("shared"):
+    break
+  a.time.sleep(0.02)
+check("the proxy holds the model until the answer is through", working and not locked("shared"))
 release.clear()
 release.set()
 status, body = ask("/shared/v1/chat/completions")
@@ -1757,6 +1770,9 @@ def stop_unless_used(*rids):
     return a.cmd_stop(["--unless-used", *rids])
 stop_unless_used()
 check("stop --unless-used stops only what no app holds and no tailnet machine uses", stopped == ["idle"], repr(stopped))
+stopped.clear()
+stop_unless_used("idle", "idle")
+check("a model named twice is stopped once", stopped == ["idle"], repr(stopped))
 holder.communicate(b"", timeout=10)
 stopped.clear()
 stop_unless_used("held", "shared")

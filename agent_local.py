@@ -4107,7 +4107,7 @@ def cmd_stop(argv):
   args = parser.parse_args(argv)
   catalog = load_catalog()
   profile = machine_profile()
-  targets = [resolve_model(rid)["recipe_id"] for rid in args.recipes] if args.recipes else sorted(running_models())
+  targets = list(dict.fromkeys(resolve_model(rid)["recipe_id"] for rid in args.recipes)) if args.recipes else sorted(running_models())
   # A model held stays held through the stop: an app taking a hold meanwhile waits for it.
   held = []
   if args.unless_used:
@@ -4139,8 +4139,9 @@ def cmd_stop(argv):
 #
 # An app using a model holds it: `hold` keeps a shared lock on the model's hold file until its
 # standard input closes, which it does when the app quits or dies, so a crashed app never keeps
-# a model running. `stop --unless-used` stops only what it can lock exclusively, and what no
-# tailnet machine has used lately.
+# a model running. The share proxy holds a model the same way for each tailnet request it relays.
+# `stop --unless-used` stops only what it can lock exclusively, and what no tailnet machine has
+# used lately.
 
 
 def hold_path(rid):
@@ -4167,16 +4168,25 @@ def hold_exclusively(rid, handles):
   return True
 
 
+@contextlib.contextmanager
+def holding(rids):
+  ensure_dir(os.path.join(state_dir(), "holds"))
+  handles = [open(hold_path(rid), "a") for rid in rids]
+  try:
+    for handle in handles:
+      fcntl.flock(handle, fcntl.LOCK_SH)
+    yield
+  finally:
+    for handle in handles:
+      handle.close()
+
+
 def cmd_hold(argv):
   parser = argparse.ArgumentParser(prog="omarchy models hold", description="Hold models as in use until standard input closes, so stop --unless-used leaves them running")
   parser.add_argument("recipes", nargs="+", metavar="recipe", help="the models to hold")
   args = parser.parse_args(argv)
-  rids = [resolve_model(rid)["recipe_id"] for rid in args.recipes]
-  ensure_dir(os.path.join(state_dir(), "holds"))
-  handles = [open(hold_path(rid), "a") for rid in rids]
-  for handle in handles:
-    fcntl.flock(handle, fcntl.LOCK_SH)
-  sys.stdin.buffer.read()
+  with holding([resolve_model(rid)["recipe_id"] for rid in args.recipes]):
+    sys.stdin.buffer.read()
   return 0
 
 
@@ -5026,6 +5036,11 @@ def make_share_proxy(tracker, ports=None, shares=None):
       port = ports().get(rid)
       if not ID_RE.match(rid) or rid not in shares() or not port:
         return self._refuse(404)
+      # Held until the answer is through, so stop --unless-used leaves a model at work alone.
+      with holding([rid]):
+        return self._relay(rid, rest, port)
+
+    def _relay(self, rid, rest, port):
       body, chunked = self._body()
       headers = {name: value for name, value in self.headers.items() if name.lower() not in HOP_HEADERS and name.lower() != "host"}
       upstream = http.client.HTTPConnection("127.0.0.1", port, timeout=600)
