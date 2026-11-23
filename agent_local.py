@@ -2612,7 +2612,9 @@ def pair_worker_start(rid):
   # Also here: systemd's restarts after a failure don't pass admission.
   pair_limits(pair["peer"])
   peer_models = os.path.join(pair["home"], ".local", "share", "omarchy", "agent-local", "models", rid)
-  pair_python(pair["peer"], f"drop_cache({peer_models!r}, '.rank')", timeout=60)
+  # The copied file set as well as rank 1's inputs: the SSH sessions that wrote them are charged
+  # outside the user manager's cgroup, so peer_headroom's reclaim doesn't reach their cache.
+  pair_python(pair["peer"], f"drop_cache({peer_models!r}, '')", timeout=60)
   peer_headroom(pair["peer"], variant)
   spec = runtime["pair"]
   def values(rank, side):
