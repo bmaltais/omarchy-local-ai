@@ -62,10 +62,8 @@ REBOOT_FOR_GPU_MEMORY = "Reboot to raise the GPU memory limit"
 GPU_MEMORY_DROP_IN = "/etc/limine-entry-tool.d/amd-gpu-memory.conf"
 TTM_PAGES_LIMIT = "/sys/module/ttm/parameters/pages_limit"
 GPU_TOO_SMALL = "Not enough GPU memory"
-# Drops the clean page cache and reclaimable slab, the memory MemAvailable counts as free. Omarchy
-# lets this exact command run without a password (its etc/sudoers.d/omarchy-drop-caches); where
-# nothing does, sudo -n fails at once and the start goes ahead as before.
-DROP_CACHES = ["sudo", "-n", "/usr/bin/sysctl", "vm.drop_caches=3"]
+# What a start reclaims past the model's own need: the kernel keeps its watermarks free.
+RECLAIM_MARGIN_GIB = 2
 # Run as root with the drop-in and the page count. A failed rebuild puts the drop-in back as it
 # was, so the next use rebuilds again rather than finding its value already saved.
 GPU_MEMORY_SCRIPT = r"""
@@ -542,6 +540,18 @@ def ports():
     if carrier and os.path.isdir(f"/sys/class/net/{dev}/device/infiniband"):
       found[dev] = [f"{a['local']}/{a['prefixlen']}" for a in link.get("addr_info", []) if a.get("family") == "inet"]
   return found
+def reclaim_files(size):
+  """Asks the kernel to reclaim size bytes of file pages from this user's cgroups, which hold
+  the models and their weights, through the memory.reclaim the user owns. swappiness=0 keeps it
+  to file pages, so no app is swapped into zram for it; an older kernel without that key refuses
+  the write, and nothing is reclaimed. Whether it reclaimed all of it."""
+  uid = os.getuid()
+  try:
+    with open(f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/memory.reclaim", "w") as file:
+      file.write(f"{int(size)} swappiness=0")
+    return True
+  except OSError:
+    return False
 def node():
   name = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True).stdout.strip()
   mem = {line.split(":")[0]: int(line.split()[1]) * 1024 for line in open("/proc/meminfo") if line.split()[1:2]}
@@ -2329,26 +2339,23 @@ def start_needs_gib(variant):
   return variant["peak_ram_gib"]
 
 
-def drop_page_cache(need_gib):
-  """Drops the page cache when the model needs memory only the cache holds: whether it did.
+def reclaim_page_cache(need_gib):
+  """Reclaims the page cache a start needs: the shortfall of what's free outside it, if any.
 
   MemAvailable counts clean cache as free, so fit already treats it as room, but the kernel hands
   it back only under pressure, page by page. With Omarchy's zram swap (vm.swappiness 150) that
   pressure compresses apps into zram before it drops the cache, and on unified NVIDIA memory
   (GB10, N1x) CUDA doesn't count it as reclaimable at all, so a model that fits can fail to load.
-  Dropping it first hands the model that memory whole. Dirty pages aren't synced to drop them
-  too: a sync could wait on every disk while start holds the lock, for little gain. Without the
-  passwordless rule nothing is dropped and the start goes ahead as before."""
+  Reclaiming it first hands the model that memory whole. Where the kernel can't, the start goes
+  ahead as before."""
   mem = meminfo()
-  if gib(mem.get("MemFree", 0) + mem.get("GPUReclaim", 0)) >= need_gib:
-    return False
-  try:
-    dropped = subprocess.run(DROP_CACHES, capture_output=True, timeout=60).returncode == 0
-  except (OSError, subprocess.TimeoutExpired):
-    return False
-  if dropped:
-    say("Dropped the page cache to make room for the model")
-  return dropped
+  short = need_gib + RECLAIM_MARGIN_GIB - gib(mem.get("MemFree", 0) + mem.get("GPUReclaim", 0))
+  if short <= 0:
+    return
+  scope = {}
+  exec(FABRIC_SIDE, scope)
+  if scope["reclaim_files"](short * 2**30):
+    say(f"Reclaimed {short:.1f} GiB of file cache for the model")
 
 
 def check_headroom(variant, gpu):
@@ -2360,9 +2367,8 @@ def check_headroom(variant, gpu):
   for _ in range(15):
     available, gpu_free = free_memory(gpu)
     if available >= start_needs_gib(variant) and gpu_free >= variant["peak_gpu_gib"]:
-      if drop_page_cache(start_needs_gib(variant)):
-        available, gpu_free = free_memory(gpu)
-      return available, gpu_free
+      reclaim_page_cache(start_needs_gib(variant))
+      return free_memory(gpu)
     time.sleep(1)
   running = [rid for rid in known_models() if unit_active(rid)]
   names = [(load_model(rid) or {}).get("recipe", {}).get("name", rid) for rid in running]
@@ -2464,9 +2470,10 @@ def peer_headroom(peer, variant):
       short=f"{NOT_ENOUGH_MEMORY} on {node['host']} (needs {need:g} GiB)",
     )
   # Rank 1 loads through CUDA too, so the peer's cache goes the same way, as best it can.
-  if gib(node.get("ram_free", 0)) < variant["peak_ram_gib"]:
+  short = variant["peak_ram_gib"] + RECLAIM_MARGIN_GIB - gib(node.get("ram_free", 0))
+  if short > 0:
     with contextlib.suppress(LocalError, ValueError):
-      pair_python(peer, f"subprocess.run({DROP_CACHES!r}, capture_output=True, timeout=60).returncode", timeout=70)
+      pair_python(peer, f"reclaim_files({int(short * 2**30)})", timeout=60)
   return available
 
 

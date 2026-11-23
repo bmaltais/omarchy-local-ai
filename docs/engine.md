@@ -95,7 +95,7 @@ An Intel GPU is integrated graphics on the `xe` kernel driver (Lunar Lake and ne
 `INTEL_FAMILIES` or else `intel-xe-<device id>`, addressing
 three quarters of RAM up to the kernel's `ttm.pages_limit`; `use` raises that limit as it does for a unified AMD GPU, so a model fits by the three quarters. Memory a GPU driver freed and still
 holds in its pool (`GPUReclaim` in `/proc/meminfo`) counts as free RAM: the next model loads into it.
-Clean page cache counts as free too (`MemAvailable`), and a start that needs more than is free outside it drops the cache first (`sudo -n /usr/bin/sysctl vm.drop_caches=3`, passwordless through Omarchy's `etc/sudoers.d/omarchy-drop-caches`), so the model gets that memory rather than the kernel compressing apps into zram or, on unified NVIDIA memory, CUDA failing to reclaim it. A paired start does the same on the peer. Without the rule the start goes ahead with the cache in place.
+Clean page cache counts as free too (`MemAvailable`). A start that needs more than is free outside it first asks the kernel to reclaim the shortfall, plus a 2 GiB margin, from the user's own cgroups: it writes `<bytes> swappiness=0` to `user@<uid>.service/memory.reclaim`, which the user owns, so no privilege is needed and only file pages go. The model then gets that memory rather than the kernel compressing apps into zram or, on unified NVIDIA memory, CUDA failing to reclaim it. A paired start does the same on the peer. Cache charged outside the user's cgroups (system services) stays. If the kernel refuses the write (an older one has no `swappiness=` key), the start goes ahead with the cache in place.
 Use, start and removal are serialized. Several models can run at once on distinct,
 stable loopback ports, beginning at 11435.
 
