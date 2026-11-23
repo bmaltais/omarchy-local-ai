@@ -1740,4 +1740,26 @@ with patch.object(a.urllib.request, "urlopen", side_effect=a.urllib.error.URLErr
 check("a failed warm-up leaves no marker behind", not a.warming("warm"))
 Path(a.warming_path("warm")).write_text("999999999\n")
 check("a marker whose process is gone holds nothing back", not a.warming("warm"))
+# An app holds a model while it runs; stop --unless-used leaves a held model, or one a tailnet
+# machine used lately, and stops the rest. The hold ends when the holder's input closes.
+holder = subprocess.Popen([sys.executable, "-I", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import agent_local as a; a.resolve_model = lambda rid: {'recipe_id': rid}; sys.exit(a.main(['hold', 'held']))", os.environ["ENGINE_ROOT"]],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+for _ in range(200):
+  if a.hold_exclusively("held", []) is False:
+    break
+  __import__("time").sleep(0.05)
+Path(a.clients_path()).write_text(json.dumps({"models": {"shared": 1}}))
+stopped = []
+def stop_unless_used(*rids):
+  with patch.object(a, "resolve_model", side_effect=lambda rid: {"recipe_id": rid}), patch.object(a, "running_models", return_value={"held", "shared", "idle"}), \
+       patch.object(a, "load_catalog", return_value={}), patch.object(a, "machine_profile", return_value={}), patch.object(a, "write_status"), \
+       patch.object(a, "evict_idle_weights"), patch.object(a, "stop_unit", side_effect=stopped.append):
+    return a.cmd_stop(["--unless-used", *rids])
+stop_unless_used()
+check("stop --unless-used stops only what no app holds and no tailnet machine uses", stopped == ["idle"], repr(stopped))
+holder.communicate(b"", timeout=10)
+stopped.clear()
+stop_unless_used("held", "shared")
+check("a hold ends when the holder's input closes", holder.returncode == 0 and stopped == ["held"], repr((holder.returncode, stopped)))
+os.unlink(a.clients_path())
 PY

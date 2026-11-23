@@ -4102,13 +4102,22 @@ def detach_update(rid, catalog, profile):
 
 def cmd_stop(argv):
   parser = argparse.ArgumentParser(prog="omarchy models stop")
-  parser.add_argument("recipe", nargs="?", help="the model to stop (default: every running one)")
+  parser.add_argument("recipes", nargs="*", metavar="recipe", help="the models to stop (default: every running one)")
+  parser.add_argument("--unless-used", action="store_true", help="leave running a model an app holds or a tailnet machine uses")
   args = parser.parse_args(argv)
   catalog = load_catalog()
   profile = machine_profile()
-  targets = [resolve_model(args.recipe)["recipe_id"]] if args.recipe else sorted(running_models())
+  targets = [resolve_model(rid)["recipe_id"] for rid in args.recipes] if args.recipes else sorted(running_models())
+  # A model held stays held through the stop: an app taking a hold meanwhile waits for it.
+  held = []
+  if args.unless_used:
+    kept = [rid for rid in targets if not hold_exclusively(rid, held)]
+    targets = [rid for rid in targets if rid not in kept]
+    for rid in kept:
+      say(f"{rid} is in use; leaving it running")
   if not targets:
-    say("No local model is running")
+    if not args.unless_used:
+      say("No local model is running")
     return 0
   # A model takes seconds to let go of its memory; the panel says so meanwhile.
   write_status(catalog, profile, {rid: "deactivating" for rid in targets})
@@ -4123,6 +4132,51 @@ def cmd_stop(argv):
   evict_idle_weights()
   write_status(catalog, profile)
   say(f"Stopped {', '.join(targets)}")
+  return 0
+
+
+# ---------------------------------------------------------------- holds
+#
+# An app using a model holds it: `hold` keeps a shared lock on the model's hold file until its
+# standard input closes, which it does when the app quits or dies, so a crashed app never keeps
+# a model running. `stop --unless-used` stops only what it can lock exclusively, and what no
+# tailnet machine has used lately.
+
+
+def hold_path(rid):
+  return os.path.join(state_dir(), "holds", rid)
+
+
+def hold_exclusively(rid, handles):
+  """Whether nothing uses the model: no app holds it, nor did a tailnet machine lately. The
+  exclusive lock that says so is kept in handles until the caller is done."""
+  try:
+    with open(clients_path()) as file:
+      if json.load(file).get("models", {}).get(rid, 0) > 0:
+        return False
+  except (OSError, ValueError):
+    pass
+  ensure_dir(os.path.dirname(hold_path(rid)))
+  handle = open(hold_path(rid), "a")
+  try:
+    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+  except BlockingIOError:
+    handle.close()
+    return False
+  handles.append(handle)
+  return True
+
+
+def cmd_hold(argv):
+  parser = argparse.ArgumentParser(prog="omarchy models hold", description="Hold models as in use until standard input closes, so stop --unless-used leaves them running")
+  parser.add_argument("recipes", nargs="+", metavar="recipe", help="the models to hold")
+  args = parser.parse_args(argv)
+  rids = [resolve_model(rid)["recipe_id"] for rid in args.recipes]
+  ensure_dir(os.path.join(state_dir(), "holds"))
+  handles = [open(hold_path(rid), "a") for rid in rids]
+  for handle in handles:
+    fcntl.flock(handle, fcntl.LOCK_SH)
+  sys.stdin.buffer.read()
   return 0
 
 
@@ -5731,6 +5785,7 @@ COMMANDS = {
   "status": cmd_status,
   "start": cmd_start,
   "stop": cmd_stop,
+  "hold": cmd_hold,
   "update": cmd_update,
   "remove": cmd_remove,
   "share": cmd_share,
@@ -5757,6 +5812,7 @@ SUMMARIES = {
   "status": "Show the models that are set up, and whether a better one is recommended",
   "start": "Start a model that's set up, the last one started by default",
   "stop": "Stop a model, or every running one",
+  "hold": "Hold models as in use until standard input closes",
   "update": "Update a model that's set up to the catalog's runtime, weights and settings",
   "remove": "Remove a model's weights, manifests and unused image",
   "share": "Share a model with the other machines on your tailnet, or stop with --off",
