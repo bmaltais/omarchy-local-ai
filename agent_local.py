@@ -5036,48 +5036,47 @@ def make_share_proxy(tracker, ports=None, shares=None):
       port = ports().get(rid)
       if not ID_RE.match(rid) or rid not in shares() or not port:
         return self._refuse(404)
-      # Held until the answer is through, so stop --unless-used leaves a model at work alone.
-      with holding([rid]):
-        return self._relay(rid, rest, port)
-
-    def _relay(self, rid, rest, port):
-      body, chunked = self._body()
-      headers = {name: value for name, value in self.headers.items() if name.lower() not in HOP_HEADERS and name.lower() != "host"}
-      upstream = http.client.HTTPConnection("127.0.0.1", port, timeout=600)
-      try:
-        upstream.request(self.command, "/" + rest, body=body, headers=headers, encode_chunked=chunked)
-        answer = upstream.getresponse()
-      except OSError:
-        upstream.close()
-        return self._refuse(502)
-      # Only a request the model accepted counts: a wrong key or a bad path doesn't.
-      if answer.status < 400:
-        tracker.saw(rid, proxy_client(self.headers, self.client_address[0]))
-      try:
-        self.send_response(answer.status, answer.reason)
-        for name, value in answer.getheaders():
-          if name.lower() not in HOP_HEADERS and name.lower() != "content-length":
-            self.send_header(name, value)
-        length = answer.getheader("Content-Length")
-        if self.command == "HEAD":
-          self.send_header("Content-Length", length or "0")
-          self.end_headers()
-        elif length is not None:
-          self.send_header("Content-Length", length)
-          self.end_headers()
-          while chunk := answer.read1(65536):
-            self.wfile.write(chunk)
-        else:
-          # A streamed reply (server-sent events) goes out chunk by chunk as it arrives.
-          self.send_header("Transfer-Encoding", "chunked")
-          self.end_headers()
-          while chunk := answer.read1(65536):
-            self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
-            self.wfile.flush()
-          self.wfile.write(b"0\r\n\r\n")
-        self.wfile.flush()
-      finally:
-        upstream.close()
+      with contextlib.ExitStack() as held:
+        body, chunked = self._body()
+        headers = {name: value for name, value in self.headers.items() if name.lower() not in HOP_HEADERS and name.lower() != "host"}
+        upstream = http.client.HTTPConnection("127.0.0.1", port, timeout=600)
+        try:
+          upstream.request(self.command, "/" + rest, body=body, headers=headers, encode_chunked=chunked)
+          # Held from once the request is in until the answer is through, so stop --unless-used
+          # leaves a model at work alone; an upload that never finishes holds nothing.
+          held.enter_context(holding([rid]))
+          answer = upstream.getresponse()
+        except OSError:
+          upstream.close()
+          return self._refuse(502)
+        # Only a request the model accepted counts: a wrong key or a bad path doesn't.
+        if answer.status < 400:
+          tracker.saw(rid, proxy_client(self.headers, self.client_address[0]))
+        try:
+          self.send_response(answer.status, answer.reason)
+          for name, value in answer.getheaders():
+            if name.lower() not in HOP_HEADERS and name.lower() != "content-length":
+              self.send_header(name, value)
+          length = answer.getheader("Content-Length")
+          if self.command == "HEAD":
+            self.send_header("Content-Length", length or "0")
+            self.end_headers()
+          elif length is not None:
+            self.send_header("Content-Length", length)
+            self.end_headers()
+            while chunk := answer.read1(65536):
+              self.wfile.write(chunk)
+          else:
+            # A streamed reply (server-sent events) goes out chunk by chunk as it arrives.
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            while chunk := answer.read1(65536):
+              self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+              self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+          self.wfile.flush()
+        finally:
+          upstream.close()
 
     do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_HEAD = _forward
 

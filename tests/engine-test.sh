@@ -1502,6 +1502,12 @@ for _ in range(100):
     break
   a.time.sleep(0.02)
 check("the proxy holds the model until the answer is through", working and not locked("shared"))
+import socket
+stalled = socket.create_connection(("127.0.0.1", proxy.server_address[1]))
+stalled.sendall(b"POST /shared/v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nhel")
+a.time.sleep(0.2)
+check("an upload that never finishes holds nothing", not locked("shared"))
+stalled.close()
 release.clear()
 release.set()
 status, body = ask("/shared/v1/chat/completions")
