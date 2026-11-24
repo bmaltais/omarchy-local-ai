@@ -1,0 +1,37 @@
+name = "Qwen3.6 35B-A3B"
+runtime = "llamacpp"
+vendor = "qwen"
+architecture = "moe"
+
+[[hardware]]
+gpu = "intel-arc-b390"
+ram_class = 64
+measured = "measurements/qwen3.6-35b-a3b-llamacpp-arc-b390-64.toml"
+
+# Unsloth's build that keeps the model's own multi-token-prediction head, which drafts the
+# tokens the model then checks: 46 tokens a second against 33 without, at no cost in accuracy.
+[[artifacts]]
+repo = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+revision = "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d"
+license = "apache-2.0"
+files = ["Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"]
+model = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+
+# Measured with a 32K-token prompt: about 27 GiB at peak, 25 GiB at load. The model's full
+# 262K context takes 30 GiB, all the kernel lets this GPU map of 64 GB.
+[[variant]]
+ctx = 131072
+peak_ram_gib = 30
+peak_gpu_gib = 27
+
+[sampling]
+temperature = 1.0
+top_p = 0.95
+top_k = 20
+
+# One slot, which multi-token prediction needs; it doesn't yet work beside a vision projector.
+# It drafts one token ahead: two is faster on a short prompt (49 against 46 tokens a second) but
+# no faster than none 32K tokens in (25 against 31). ngram-mod drafts text the model repeats
+# from its context, which is most of an edit.
+[server]
+args = ["--parallel", "1", "--spec-type", "draft-mtp,ngram-mod", "--spec-draft-n-max", "1", "--spec-draft-sampling", "probabilistic"]

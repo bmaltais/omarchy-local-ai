@@ -1,0 +1,292 @@
+name: Build runtime images
+
+# Builds every images/<name>/ a pull request changes, and on master also publishes it to
+# ghcr.io/omacom/omarchy-local-ai/<name>, tagged with the upstream version its Containerfile pins
+# and this workflow's run number. Publishing doesn't change what the catalog runs: the digest in
+# the run's summary still has to be pinned in the runtime, reviewed and measured (README,
+# "Build a runtime image").
+
+on:
+  pull_request:
+    paths:
+      - images/**
+      - .github/workflows/images.yml
+  push:
+    branches: [master]
+    paths:
+      - images/**
+      - .github/workflows/images.yml
+  workflow_dispatch:
+    inputs:
+      images:
+        description: Folders under images/ to build, separated by spaces, or "all"
+        default: all
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+      any: ${{ steps.pick.outputs.any }}
+      multiarch: ${{ steps.pick.outputs.multiarch }}
+      any_multiarch: ${{ steps.pick.outputs.any_multiarch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Pick the images to build
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          WANTED: ${{ inputs.images }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # Where each image runs decides the runner(s) it's built on; the check runs in the built image.
+          # Multi-arch images list two runners (amd64 arm64) and are merged into one manifest list on publish.
+          declare -A runner=(
+            [llamacpp]=ubuntu-latest [sdcpp]=ubuntu-latest [acestep]=ubuntu-latest [stable-audio-3-vulkan]=ubuntu-latest
+            [stable-audio-3]="ubuntu-latest ubuntu-24.04-arm"
+            [sdcpp-cuda]=ubuntu-24.04-arm [acestep-cuda]=ubuntu-24.04-arm [stable-audio-3-cuda]=ubuntu-24.04-arm [tensorfold]=ubuntu-24.04-arm
+            [tensorfold-dsv41]=ubuntu-24.04-arm [tensorfold-glm53]=ubuntu-24.04-arm [tensorfold-nemotron-bolt]=ubuntu-24.04-arm [llamacpp-hy4]=ubuntu-24.04-arm [inkling2-exl3]=ubuntu-24.04-arm
+            [tensorfold-x86]=ubuntu-latest
+          )
+          declare -A check=(
+            [llamacpp]="llama-server --version" [sdcpp]="command -v sd-server" [acestep]="command -v ace-server" [stable-audio-3-vulkan]="command -v sa3-server && sa3-server --help >/dev/null 2>&1"
+            [stable-audio-3]="command -v sa3-server && sa3-server --help >/dev/null && python3 -c 'import ai_edge_litert, numpy, sentencepiece' && command -v ffmpeg"
+            [sdcpp-cuda]="command -v sd-server" [acestep-cuda]="command -v ace-server" [stable-audio-3-cuda]="command -v sa3-server" [tensorfold]="command -v tensorfold-native"
+            [tensorfold-dsv41]="command -v tensorfold-native" [tensorfold-glm53]="command -v tensorfold-native"
+            [tensorfold-nemotron-bolt]="command -v tensorfold-native" [llamacpp-hy4]="command -v llama-server" [inkling2-exl3]="command -v serve && python3 -c 'import exllamav3, fastapi, transformers'"
+            [tensorfold-x86]="command -v tensorfold-native"
+          )
+          all=$(ls images)
+          case $EVENT in
+            workflow_dispatch) [[ $WANTED == "all" ]] && names=$all || names=$WANTED ;;
+            pull_request) changed=$(git diff --name-only "$BASE" HEAD) ;;
+            push) changed=$(git diff --name-only "$BEFORE" HEAD 2>/dev/null || echo .github/workflows/images.yml) ;;
+          esac
+          if [[ $EVENT != "workflow_dispatch" ]]; then
+            if grep -qx .github/workflows/images.yml <<<"$changed"; then
+              names=$all
+            else
+              names=$(sed -n 's#^images/\([^/]*\)/.*#\1#p' <<<"$changed" | sort -u)
+            fi
+          fi
+          picked=()
+          for name in $names; do
+            if [[ ! -d images/$name ]]; then
+              # A folder a change removed builds nothing; one asked for by name has to exist.
+              [[ $EVENT == "workflow_dispatch" ]] && { echo "::error::no images/$name"; exit 1; }
+              continue
+            fi
+            if [[ -z ${runner[$name]:-} ]]; then
+              echo "::error file=.github/workflows/images.yml::images/$name needs a runner and a check here"
+              exit 1
+            fi
+            picked+=("$name")
+          done
+          multi=()
+          matrix=$(for name in "${picked[@]}"; do
+            read -ra runners <<<"${runner[$name]}"
+            if (( ${#runners[@]} > 1 )); then
+              for r in "${runners[@]}"; do
+                [[ $r == *arm* ]] && arch=arm64 || arch=amd64
+                jq -cn --arg name "$name" --arg runner "$r" --arg check "${check[$name]}" --arg arch "$arch" '$ARGS.named'
+              done
+            else
+              jq -cn --arg name "$name" --arg runner "${runners[0]}" --arg check "${check[$name]}" --arg arch "" '$ARGS.named'
+            fi
+          done | jq -cs '{include: .}')
+          for name in "${picked[@]}"; do
+            read -ra runners <<<"${runner[$name]}"
+            (( ${#runners[@]} > 1 )) && multi+=("$name")
+          done
+          multiarch=$(for name in "${multi[@]}"; do
+            jq -cn --arg name "$name" '$ARGS.named'
+          done | jq -cs '{include: .}')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "any=$(( ${#picked[@]} > 0 ))" >> "$GITHUB_OUTPUT"
+          echo "multiarch=$multiarch" >> "$GITHUB_OUTPUT"
+          echo "any_multiarch=$(( ${#multi[@]} > 0 ))" >> "$GITHUB_OUTPUT"
+          echo "Building: ${picked[*]:-nothing}"
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.any == '1'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
+    concurrency:
+      group: image-${{ matrix.name }}-${{ matrix.arch || 'single' }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # The TensorFold images build on NVIDIA's ~20 GB PyTorch container.
+      - name: Make room
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache /usr/local/share/boost
+          df -h /
+
+      - name: Install podman
+        run: command -v podman || { sudo apt-get update && sudo apt-get install -y podman; }
+
+      # A pull request controls the Containerfile, so what it says reaches the shell only through
+      # environment variables, and the version only once it is a plain tag.
+      - name: Name the image
+        id: name
+        env:
+          NAME: ${{ matrix.name }}
+          RUN: ${{ github.run_number }}
+        run: |
+          file=images/$NAME/Containerfile
+          # llama.cpp's build tag, TensorFold's version, or the upstream commit, shortened.
+          for arg in BUILD TF_VERSION TF_REF COMMIT; do
+            version=$(sed -n "s/^ARG $arg=//p" "$file" | head -1)
+            [[ -n $version ]] && break
+          done
+          [[ $version =~ ^[0-9a-f]{40}$ ]] && version=${version:0:8}
+          if [[ ! $version =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+            echo "::error file=$file::pin the upstream in ARG BUILD, TF_VERSION, TF_REF or COMMIT, as letters, digits, dots, dashes and underscores"
+            exit 1
+          fi
+          echo "tag=ghcr.io/omacom/omarchy-local-ai/$NAME:$version-$RUN" >> "$GITHUB_OUTPUT"
+
+      # Docker format keeps a Containerfile's SHELL in the image, as the GLM build relies on.
+      - name: Build
+        env:
+          TAG: ${{ steps.name.outputs.tag }}
+          NAME: ${{ matrix.name }}
+          SOURCE: https://github.com/${{ github.repository }}
+          REVISION: ${{ github.sha }}
+        run: |
+          podman build --pull --format docker -t "$TAG" \
+            --label org.opencontainers.image.source="$SOURCE" \
+            --label org.opencontainers.image.revision="$REVISION" "images/$NAME"
+
+      - name: Check the server is there
+        env:
+          TAG: ${{ steps.name.outputs.tag }}
+          CHECK: ${{ matrix.check }}
+        run: podman run --rm --network none --entrypoint sh "$TAG" -c "$CHECK"
+
+      # The Inkling 2 server checks no key, so the image's Caddy is the only thing that does: with a
+      # stub in the server's place, it has to refuse no key and a wrong one, pass the right one under
+      # any Host (a shared model's requests carry the tailnet name), and listen on loopback only, as
+      # the engine binds a paired model's API on the host's network.
+      - name: Check Caddy refuses requests without the key
+        if: matrix.name == 'inkling2-exl3'
+        env:
+          TAG: ${{ steps.name.outputs.tag }}
+        run: |
+          podman run --rm --network none --entrypoint sh "$TAG" -c '
+            I2_API_KEY=right CADDY_HOST=127.0.0.1 CADDY_PORT=8080 CADDY_UPSTREAM=127.0.0.1:8081 \
+              caddy run --config /etc/caddy/Caddyfile --adapter caddyfile 2>/dev/null &
+            caddy respond --listen 127.0.0.1:8081 --body ok 2>/dev/null &
+            for _ in $(seq 20); do curl -s -o /dev/null http://127.0.0.1:8080/ && break; sleep 0.5; done
+            code() { curl -s -o /dev/null -w "%{http_code}" "$@" http://127.0.0.1:8080/v1/models; }
+            none=$(code); wrong=$(code -H "Authorization: Bearer wrong"); right=$(code -H "Authorization: Bearer right")
+            shared=$(code -H "Authorization: Bearer right" -H "Host: spark.example.ts.net")
+            bound=$(grep -h ":1F90 0*:0000 0A" /proc/net/tcp /proc/net/tcp6 | tr -s " " | cut -d " " -f 3 | tr "\n" " ")
+            echo "no key $none, wrong key $wrong, right key $right, another Host $shared, listening on $bound"
+            [ "$none" = 401 ] && [ "$wrong" = 401 ] && [ "$right" = 200 ] && [ "$shared" = 200 ] && [ "$bound" = "0100007F:1F90 " ]'
+
+      # The runner's own CPU may have AVX-512, so running the server here proves nothing about
+      # the laptops it ships to: its code must stop at AVX2.
+      - name: Check the server runs on any x86-64 with AVX2
+        if: matrix.name == 'sdcpp' || matrix.name == 'acestep' || matrix.name == 'stable-audio-3-vulkan'
+        env:
+          TAG: ${{ steps.name.outputs.tag }}
+          NAME: ${{ matrix.name }}
+        run: |
+          case "$NAME" in
+            sdcpp)                 server=sd-server ;;
+            acestep)               server=ace-server ;;
+            stable-audio-3-vulkan) server=sa3-server ;;
+          esac
+          container=$(podman create "$TAG")
+          podman cp "$container:/usr/bin/$server" "$RUNNER_TEMP/$server"
+          podman rm "$container"
+          if objdump -d "$RUNNER_TEMP/$server" | grep -q '%zmm'; then
+            echo "::error::$server uses AVX-512, which Intel laptops and older AMD machines don't have"
+            exit 1
+          fi
+
+      # The Vulkan images run on AMD and Intel GPUs alike, through Mesa's RADV and ANV.
+      - name: Check the image carries Mesa's AMD and Intel drivers
+        if: matrix.name == 'llamacpp' || matrix.name == 'sdcpp' || matrix.name == 'acestep' || matrix.name == 'stable-audio-3-vulkan'
+        env:
+          TAG: ${{ steps.name.outputs.tag }}
+        run: podman run --rm --network none --entrypoint ls "$TAG" /usr/share/vulkan/icd.d/radeon_icd.json /usr/share/vulkan/icd.d/intel_icd.json
+
+      - name: Publish
+        if: github.event_name != 'pull_request'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          TAG: ${{ steps.name.outputs.tag }}
+          NAME: ${{ matrix.name }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          echo "$TOKEN" | podman login ghcr.io -u "$ACTOR" --password-stdin
+          if [[ -n $ARCH ]]; then
+            podman push "$TAG" "docker://$TAG-$ARCH"
+          else
+            podman push --digestfile digest "$TAG"
+            image="ghcr.io/omacom/omarchy-local-ai/$NAME@$(cat digest)"
+            {
+              echo "Published \`$TAG\`. To run it, pin it in its runtime under \`runtimes/\`, then review and measure it:"
+              echo
+              echo '```toml'
+              echo "image = \"$image\""
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  manifest:
+    needs: [changes, build]
+    if: github.event_name != 'pull_request' && needs.changes.outputs.any_multiarch == '1'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.multiarch) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install podman
+        run: command -v podman || { sudo apt-get update && sudo apt-get install -y podman; }
+
+      - name: Publish multi-arch manifest
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          NAME: ${{ matrix.name }}
+          RUN: ${{ github.run_number }}
+        run: |
+          file=images/$NAME/Containerfile
+          for arg in BUILD TF_VERSION TF_REF COMMIT; do
+            version=$(sed -n "s/^ARG $arg=//p" "$file" | head -1)
+            [[ -n $version ]] && break
+          done
+          [[ $version =~ ^[0-9a-f]{40}$ ]] && version=${version:0:8}
+          tag="ghcr.io/omacom/omarchy-local-ai/$NAME:$version-$RUN"
+          echo "$TOKEN" | podman login ghcr.io -u "$ACTOR" --password-stdin
+          podman manifest create "$tag"
+          podman manifest add "$tag" "docker://$tag-amd64"
+          podman manifest add "$tag" "docker://$tag-arm64"
+          podman manifest push --all --digestfile digest "$tag" "docker://$tag"
+          image="ghcr.io/omacom/omarchy-local-ai/$NAME@$(cat digest)"
+          {
+            echo "Published multi-arch \`$tag\` (amd64 + arm64). To run it, pin it in its runtime under \`runtimes/\`, then review and measure it:"
+            echo
+            echo '```toml'
+            echo "image = \"$image\""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

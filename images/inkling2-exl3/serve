@@ -1,0 +1,24 @@
+#!/bin/bash
+# One rank of the two-Spark server: torchrun takes the rank, the world and the rendezvous from its PET_* variables.
+# The rank that serves the API (0) puts Caddy on the --host and --port it is given, checking the key, and the server
+# behind it on a Unix socket in the container's own /tmp, out of reach of the host's other accounts; the other rank
+# serves no HTTP. Every other argument goes to the server.
+set -euo pipefail
+host=127.0.0.1 port=18100 args=()
+while (($#)); do
+  case $1 in
+    --host) host=$2; shift 2 ;;
+    --port) port=$2; shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+export I2_UDS=/tmp/i2-api.sock
+if [ "${PET_NODE_RANK:-0}" = 0 ]; then
+  if [ -z "${I2_API_KEY:-}" ]; then
+    echo "serve: I2_API_KEY is empty" >&2
+    exit 1
+  fi
+  CADDY_HOST="$host" CADDY_PORT="$port" CADDY_UPSTREAM="unix/$I2_UDS" caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
+fi
+cd /opt/inkling2/engine
+exec torchrun --nproc_per_node 1 server/i2_server.py "${args[@]}"

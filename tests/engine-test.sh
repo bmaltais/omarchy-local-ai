@@ -18,9 +18,10 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import tempfile
 import tomllib
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 
 sys.path.insert(0, os.environ["ENGINE_ROOT"])
 import agent_local as a
@@ -54,7 +55,7 @@ runtime = {
   "image": "registry.example/test/server@sha256:" + "a" * 64,
   "tier": "third-party", "review": "reviews/server.toml", "port": 8080,
   "health": {"probe": ["curl", "http://localhost:8080/health"]},
-  "command": ["server"], "reserved": ["--host", "API_KEY"],
+  "command": ["server"], "reserved": ["--host", "API_KEY"], "gpus": ["amd"], "run": {"devices": ["render"]},
   "inputs": {"model": {"arg": "--model"}, "draft": {"arg": "--draft"},
              "ctx": {"arg": "--ctx"}, "alias": {"arg": "--alias"}, "key": {"env": "API_KEY"}},
 }
@@ -64,7 +65,7 @@ artifact = {"repo": "test/model", "revision": "b" * 40, "license": "mit",
 recipe = {"name": "Test model", "runtime": "server",
           "hardware": [{"gpu": "amd-strix-halo", "ram_class": 64, "measured": "measurements/model.toml"}],
           "artifacts": [artifact], "variant": [variant]}
-gpu = {"vendor": "amd", "family": "amd-strix-halo", "memory_gib": 48}
+gpu = {"vendor": "amd", "family": "amd-strix-halo", "memory_gib": 48, "render_node": "/dev/dri/renderD128"}
 profile = {"platform": "x86", "ram_class": 64, "ram_gib": 64, "gpus": [gpu]}
 entry = {"gpu": gpu["family"], "ram_class": 64, "recipes": ["model"]}
 check("valid recipe and runtime fixtures are accepted", not a.validate_runtime("server", runtime) and not a.validate_recipe("model", recipe, {"server": runtime}))
@@ -127,7 +128,8 @@ check("at the same context a larger machine takes the larger setup", a.resolve_b
 _, argv, _, _ = a.server_invocation(runtime, dict(recipe, server={"args": ["--vision"]}), picked, {"model": "w"}, "model")
 check("a variant's args follow the shared server args", argv[-3:] == ["--vision", "--parallel", "1"])
 for reason, bad in (("non-fitting variants", dict(recipe, variant=[dict(variant, peak_gpu_gib=100)])),
-                    ("unmeasured hardware", dict(recipe, hardware=[dict(recipe["hardware"][0], ram_class=128)]))):
+                    ("a runtime that doesn't run on this GPU", dict(recipe, runtime="nvidia-only"))):
+  catalog.runtimes["nvidia-only"] = dict(runtime, run={"devices": ["cdi-nvidia"]}, gpus=["nvidia"])
   catalog.recipes["first"] = bad
   catalog.best = {"class": [dict(entry, recipes=["first", "model"])]}
   result = a.resolve_best(catalog, profile, gpu)
@@ -147,12 +149,58 @@ rival = dict(gpu, family="amd-other")
 tied = dict(profile, gpus=[gpu, rival])
 raises("different GPU families tied for memory require selection", lambda: a.choose_gpu(tied), "--gpu")
 check("explicit GPU resolves a memory tie", a.choose_gpu(tied, "amd-other") == rival)
-with patch.object(a, "platform_name", return_value="aarch64-n1x"), patch.object(a, "amd_gpus", return_value=[]), patch.object(a, "meminfo", return_value={"MemTotal": 120 * 2**30}):
+with patch.object(a, "platform_name", return_value="aarch64-n1x"), patch.object(a, "amd_gpus", return_value=[]), patch.object(a, "intel_gpus", return_value=[]), patch.object(a, "meminfo", return_value={"MemTotal": 120 * 2**30}):
   n1x = a.machine_profile()
 check("an N1x laptop has a unified NVIDIA GPU of its own family", n1x["ram_class"] == 128 and [(g["vendor"], g["family"], g["memory_gib"]) for g in n1x["gpus"]] == [("nvidia", "nvidia-n1x", 120)])
 spark = dict(recipe, hardware=[{"gpu": "nvidia-gb10", "ram_class": 128, "measured": "measurements/model.toml"}])
-check("an N1x runs what a GB10 with the same memory runs", a.qualified(spark, n1x, n1x["gpus"][0]) and a.match_class({"class": [dict(entry, gpu="nvidia-gb10", ram_class=128)]}, n1x, n1x["gpus"][0]) is not None)
+check("an N1x runs what a GB10 with the same memory runs", a.runtime_supports(dict(runtime, gpus=["nvidia-gb10"]), n1x["gpus"][0]) and a.match_class({"class": [dict(entry, gpu="nvidia-gb10", ram_class=128)]}, n1x, n1x["gpus"][0]) is not None)
 check("best treats the N1x and GB10 as one class", any("same selectors" in e for e in a.validate_best({"class": [dict(entry, gpu="nvidia-gb10", ram_class=128, recipes=["spark"]), dict(entry, gpu="nvidia-n1x", ram_class=128, recipes=["spark"])]}, {"spark": spark})))
+# Families that share a class may each have a measurement: a machine shows its own family's.
+shared = Path(os.environ["HOME"]) / "shared-measurements"
+shared.mkdir()
+for family, speed in (("gb10", 60.0), ("n1x", 50.0)):
+  (shared / f"{family}.toml").write_text(f"[long]\ndecode_tok_s = {speed}\n")
+both_measured = {"hardware": [{"gpu": "nvidia-gb10", "ram_class": 128, "measured": "gb10.toml"}, {"gpu": "nvidia-n1x", "ram_class": 128, "measured": "n1x.toml"}]}
+speeds = [a.load_measurement(SimpleNamespace(root=str(shared)), recipe, {"ram_class": 128, "platform": "aarch64"}, {"family": family})["long"]["decode_tok_s"]
+          for recipe, family in ((both_measured, "nvidia-n1x"), (both_measured, "nvidia-gb10"), ({"hardware": both_measured["hardware"][:1]}, "nvidia-n1x"))]
+check("a machine shows its own family's measurement, else its class's", speeds == [50.0, 60.0, 60.0], str(speeds))
+# An Intel laptop: integrated graphics on the xe driver counts as a GPU.
+drm = Path(os.environ["HOME"]) / "intel-drm"
+for driver in ("xe", "i915"):
+  (drm / "drivers" / driver).mkdir(parents=True)
+for address, render, device in (("0000:00:02.0", "renderD128", "0xb080"), ("0000:03:00.0", "renderD129", "0xb080")):
+  (drm / "devices" / address).mkdir(parents=True)
+  (drm / "devices" / address / "vendor").write_text("0x8086\n")
+  (drm / "devices" / address / "device").write_text(device + "\n")
+  (drm / "devices" / address / "driver").symlink_to(drm / "drivers" / "xe")
+  (drm / render).mkdir()
+  (drm / render / "device").symlink_to(drm / "devices" / address)
+with patch.object(a, "TTM_PAGES_LIMIT", str(drm / "no-limit")):
+  arc = a.intel_gpus(64, str(drm))
+check("an Arc B390 is a unified GPU with three quarters of RAM, and a card beside it is not", [(g["family"], g["render_node"], g["memory_gib"]) for g in arc] == [("intel-arc-b390", "/dev/dri/renderD128", 48)])
+(drm / "pages-limit").write_text(str(32 * 2**30 // os.sysconf("SC_PAGE_SIZE")))
+with patch.object(a, "TTM_PAGES_LIMIT", str(drm / "pages-limit")):
+  check("the kernel's page limit caps what an Intel GPU addresses", a.intel_gpus(64, str(drm))[0]["memory_gib"] == 32)
+with patch.object(a, "meminfo", return_value={"MemAvailable": 20 * 2**30, "GPUReclaim": 28 * 2**30, "GPUActive": 2 * 2**30}):
+  check("memory a GPU driver pooled counts as free, and what it holds as used", a.free_memory(arc[0]) == (48, 46))
+(drm / "devices" / "0000:00:02.0" / "device").write_text("0x6420\n")
+with patch.object(a, "TTM_PAGES_LIMIT", str(drm / "no-limit")):
+  lunar = a.intel_gpus(64, str(drm))
+check("integrated graphics on xe with no name of its own is named by its device id", [g["family"] for g in lunar] == ["intel-xe-6420"])
+(drm / "devices" / "0000:00:02.0" / "driver").unlink()
+(drm / "devices" / "0000:00:02.0" / "driver").symlink_to(drm / "drivers" / "i915")
+check("integrated graphics on the older i915 driver is no GPU", a.intel_gpus(64, str(drm)) == [])
+check("a runtime runs on the vendors and classes it lists, and no other",
+      a.runtime_supports(dict(runtime, gpus=["intel"]), lunar[0]) and a.runtime_supports(dict(runtime, gpus=["intel-arc-b390"]), arc[0])
+      and not a.runtime_supports(dict(runtime, gpus=["intel-arc-b390"]), lunar[0]) and not a.runtime_supports(dict(runtime, gpus=["amd"]), arc[0]))
+check("a recipe nobody measured on this machine is available when its runtime runs here and it fits",
+      a.compatibility(SimpleNamespace(recipes={"model": recipe}, runtimes={"server": dict(runtime, gpus=["intel"])}), "model", profile, arc[0])[0] is not None)
+check("a runtime's gpus must be vendors or GPU classes its devices reach",
+      any("gpus" in e for e in a.validate_runtime("server", dict(runtime, gpus=[])))
+      and any("gpus" in e for e in a.validate_runtime("server", dict(runtime, gpus=["arm"])))
+      and any("can't be reached" in e for e in a.validate_runtime("server", dict(runtime, gpus=["nvidia-gb10"], run={"devices": ["render"]})))
+      and any("can't be reached" in e for e in a.validate_runtime("server", dict(runtime, gpus=["intel"], run={"devices": ["render", "kfd"]})))
+      and any("can't be reached" in e for e in a.validate_runtime("server", dict(runtime, gpus=["amd"], run={"devices": []}))))
 check("GPU peak exceeding capacity does not fit", not a.fits(dict(variant, peak_gpu_gib=49), profile, gpu)[0])
 check("RAM fit preserves desktop reserve", not a.fits(dict(variant, peak_ram_gib=57), profile, gpu)[0])
 with patch.object(a, "free_memory", return_value=(1, 1)), patch.object(a, "top_memory_users", return_value="browser (12 GiB), editor (4 GiB)"), patch.object(a.time, "sleep"):
@@ -160,16 +208,34 @@ with patch.object(a, "free_memory", return_value=(1, 1)), patch.object(a, "top_m
 
 # A 64 GB Strix Halo whose desktop holds 13 GiB: fit kept its reserve, so start needs only the peak.
 long_ctx = {"ctx": 262144, "peak_ram_gib": 42, "peak_gpu_gib": 40}
-with patch.object(a, "free_memory", return_value=(48.6, 54)), patch.object(a, "choose_gpu", return_value=dict(gpu, memory_gib=54)):
+with patch.object(a, "free_memory", return_value=(48.6, 54)), patch.object(a, "choose_gpu", return_value=dict(gpu, memory_gib=54)), patch.object(a, "reclaim_page_cache"):
   check("start counts the desktop's reserve once", a.check_headroom(long_ctx, dict(gpu, memory_gib=54)) == (48.6, 54)
         and a.start_fit({"variant": long_ctx}, profile) == (True, ""))
+# Its 48.6 GiB free is 20 not cached and 28.6 of cache: a 42 GiB start reclaims the 22 short and
+# a margin, file pages only, and a 16 GiB one leaves the cache alone.
+uid = os.getuid()
+with patch.object(a, "meminfo", return_value={"MemFree": 16 * 2**30, "GPUReclaim": 4 * 2**30}), patch("builtins.open", mock_open()) as opened:
+  a.reclaim_page_cache(16)
+  untouched = not opened.called
+  a.reclaim_page_cache(42)
+  check("a start reclaims only the file cache it is short of, from the user's own cgroup",
+        untouched and opened.call_args.args == (f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/memory.reclaim", "w")
+        and opened().write.call_args.args == (f"{24 * 2**30} swappiness=0",))
+with patch.object(a, "meminfo", return_value={"MemFree": 16 * 2**30}), patch("builtins.open", side_effect=OSError(22, "Invalid argument")):
+  check("a kernel that refuses the reclaim leaves the start as it was", a.reclaim_page_cache(42) is None)
 
 # A 64 GB Strix Halo on a stock kernel: the GPU maps half of RAM until use raises the cap.
 halo = {"vendor": "amd", "family": "amd-strix-halo", "memory_gib": 31.6, "unified": True}
-with patch.object(a, "platform_name", return_value="x86"), patch.object(a, "amd_gpus", return_value=[dict(halo)]), patch.object(a, "meminfo", return_value={"MemTotal": 62 * 2**30}):
+with patch.object(a, "platform_name", return_value="x86"), patch.object(a, "amd_gpus", return_value=[dict(halo)]), patch.object(a, "intel_gpus", return_value=[]), patch.object(a, "meminfo", return_value={"MemTotal": 62 * 2**30}):
   halo = a.machine_profile()["gpus"][0]
 needs_more = dict(variant, peak_gpu_gib=38, peak_ram_gib=38)
 check("a unified AMD GPU fits by the cap use can raise it to", halo["max_memory_gib"] == 54 and a.fits(needs_more, profile, halo)[0])
+# A 64 GB Arc B390 on a stock kernel: the page limit holds it to half of RAM, Mesa to three quarters.
+arc_b390 = {"vendor": "intel", "family": "intel-arc-b390", "memory_gib": 31.15, "unified": True}
+with patch.object(a, "platform_name", return_value="x86"), patch.object(a, "amd_gpus", return_value=[]), patch.object(a, "intel_gpus", return_value=[dict(arc_b390)]), patch.object(a, "meminfo", return_value={"MemTotal": 62.3 * 2**30}):
+  arc_b390 = a.machine_profile()["gpus"][0]
+check("an Intel GPU fits by the three quarters Mesa lets it address once use raises the cap", abs(arc_b390["max_memory_gib"] - 46.7) < 0.1 and a.fits(needs_more, profile, arc_b390)[0]
+      and not a.fits(dict(needs_more, peak_gpu_gib=48), profile, arc_b390)[0])
 check("a GPU with VRAM of its own fits only by what it has", not a.fits(needs_more, profile, dict(halo, max_memory_gib=a.gpu_memory_ceiling_gib(dict(halo, unified=False), 62)))[0])
 page = os.sysconf("SC_PAGE_SIZE")
 with patch.object(a, "pending_pages_limit", return_value=54 * 2**30 // page), patch.object(a, "_read", return_value=str(31 * 2**30 // page)), patch.object(a, "choose_gpu", return_value=halo):
@@ -178,6 +244,47 @@ with patch.object(a, "pending_pages_limit", return_value=54 * 2**30 // page), pa
 with patch.object(a, "pending_pages_limit", return_value=0), patch.object(a, "_read", return_value=str(31 * 2**30 // page)), patch.object(a, "choose_gpu", return_value=halo):
   raises("with no raise waiting, use is named instead of a reboot", lambda: a.check_headroom(needs_more, halo), "use raises its memory limit")
   check("and the panel isn't told a reboot would help", a.start_fit({"variant": needs_more}, profile) == (False, a.GPU_TOO_SMALL))
+
+# How long a clip a video model makes: MiniMax H3's own line, 38 GiB at 56 frames and 0.155 a frame more.
+h3 = {"fps": 24, "max_seconds": 15, "reference_frames": 56, "gib_per_frame": 0.155}
+check("a 64 GB Strix Halo's 54 GiB makes up to 6 s, not 10", a.clip_seconds(h3, 38, 54) == 6)
+check("a GPU with room for all of it makes the model's longest", a.clip_seconds(h3, 38, 280) == 15)
+check("a GPU without room for a second makes none", a.clip_seconds(h3, 38, 30) == 0)
+check("a recipe's download size is checked", all(any(".download_gib" in e for e in a.validate_recipe("v", {"kind": "image", "runtime": "x", "download_gib": size}, {}))
+                                                  for size in (0, float("nan"), float("inf"))))
+check("a recipe's clip table is checked", any(".video.gib_per_frame" in e for e in a.validate_recipe("v", {"kind": "video", "runtime": "x", "video": dict(h3, gib_per_frame=0)}, {}))
+      and any(".video:" in e for e in a.validate_recipe("t", {"runtime": "x", "video": h3}, {})))
+catalog_h3 = SimpleNamespace(recipes={"h3": {"kind": "video", "video": h3}})
+record = {"models": {"h3": {"kind": "video", "unit": "active"}, "klein": {"kind": "image", "unit": "active"}}}
+manifests = {"h3": {"variant": {"peak_gpu_gib": 38, "peak_ram_gib": 38}}, "klein": {"variant": {"peak_gpu_gib": 12, "peak_ram_gib": 12}}}
+with patch.object(a, "load_model", side_effect=manifests.get), patch.object(a, "choose_gpu", return_value=dict(gpu, memory_gib=54)):
+  a.add_clip_lengths(record, catalog_h3, profile)
+check("another running model's peak comes off the clip's room", record["models"]["h3"]["max_seconds"] == 3 and "max_seconds" not in record["models"]["klein"])
+record = {"models": {"h3": {"kind": "video", "unit": "active"}, "klein": {"kind": "image", "unit": "deactivating"}}}
+with patch.object(a, "load_model", side_effect=manifests.get), patch.object(a, "choose_gpu", return_value=dict(gpu, memory_gib=54)):
+  a.add_clip_lengths(record, catalog_h3, profile)
+check("a model still stopping keeps its memory", record["models"]["h3"]["max_seconds"] == 3)
+record = {"models": {"h3": {"kind": "video", "unit": "active"}, "klein": {"kind": "image", "unit": "active"}}}
+cards = {"amd-a": dict(gpu, family="amd-a", memory_gib=54), "amd-b": dict(gpu, family="amd-b", memory_gib=24)}
+split = {"h3": {"gpu": "amd-a", "variant": {"peak_gpu_gib": 38, "peak_ram_gib": 38}}, "klein": {"gpu": "amd-b", "variant": {"peak_gpu_gib": 12, "peak_ram_gib": 12}}}
+with patch.object(a, "load_model", side_effect=split.get), patch.object(a, "choose_gpu", side_effect=lambda profile, family=None: cards[family]):
+  a.add_clip_lengths(record, catalog_h3, profile)
+check("a model on another GPU leaves the clip's room alone", record["models"]["h3"]["max_seconds"] == 6)
+record = {"models": {"h3": {"kind": "video", "unit": "active"}, "big": {"kind": "text", "unit": "active"}}}
+spark = {"nvidia-gb10": dict(gpu, family="nvidia-gb10", memory_gib=120), "nvidia-gb10-pair": dict(gpu, family="nvidia-gb10-pair", nodes=2, memory_gib=120)}
+paired = {"h3": {"gpu": "nvidia-gb10", "variant": {"peak_gpu_gib": 46, "peak_ram_gib": 46}}, "big": {"gpu": "nvidia-gb10-pair", "variant": {"peak_gpu_gib": 70, "peak_ram_gib": 70}}}
+with patch.object(a, "load_model", side_effect=paired.get), patch.object(a, "choose_gpu", side_effect=lambda profile, family=None: spark[family]):
+  a.add_clip_lengths(record, catalog_h3, profile)
+check("a paired model on linked Sparks shares the clip's GPU", record["models"]["h3"]["max_seconds"] == 3)
+record = {"models": {"h3": {"kind": "video", "unit": "active"}, "klein": {"kind": "image", "unit": "installing"}}}
+with patch.object(a, "load_model", side_effect={"h3": manifests["h3"]}.get), patch.object(a, "choose_gpu", return_value=dict(gpu, memory_gib=54)):
+  a.add_clip_lengths(record, catalog_h3, profile, pending={"klein": manifests["klein"]})
+check("a model being set up holds its memory before its setup is saved", record["models"]["h3"]["max_seconds"] == 3)
+record = {"models": {"h3": {"kind": "video", "unit": "active"}, "qwen": {"kind": "text", "unit": "active"}}}
+unified = {"h3": {"variant": {"peak_gpu_gib": 46, "peak_ram_gib": 46}}, "qwen": {"variant": {"peak_gpu_gib": 30, "peak_ram_gib": 40}}}
+with patch.object(a, "load_model", side_effect=unified.get), patch.object(a, "choose_gpu", return_value=dict(gpu, family="nvidia-gb10", unified=True, memory_gib=120)):
+  a.add_clip_lengths(record, catalog_h3, dict(profile, ram_gib=120))
+check("a GPU sharing RAM leaves room for the desktop and the other models' RAM", record["models"]["h3"]["max_seconds"] == 9)
 
 # The root script against a limine-mkinitcpio that fails a kernel and still exits 0, as it does.
 fake = Path(os.environ["HOME"]) / "fake-limine"
@@ -281,6 +388,7 @@ rt["inputs"]["alias"] = {"env": "MODEL_ALIAS"}
 rt["health"]["probe"] = ["probe", hostile]
 roles = {"model": hostile}
 text = a.render_container("model", changed, rt, variant, roles, gpu, "a" * 16)
+check("unit stops with graphical-session without blocking compositor teardown", "PartOf=graphical-session.target\n" in text and "After=graphical-session.target\n" not in text)
 check("server args escape systemd substitutions, quotes and backslashes", '"50%% $$HOME \\"quoted space\\" \\\\tail"' in text)
 check("probe escapes substitutions while retaining JSON argv", "HealthCmd=" + json.dumps(["probe", hostile]).replace("%", "%%").replace("$", "$$") in text)
 # Map model through env to pass the same hostile value through Environment=.
@@ -311,9 +419,6 @@ vgpu, rgpu = found[0], {"vendor": "nvidia", "family": "nvidia-gb10", "unified": 
 vprof = {"platform": "x86", "ram_class": 96, "ram_gib": 78, "gpus": [vgpu]}
 check("a discrete GPU is matched on VRAM, a unified one on RAM", a.memory_class(vprof, vgpu) == 24 and a.memory_class(vprof, rgpu) == 96)
 vrecipe = {"hardware": [{"gpu": "nvidia-rtx3090", "vram_class": 24}]}
-check("a recipe measured at 24 GB VRAM qualifies on a 3090 whatever the RAM", a.qualified(vrecipe, vprof, vgpu) and a.qualified(vrecipe, dict(vprof, ram_class=32), vgpu))
-check("a recipe measured at 16 GB VRAM doesn't qualify on a 24 GB card", not a.qualified({"hardware": [{"gpu": "nvidia-rtx3090", "vram_class": 16}]}, vprof, vgpu))
-check("a RAM-class entry doesn't qualify a discrete GPU", not a.qualified({"hardware": [{"gpu": "nvidia-rtx3090", "ram_class": 96}]}, vprof, vgpu))
 check("a hardware entry with both classes is refused", bool(a.class_errors({"gpu": "x", "ram_class": 64, "vram_class": 24}, "w")))
 check("a hardware entry with no class is refused", bool(a.class_errors({"gpu": "x"}, "w")))
 check("a hardware entry with a vram_class is accepted", not a.class_errors({"gpu": "x", "vram_class": 24}, "w"))
@@ -327,6 +432,11 @@ real = a.load_catalog()
 rtx = dict(found[0])
 rprof = {"platform": "x86", "ram_class": 96, "ram_gib": 78, "gpus": [rtx]}
 check("best on a 3090 is the Lightning recipe", a.resolve_best(real, rprof, rtx)[0] == "nemotron-3.5-lightning-tensorfold")
+lightning = real.recipes["nemotron-3.5-lightning-tensorfold"]
+check("a 3090's speeds come from the measurement at its VRAM class, whatever the RAM",
+      a.load_measurement(real, lightning, rprof, rtx) and a.load_measurement(real, lightning, dict(rprof, ram_class=32), rtx))
+check("a 16 GB card has no 24 GB measurement", not a.load_measurement(real, lightning, rprof, dict(rtx, vram_class=16)))
+check("a RAM-class entry isn't a discrete GPU's measurement", not a.load_measurement(real, {"hardware": [dict(h, vram_class=None, ram_class=96) for h in lightning["hardware"]]}, rprof, rtx))
 positional_rt = copy.deepcopy(runtime)
 positional_rt["command"] = ["server", "serve"]
 positional_rt["inputs"]["model"] = {"positional": True}
@@ -377,10 +487,10 @@ else:
 # binds its API to loopback through flags it reserves, and leaves NCCL settings to the engine.
 pair_rt = copy.deepcopy(runtime)
 pair_rt.update(command=["server", "serve"], listen={"host": "--host", "port": "--port"}, reserved=["--host", "--port", "API_KEY"],
-               run={"devices": ["cdi-nvidia", "infiniband"], "network": "fabric", "memlock": "unlimited"},
+               run={"devices": ["cdi-nvidia", "infiniband"], "network": "fabric", "memlock": "unlimited"}, gpus=["nvidia-gb10-pair"],
                health={"probe": ["curl", "http://127.0.0.1:@PORT@/health"]},
-               pair={"nodes": 2, "master_port": 29620, "state": "/state",
-                     "env": {"NCCL_COMM_ID": "@MASTER_ADDR@:@MASTER_PORT@", "TF_RANK": "@RANK@"}})
+               pair={"nodes": 2, "master_port": 29620, "prepare": ["prep", "@RANK@", "@WORLD@"], "worker": ["lanes", "@RANK@", "@MASTER_ADDR@"],
+                     "env": {"TF_GID": "@GID_INDEX@"}, "head_env": {"TF_MASTER": "@MASTER_ADDR@"}})
 check("a paired runtime fixture is accepted", not a.validate_runtime("pair", pair_rt), "\n".join(a.validate_runtime("pair", pair_rt)))
 for name, mutate, fragment in (
   ("host network without a pair", lambda r: r.pop("pair"), "only for runtimes with a [pair]"),
@@ -390,7 +500,7 @@ for name, mutate, fragment in (
   ("unreserved bind flags", lambda r: r.update(reserved=["API_KEY"]), "must reserve"),
   ("NCCL settings in the runtime", lambda r: r["pair"]["env"].update(NCCL_IB_HCA="mlx5_0"), "NCCL_"),
   ("three nodes", lambda r: r["pair"].update(nodes=3), "only 2"),
-  ("no state path", lambda r: r["pair"].pop("state"), "pair.state"),
+  ("a served folder outside /prepared", lambda r: r["pair"].update(model="/prepared/../etc"), "under /prepared"),
   ("a state path over the models", lambda r: r["pair"].update(state="/models"), "pair.state"),
   ("the link's NCCL interface", lambda r: r["pair"]["env"].update(NCCL_SOCKET_IFNAME="eth0"), "NCCL_SOCKET_IFNAME"),
 ):
@@ -406,7 +516,7 @@ single = dict(recipe, hardware=[{"gpu": "nvidia-gb10", "ram_class": 128, "measur
 paired = dict(recipe, hardware=[{"gpu": "nvidia-gb10-pair", "ram_class": 128, "measured": "m.toml"}], runtime="pair",
               variant=[{"ctx": 4096, "peak_ram_gib": 104, "peak_gpu_gib": 104}])
 check("a pair machine runs single-node recipes on its own GPU", a.recipe_gpu(pair_profile, single)["family"] == "nvidia-gb10" and a.recipe_gpu(pair_profile, paired)["family"] == "nvidia-gb10-pair")
-nv_rt = dict(runtime, run={"devices": ["cdi-nvidia"]})
+nv_rt = dict(runtime, run={"devices": ["cdi-nvidia"]}, gpus=["nvidia-gb10"])
 pair_catalog = SimpleNamespace(recipes={"single": single, "paired": paired}, runtimes={"server": nv_rt, "pair": pair_rt},
                                best={"class": [{"gpu": "nvidia-gb10", "ram_class": 128, "recipes": ["single"]},
                                                {"gpu": "nvidia-gb10-pair", "ram_class": 128, "recipes": ["paired"]}]})
@@ -419,22 +529,71 @@ pair_text = a.render_container("paired", paired, pair_rt, paired["variant"][0], 
 pair_port = a.port_for("paired")
 check("the pair unit shares the host network and publishes nothing", "Network=host" in pair_text and "PublishPort" not in pair_text)
 check("the pair unit binds its API to loopback on the model's port", f'"--host" "127.0.0.1" "--port" "{pair_port}"' in pair_text and f"127.0.0.1:{pair_port}/health" in pair_text)
-check("the pair unit mounts rank 0's state folder writable and reads the link from its environment file", f"models/paired/{'b' * 16}.rank0:/state\n" in pair_text and "EnvironmentFile=%h/.local/state/omarchy/agent-local/pair/paired.env" in pair_text)
-check("the pair unit starts and stops rank 1 with itself", "ExecStartPre=/usr/bin/env omarchy-agent-local link-worker start paired" in pair_text and "ExecStopPost=-/usr/bin/env omarchy-agent-local link-worker stop paired" in pair_text)
-_, rank_argv, _, _ = a.head_argv(pair_rt, paired, paired["variant"][0], {"model": "model"}, "paired")
-check("both ranks run the runtime's command, bound to loopback", rank_argv[-4:] == ["--host", "127.0.0.1", "--port", str(a.port_for("paired"))] and rank_argv[:2] == ["server", "serve"])
+check("the pair unit mounts rank 0's inputs and reads the link from its environment file", f"models/paired/{a.rank_folder('b' * 16, 0, pair_rt)}:/prepared:ro" in pair_text and "EnvironmentFile=%h/.local/state/omarchy/agent-local/pair/paired.env" in pair_text)
+engine = a._quote(a.ENGINE)
+check("the pair unit starts and stops rank 1 with itself, run by the engine's own path",
+      f"ExecStartPre={engine} link-worker start paired" in pair_text and f"ExecStopPost=-{engine} link-worker stop paired" in pair_text
+      and a.ENGINE.startswith("/") and os.path.basename(a.ENGINE) == "omarchy-local-ai", pair_text)
+check("no unit hook goes through the PATH", "/usr/bin/env" not in pair_text and f"ExecStartPost=-{engine} status --write --started paired" in pair_text)
+# Units an older engine wrote reach it through Omarchy's wrapper on the PATH, or by another engine's
+# path, such as a checkout's; refresh and start point them at the engine running.
+a.write_atomic(a.models_dir() + "/paired.json", "{}")
+for old in ("/usr/bin/env omarchy-models", "/usr/bin/env omarchy-agent-local", '"/home/me/src/omarchy local ai/omarchy-local-ai"'):
+  a.write_atomic(a.quadlet_path("paired"), pair_text.replace(f"{engine} ", f"{old} "))
+  with patch.object(a, "systemctl") as reloaded:
+    first = a.repair_unit_hooks()
+    second = a.repair_unit_hooks()
+  check(f"an older unit's hooks through {old} are pointed at this engine once, and the rest left as it was",
+        first == ["paired"] and second == [] and a._read(a.quadlet_path("paired")) == pair_text.strip() and reloaded.call_count == 1, repr((first, second)))
+# Older units also carried After=graphical-session.target; repair drops it once without altering anything else.
+a.write_atomic(a.quadlet_path("paired"), pair_text.replace("PartOf=graphical-session.target\n", "PartOf=graphical-session.target\nAfter=graphical-session.target\n", 1))
+with patch.object(a, "systemctl") as reloaded:
+  first = a.repair_unit_hooks()
+  second = a.repair_unit_hooks()
+check("an older unit's After=graphical-session.target ordering is stripped once",
+      first == ["paired"] and second == [] and a._read(a.quadlet_path("paired")) == pair_text.strip() and reloaded.call_count == 1, repr((first, second)))
+# Under the lock: refresh leaves the units alone while another command holds it, as an update may be
+# replacing one, and repairs them once it's free.
+a.write_atomic(a.quadlet_path("paired"), pair_text.replace(f"{engine} ", "/usr/bin/env omarchy-models "))
+import fcntl
+holder = open(os.path.join(a.state_dir(), "lock"), "w")
+fcntl.flock(holder, fcntl.LOCK_EX)
+try:
+  a.repair_unit_hooks(wait=False)
+  busy = False
+except a.LockBusy:
+  busy = True
+check("the repair doesn't wait for a held lock when told not to", busy)
+untouched = "omarchy-models" in a._read(a.quadlet_path("paired")) and a.Lock.held == 0
+fcntl.flock(holder, fcntl.LOCK_UN)
+holder.close()
+with patch.object(a, "systemctl"):
+  freed = a.repair_unit_hooks(wait=False)
+check("while the lock is held it writes nothing; once free it repairs", untouched and freed == ["paired"] and a._read(a.quadlet_path("paired")) == pair_text.strip())
+os.unlink(a.quadlet_path("paired"))
+os.unlink(a.models_dir() + "/paired.json")
+check("a paired runtime may serve its prepared folder", '"--model" "/prepared/model"' in a.render_container("paired", paired, dict(pair_rt, pair=dict(pair_rt["pair"], model="/prepared/model")), paired["variant"][0], {"model": "model"}, pair_gpu, "b" * 16))
+same_rt = copy.deepcopy(pair_rt)
+for key in ("worker", "prepare"):
+  same_rt["pair"].pop(key)
+same_rt["pair"].update(state="/state", env={"NCCL_COMM_ID": "@MASTER_ADDR@:@MASTER_PORT@", "TF_RANK": "@RANK@"})
+check("a paired runtime may run the head's command on both ranks, with its own NCCL settings", not a.validate_runtime("same", same_rt), "\n".join(a.validate_runtime("same", same_rt)))
+same_text = a.render_container("paired", paired, same_rt, paired["variant"][0], {"model": "model"}, pair_gpu, "b" * 16)
+check("a state path mounts the rank folder writable", f"models/paired/{'b' * 16}.rank0:/state\n" in same_text)
+_, same_argv, _, _ = a.head_argv(same_rt, paired, paired["variant"][0], {"model": "model"}, "paired")
+check("rank 1's default command is the head's, bound to loopback", same_argv[-4:] == ["--host", "127.0.0.1", "--port", str(a.port_for("paired"))] and same_argv[:2] == ["server", "serve"])
 # Each rank gets its own link settings, and rank 1 the head's command inside the same restrictions.
-setup = {"schema": 1, "recipe_id": "paired", "runtime": pair_rt, "recipe": paired, "variant": paired["variant"][0], "roles": {"model": "model"},
+setup = {"schema": 1, "recipe_id": "paired", "runtime": same_rt, "recipe": paired, "variant": paired["variant"][0], "roles": {"model": "model"},
          "fileset": "e" * 16, "pair": {"peer": "bob@10.99.1.2", "host": "spark2", "home": "/home/bob", "image_id": "f" * 64}}
 a.write_pair_setup(setup)
 here = {"addr": "10.99.1.1", "dev": "enp1", "hcas": ["rocep1", "roceP2"], "gid": "5"}
 there = {"addr": "10.99.1.2", "dev": "enp1", "hcas": ["rocep1", "roceP2"], "gid": "3"}
-with patch.object(a, "pair_link", return_value=(here, there)), patch.object(a, "peer_headroom") as headroom, patch.object(a, "pair_ssh") as ssh, patch.object(a, "pair_limits") as limits:
+with patch.object(a, "pair_link", return_value=(here, there)), patch.object(a, "peer_headroom") as headroom, patch.object(a, "pair_ssh") as ssh, patch.object(a, "pair_limits") as limits, patch.object(a, "pair_python"):
   a.pair_worker_start("paired")
 head_env = dict(line.split("=", 1) for line in Path(a.pair_env_path("paired")).read_text().splitlines())
 worker = shlex.split(ssh.call_args.args[1])
 worker_env = dict(worker[i + 1].split("=", 1) for i, word in enumerate(worker) if word == "-e")
-check("rank 0's environment is rank 0's side of the link", head_env == {"NCCL_COMM_ID": "10.99.1.1:29620", "TF_RANK": "0", "NCCL_SOCKET_IFNAME": "enp1", "NCCL_IB_HCA": "rocep1,roceP2", "NCCL_IB_GID_INDEX": "5"}, repr(head_env))
+check("rank 0's environment is rank 0's side of the link", head_env == {"NCCL_COMM_ID": "10.99.1.1:29620", "TF_RANK": "0", "TF_MASTER": "10.99.1.1", "NCCL_SOCKET_IFNAME": "enp1", "NCCL_IB_HCA": "rocep1,roceP2", "NCCL_IB_GID_INDEX": "5"}, repr(head_env))
 check("rank 1's environment is rank 1's side, same rendezvous", worker_env["TF_RANK"] == "1" and worker_env["NCCL_COMM_ID"] == "10.99.1.1:29620" and worker_env["NCCL_IB_GID_INDEX"] == "3" and "API_KEY" not in worker_env, repr(worker_env))
 check("rank 1 starts on the peer as its user, with the head's command and the same restrictions",
       ssh.call_args.args[0] == "bob@10.99.1.2" and headroom.called
@@ -452,11 +611,58 @@ def fake_run(argv, **kwargs):
 manifest = {"fileset": "e" * 16}
 with patch.object(a.subprocess, "run", side_effect=fake_run), patch.object(a.subprocess, "Popen") as save, \
      patch.object(a, "pair_ssh", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as ssh, patch.object(a, "load_installing", return_value=None):
-  a.pair_setup("paired", manifest, pair_rt, {"peer": "bob@10.99.1.2", "host": "spark2", "home": "/home/bob"})
+  a.pair_setup("paired", manifest, same_rt, {"peer": "bob@10.99.1.2", "host": "spark2", "home": "/home/bob"})
 rsync = next(argv for argv in ran if argv[0] == "rsync")
 check("setup records the peer and the image by ID", manifest["pair"] == {"peer": "bob@10.99.1.2", "host": "spark2", "home": "/home/bob", "image_id": "f" * 64})
 check("setup copies the file set to the peer, not an image it already has", not save.called and rsync[-1] == f"bob@10.99.1.2:/home/bob/.local/share/omarchy/agent-local/models/paired/{'e' * 16}/")
 check("setup makes both ranks' state folders", Path(a.rank_dir("paired", "e" * 16, 0)).is_dir() and any(f"{'e' * 16}.rank1" in call.args[1] for call in ssh.call_args_list))
+# Prepared files are a generation per image and prepare command, so an update never rewrites the running setup's.
+updated = dict(pair_rt, image=pair_rt["image"].replace("a" * 64, "b" * 64))
+check("a runtime update prepares into its own generation", a.rank_folder("e" * 16, 0, pair_rt) != a.rank_folder("e" * 16, 0, updated) and a.rank_folder("e" * 16, 0, same_rt) == "e" * 16 + ".rank0")
+base = Path(a.data_dir(), "models", "gen")
+old_gen, new_gen = a.rank_folder("e" * 16, 0, pair_rt), a.rank_folder("e" * 16, 0, updated)
+for name in ("e" * 16, old_gen, new_gen):
+  (base / name).mkdir(parents=True, exist_ok=True)
+with patch.object(a, "load_model", return_value={"runtime": updated}):
+  a.prune_filesets("gen", "e" * 16)
+check("pruning keeps only the committed setup's generation", sorted(p.name for p in base.iterdir()) == sorted(["e" * 16, new_gen]))
+# Prepare runs once per rank, without network, and a failure stops the setup.
+ran = []
+def fake_prepare(argv, **kwargs):
+  ran.append(argv)
+  return SimpleNamespace(returncode=0, stdout="f" * 64 + "\n", stderr="")
+with patch.object(a.subprocess, "run", side_effect=fake_prepare), patch.object(a.subprocess, "Popen"), \
+     patch.object(a, "pair_ssh", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")), patch.object(a, "load_installing", return_value=None):
+  a.pair_setup("paired", {"fileset": "e" * 16}, pair_rt, {"peer": "10.99.1.2", "host": "spark2", "home": "/home/bob"})
+prepares = [argv for argv in ran if any(word == "prep" or " prep " in word for word in argv)]
+check("prepare runs for rank 0 here and rank 1 on the peer, without network",
+      len(prepares) == 2 and prepares[0][-3:] == ["prep", "0", "2"] and "none" in prepares[0]
+      and "prep 1 2" in " ".join(prepares[1]) and "--network none" in " ".join(prepares[1]), repr(prepares))
+with patch.object(a.subprocess, "run", side_effect=lambda argv, **k: SimpleNamespace(returncode=1 if "prep" in argv else 0, stdout="f" * 64, stderr="")), \
+     patch.object(a, "pair_ssh", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")), patch.object(a, "load_installing", return_value=None):
+  raises("a failed prepare stops the setup", lambda: a.pair_setup("paired", {"fileset": "e" * 16}, pair_rt, {"peer": "10.99.1.2", "host": "spark2", "home": "/home/bob"}), "Preparing rank 0")
+# Disk for the prepared files is checked on both Sparks before anything is written, and
+# prepare containers carry names remove can stop.
+big = dict(pair_rt, pair=dict(pair_rt["pair"], prepared_gib=100))
+# A served model folder links into /models, which only resolves inside the container.
+served = Path(a.rank_dir("paired", "e" * 16, 0, runtime=big), "model")
+served.mkdir(parents=True, exist_ok=True)
+(served / "config.json").unlink(missing_ok=True)
+(served / "config.json").symlink_to("/models/model/config.json")
+ran.clear()
+with patch.object(a.subprocess, "run", side_effect=fake_prepare), patch.object(a, "load_installing", return_value=None), \
+     patch.object(a.shutil, "disk_usage", return_value=SimpleNamespace(free=500 * 2**30)), \
+     patch.object(a, "pair_ssh", return_value=SimpleNamespace(returncode=0, stdout="%d\n0\n" % (50 * 2**30), stderr="")) as disk:
+  raises("a peer without room for the files and prepared inputs stops setup first", lambda: a.pair_setup("paired", {"fileset": "e" * 16, "files": [{"size": 10 * 2**30}]}, big, {"peer": "10.99.1.2", "host": "spark2", "home": "/home/bob"}), "spark2 has 50 GiB free")
+measured = disk.call_args_list[0].args[1].split("du -sbc ", 1)[1].split(" 2>")[0]
+check("the peer credits only the file set and the current generation as already there",
+      shlex.split(measured) == [f"/home/bob/.local/share/omarchy/agent-local/models/paired/{'e' * 16}", a.rank_dir("paired", "e" * 16, 1, "/home/bob", big)], measured)
+check("nothing is prepared or copied when the disk check fails", not [argv for argv in ran if "prep" in argv or argv[:1] == ["rsync"]], repr(ran))
+check("prepare containers are named for their recipe and rank", "--name" in prepares[0] and a.prepare_name("paired", 0) in prepares[0] and a.prepare_name("paired", 1) in " ".join(prepares[1]))
+with patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as local, patch.object(a, "pair_ssh") as remote, patch.object(a, "known_models", return_value=[]):
+  a.pair_remove({"recipe_id": "paired", "pair": {"peer": "10.99.1.2", "host": "spark2", "home": "/home/bob", "image_id": "c" * 64}})
+check("remove stops a prepare a cancelled setup left running, here and on the peer",
+      any(call.args[0] == ["podman", "rm", "-f", a.prepare_name("paired", 0)] for call in local.call_args_list) and a.prepare_name("paired", 1) in remote.call_args.args[1])
 check("the pair unit keeps the container restrictions", all(line in pair_text for line in ("ReadOnly=true", "DropCapability=all", "NoNewPrivileges=true", "AddDevice=/dev/infiniband")))
 if generator:
   quadlets = Path(a.quadlet_dir())
@@ -471,7 +677,7 @@ for name in ("c" * 16, "c" * 16 + ".rank0", "d" * 16, "d" * 16 + ".rank0"):
   (base / name).mkdir(parents=True)
 a.prune_filesets("keep", "c" * 16)
 check("pruning keeps a file set's rank inputs and drops the others'", sorted(p.name for p in base.iterdir()) == ["c" * 16, "c" * 16 + ".rank0"])
-with patch.object(a, "platform_name", return_value="aarch64-gb10"), patch.object(a, "amd_gpus", side_effect=lambda: []):
+with patch.object(a, "platform_name", return_value="aarch64-gb10"), patch.object(a, "amd_gpus", side_effect=lambda: []), patch.object(a, "intel_gpus", return_value=[]):
   check("no pair without a record of one", "pair" not in a.machine_profile())
   Path(a.pair_path()).parent.mkdir(parents=True, exist_ok=True)
   Path(a.pair_path()).write_text(json.dumps({"peer": "10.99.0.2", "host": "spark2", "home": "/home/u", "ram_gib": 121.9}))
@@ -523,7 +729,7 @@ with patch.object(a, "cable_neighbors", return_value=["fe80::2%enp1"]), patch.ob
   a.link_notify(pair_profile)
   a.link_notify(pair_profile)
 notices = [call.args[0] for call in sent.call_args_list if call.args and call.args[0][:1] == ["omarchy-notification-send"]]
-check("a newly cabled Spark is announced once, with link setup as its action", len(notices) == 1 and notices[0][-1] == "omarchy-agent-local link setup", repr(notices))
+check("a newly cabled Spark is announced once, with link setup as its action", len(notices) == 1 and notices[0][-1] == "omarchy-models link setup", repr(notices))
 os.unlink(os.path.join(a.state_dir(), "link-notified"))
 # A refresh that found the Spark first doesn't stop the announcement.
 with patch.object(a, "cable_neighbors", return_value=["fe80::3%enp1"]), patch.object(a, "mdns_names", return_value={}):
@@ -575,7 +781,7 @@ with patch.object(a, "unit_props", return_value={"InactiveExitTimestamp": "@%d" 
   a.record_error("crashy", "Locked memory limited: run link setup")
   check("a reason the start already recorded isn't overwritten", a.failure_reason("crashy", "exit-code") == "Locked memory limited: run link setup")
 with patch.object(a, "unit_props", return_value={"InactiveExitTimestamp": "@%d" % int(__import__("time").time() + 60)}), patch.object(a, "journal_tail", return_value="nothing useful"):
-  check("an older reason gives way, and with no server error systemd's result is shown", a.failure_reason("crashy", "exit-code") == "Stopped unexpectedly (exit-code)")
+  check("an older reason gives way, and with no server error it stopped unexpectedly, without systemd's result code", a.failure_reason("crashy", "exit-code") == "Stopped unexpectedly")
 a.clear_error("crashy")
 # logs prints the last error, the model's journal and, for a pair, rank 1's log from the peer.
 a.record_error("crashy", "Locked memory limited: run link setup")
@@ -684,6 +890,76 @@ with patch.object(a, "known_models", return_value=["current"]), patch.object(a, 
   pending = a.write_status(a.load_catalog(), profile, {"current": "activating"}, pending={"current": dict(updated, observed=None)})
 check("pending activation uses the current manifest's observations", pending["models"]["current"]["observed"] == manifest["observed"] and pending["models"]["current"]["unit"] == "activating")
 a.save_model(dict(manifest, recipe_id="survivor"), started=False)
+# Reading a failed model's logs dismisses the failure: the recorded reason goes, and so does the
+# unit's failed state, which reads as stopped unexpectedly for as long as it stays.
+a.record_error("current", "Stopped unexpectedly")
+with patch.object(a, "load_catalog"), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "write_status") as wrote, \
+     patch.object(a, "unit_active", return_value=False), patch.object(a, "systemctl") as ctl:
+  a.cmd_dismiss(["current"])
+check("dismissing a failure forgets its reason and resets the unit", not Path(a.error_path("current")).exists() and ctl.call_args.args == ("reset-failed", a.unit_name("current")) and wrote.called)
+
+# An update is what setting a model up again from the catalog would change. A setup made from the
+# catalog as it is has none, and neither has one whose image only moved to another name.
+def update_for(recipe_now, runtime_now):
+  now = SimpleNamespace(recipes={"current": recipe_now}, runtimes={recipe_now["runtime"]: runtime_now})
+  with patch.object(a, "choose_gpu", return_value=gpu), patch.object(a, "compatibility", return_value=(manifest["variant"], "")):
+    return a.pending_update(manifest, now, profile)
+renamed = dict(runtime, image=runtime["image"].replace("/test/", "/moved/"))
+check("a model set up from the catalog as it is has no update", update_for(recipe, runtime) is None and update_for(recipe, renamed) is None)
+check("a new image digest is an update", update_for(recipe, dict(runtime, image=runtime["image"].replace("a" * 64, "b" * 64))) == {"image": True, "weights": False, "settings": False, "download_bytes": None})
+repinned = dict(recipe, artifacts=[dict(recipe["artifacts"][0], revision="f" * 40)] + recipe["artifacts"][1:])
+check("a new weights pin is an update", update_for(repinned, runtime) == {"image": False, "weights": True, "settings": False, "download_bytes": None})
+retuned = dict(recipe, server={"args": recipe.get("server", {}).get("args", []) + ["--slots", "2"]})
+check("new server arguments are an update", update_for(retuned, runtime) == {"image": False, "weights": False, "settings": True, "download_bytes": None})
+check("a new warm-up is an update", update_for(recipe, dict(runtime, warmup={"prompts": 1, "pieces": 20000})) == {"image": False, "weights": False, "settings": True, "download_bytes": None})
+check("a recipe the catalog dropped has no update", a.pending_update(manifest, SimpleNamespace(recipes={}, runtimes={}), profile) is None)
+# A pair's workers start from the manifest's own pair table, so a change there is an update too.
+check("a paired runtime's new worker settings are an update", update_for(recipe, dict(runtime, pair={"nodes": 2, "env": {"RESERVE": "9"}}))["settings"])
+# The download is sized by refresh, which asks the registry and Hugging Face, and shown once it has:
+# the new image's layers the current one lacks, and the weights not in the store.
+newer = dict(runtime, image=runtime["image"].replace("a" * 64, "b" * 64))
+layers = {newer["image"]: {"sha256:base": 100, "sha256:server": 40}, runtime["image"]: {"sha256:base": 100, "sha256:old": 30}}
+with patch.object(a, "known_models", return_value=["current"]), patch.object(a, "load_model", return_value=manifest), patch.object(a, "choose_gpu", return_value=gpu), \
+     patch.object(a, "compatibility", return_value=(manifest["variant"], "")), patch.object(a, "image_layers", side_effect=lambda image: layers[image]), \
+     patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=1)):
+  a.measure_updates(SimpleNamespace(recipes={"current": recipe}, runtimes={"server": newer}), profile)
+check("an update's download is the image layers the current image lacks", update_for(recipe, newer)["download_bytes"] == 40, str(update_for(recipe, newer)))
+# What an update fetches depends on what is stored now, so a refresh measures again rather than
+# trusting the last answer; an unreachable registry keeps it.
+def remeasure(**how):
+  with patch.object(a, "known_models", return_value=["current"]), patch.object(a, "load_model", return_value=manifest), patch.object(a, "choose_gpu", return_value=gpu), \
+       patch.object(a, "compatibility", return_value=(manifest["variant"], "")), patch.object(a, "update_download_bytes", **how):
+    a.measure_updates(SimpleNamespace(recipes={"current": recipe}, runtimes={"server": newer}), profile)
+  return update_for(recipe, newer)["download_bytes"]
+check("a refresh sizes an update again", remeasure(return_value=140) == 140)
+check("an unreachable registry keeps the last size", remeasure(side_effect=a.LocalError("offline")) == 140)
+check("a size measured for another update isn't shown for this one", update_for(recipe, dict(runtime, image=runtime["image"].replace("a" * 64, "c" * 64)))["download_bytes"] is None)
+index = {"manifests": [{"digest": "sha256:x86", "platform": {"architecture": "amd64"}}, {"digest": "sha256:arm", "platform": {"architecture": "arm64"}}]}
+with patch.object(a, "registry_json", side_effect=lambda url, accept: index if url.endswith("a" * 64) else {"layers": [{"digest": "sha256:l", "size": 7}]}) as asked, \
+     patch.object(a.os, "uname", return_value=SimpleNamespace(machine="aarch64")):
+  check("a multi-arch image's layers are this machine's build's", a.image_layers(runtime["image"]) == {"sha256:l": 7} and asked.call_args.args[0].endswith("/manifests/sha256:arm"))
+# Updating is use with the context and GPU the model was set up with. A model that was stopped
+# stays stopped, the agents' default stays the model the user last started, and a model that is
+# loading its update still says it is updating.
+last = Path(a.state_dir()) / "last"
+for was_running, stops in ((False, 1), (True, 0)):
+  last.write_text("other\n")
+  def set_up(argv):
+    last.write_text("current\n")
+    with patch.object(a, "unit_props", return_value={}), patch.object(a, "free_memory", return_value=(64, 48)), patch.object(a, "known_models", return_value=["current"]):
+      set_up.loading = a.write_status(a.load_catalog(), profile, {"current": "activating"}, pending={"current": a.load_model("current")})["models"]["current"]
+    return 0
+  write_status = a.write_status
+  with patch.object(a, "machine_profile", return_value=profile), patch.object(a, "write_status", side_effect=lambda *args, **kw: write_status(*args, **kw) if kw.get("pending") else None), \
+       patch.object(a, "pending_update", return_value={"image": True, "weights": False, "settings": False}), \
+       patch.object(a, "unit_active", side_effect=[was_running, True]), patch.object(a, "cmd_use", side_effect=set_up) as use, patch.object(a, "cmd_stop", return_value=0) as stop:
+    a.cmd_update(["current"])
+  check(f"update sets a {'running' if was_running else 'stopped'} model up again and leaves it that way",
+        use.call_args.args[0] == ["current", "--gpu", gpu["family"], "--ctx", str(a.load_model("current")["variant"]["ctx"])] and stop.call_count == stops and not Path(a.updating_path("current")).exists(),
+        f"{use.call_args} {stop.call_count}")
+  check("an update leaves the agents' default model alone", last.read_text() == "other\n")
+  check("a model loading its update says it is updating", set_up.loading["updating"] is True and set_up.loading["unit"] == "activating", str(set_up.loading))
+last.unlink()
 with patch.object(a, "known_models", return_value=["current", "survivor"]), patch.object(a, "write_unit_files"), patch.object(a.subprocess, "run") as rmi:
   a._remove_files("current")
   check("removal retains an image used by a surviving current manifest", not rmi.called)
@@ -798,10 +1074,34 @@ check("progress reports a download speed", row["install"]["rate_bytes_s"] > 0)
 with patch.object(a, "known_models", return_value=[]), patch.object(a, "unit_props", return_value={}):
   listed = a.status_record(a.load_catalog(), profile)
 check("a full status rewrite keeps the setup's row", listed["models"]["fresh"]["unit"] == "installing")
+# Set up before their recipes named a maker, both models' manifests carry none.
+marked = SimpleNamespace(version="test", best={"class": []}, recipes={"flux": {"vendor": "bfl"}, "plain": {}})
+with patch.object(a, "known_models", return_value=["flux", "plain"]), patch.object(a, "installing_models", return_value=[]), \
+     patch.object(a, "load_model", return_value={}), patch.object(a, "model_record", side_effect=lambda rid, manifest, profile: {"vendor": ""}):
+  vendors = {rid: row["vendor"] for rid, row in a.status_record(marked, profile)["models"].items()}
+check("a model set up before its recipe named a maker shows the catalog's mark", vendors == {"flux": "bfl", "plain": ""}, json.dumps(vendors))
 with patch.object(a, "known_models", return_value=["current"]), patch.object(a, "unit_props", return_value={}), patch.object(a, "free_memory", return_value=(64, 48)):
   a.write_status(a.load_catalog(), profile)
-a.publish_installing("current", {"name": "Current", "phase": "downloading"})
-check("setting up an installed model again leaves its row as it is", json.loads(Path(a.state_dir(), "status.json").read_text())["models"]["current"]["unit"] != "installing")
+a.publish_installing("current", {"name": "Current", "phase": "downloading", "done_bytes": 5, "total_bytes": 10})
+current = json.loads(Path(a.state_dir(), "status.json").read_text())["models"]["current"]
+check("setting up an installed model again leaves its row as it is", current["unit"] != "installing")
+check("an update's download rides on the model's own row", current["update_progress"] == {"phase": "downloading", "done_bytes": 5, "total_bytes": 10, "rate_bytes_s": 0}, json.dumps(current.get("update_progress")))
+
+# What a running model holds now: its anonymous memory and its GTT, once per GPU client, not
+# the file cache it reads weights through, across its unit and the container's own cgroup.
+with tempfile.TemporaryDirectory() as fake:
+  unit = Path(fake, "cg", "app.slice", "m.service")
+  (unit / "libpod-payload-1").mkdir(parents=True)
+  (unit / "memory.stat").write_text("anon 1073741824\nfile 8589934592\n")
+  (unit / "cgroup.procs").write_text("10\n")
+  (unit / "libpod-payload-1" / "cgroup.procs").write_text("11\n")
+  # Process 10 forked from 11 after it opened the GPU, so both show client 7.
+  for pid, fds in {"10": {"3": "drm-client-id:\t7\ndrm-memory-gtt:\t2097152 KiB\n"}, "11": {"3": "drm-client-id:\t7\ndrm-memory-gtt:\t2097152 KiB\n", "4": "drm-client-id:\t7\ndrm-memory-gtt:\t2097152 KiB\n", "5": "pos: 0\n"}}.items():
+    Path(fake, "proc", pid, "fdinfo").mkdir(parents=True)
+    for fd, text in fds.items():
+      Path(fake, "proc", pid, "fdinfo", fd).write_text(text)
+  held = a.held_bytes("/app.slice/m.service", str(Path(fake, "cg")), str(Path(fake, "proc")))
+check("a model holds its anonymous memory and its GTT once per GPU client, across its processes, not its file cache", held == 3 * 2**30, str(held))
 
 a.clear_installing("timed")
 a.begin_installing("timed", {"name": "Timed"}, 48.0)
@@ -917,13 +1217,13 @@ check("cancelling a setup drops only its own partial downloads", not (staging / 
 # --detach hands the setup to a transient user unit and returns.
 a.clear_installing(rid)
 with patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=3)), patch.object(a, "load_model", return_value=None), patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as run:
-  check("a detached setup returns at once", a.detach_use(rid, SimpleNamespace(ctx=8192, gpu=None, seed=None, unqualified=False), cat.recipes[rid]) == 0)
+  check("a detached setup returns at once", a.detach_use(rid, SimpleNamespace(ctx=8192, gpu=None, seed=None), cat.recipes[rid]) == 0)
   argv = run.call_args.args[0]
 check("a detached setup runs use in its own user unit", argv[:3] == ["systemd-run", "--user", "--collect"] and f"--unit={a.install_unit(rid)}" in argv and argv[-4:-2] == ["use", rid] and argv[-2:] == ["--ctx", "8192"], " ".join(argv))
 check("a detached setup is listed before its unit starts", a.load_installing(rid)["phase"] == "waiting")
 a.clear_installing(rid)
 with patch.dict(os.environ, {"HF_TOKEN": "hf_secret_value", "OMARCHY_LOCAL_AI_CATALOG": "relative/catalog"}), patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=3)), patch.object(a, "load_model", return_value=None), patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as run:
-  a.detach_use(rid, SimpleNamespace(ctx=None, gpu=None, seed=None, unqualified=False), cat.recipes[rid])
+  a.detach_use(rid, SimpleNamespace(ctx=None, gpu=None, seed=None), cat.recipes[rid])
   argv, env = run.call_args.args[0], run.call_args.kwargs["env"]
 check("a detached setup never puts the token on a command line", not any("hf_secret_value" in arg for arg in argv) and "--setenv=HF_TOKEN" in argv and env["HF_TOKEN"] == "hf_secret_value")
 check("a detached setup gets the catalog as an absolute path", env["OMARCHY_LOCAL_AI_CATALOG"] == os.path.abspath("relative/catalog"))
@@ -1082,7 +1382,7 @@ with patch.object(a.subprocess, "run", return_value=subprocess.CompletedProcess(
   # The panel shows the first line alone, so it names the machine short.
   raises("a pairing error's first line names the machine without user or domain", lambda: a.cmd_pair(["alice@new.tail1234.ts.net"]), "new refused this machine's SSH keys\n")
 check("an address stays whole as a machine's name", a.short_host("dhh@100.90.162.80") == "100.90.162.80")
-# The agents panel pairs with no terminal (stdin here is the test script), so
+# The local models panel pairs with no terminal (stdin here is the test script), so
 # ssh must ask nothing: a prompt would wait forever. A new host's key is taken.
 with patch.object(a.subprocess, "run", return_value=subprocess.CompletedProcess([], 255, "", "Host key verification failed.\n")) as run:
   raises("pairing with a host whose key changed says how to forget the old one, by host alone", lambda: a.cmd_pair(["alice@new.tail1234.ts.net"]), "ssh-keygen -R new.tail1234.ts.net")
@@ -1091,7 +1391,7 @@ a.write_atomic(a.remote_key_path("away"), "k" * 32, mode=0o600)
 a.write_atomic(os.path.join(a.remotes_dir(), "away.json"), json.dumps({"host": "away", "dns": "away.tail.ts.net", "ssh": "away"}))
 raises("a network model is named host/recipe", lambda: a.split_remote_id("box/../x"), "host/recipe")
 raises("an SSH target can't smuggle options", lambda: a.ssh_command({"ssh": "-oProxyCommand=x", "dns": ""}, "share", "--export"), "Not an SSH target")
-check("remote commands quote their arguments", a.ssh_command({"ssh": "box", "dns": "box.tail.ts.net"}, "share", "--export")[-2:] == ["box", "omarchy-agent-local share --export"])
+check("remote commands run the engine by its own command, quoted", a.ssh_command({"ssh": "box", "dns": "box.tail.ts.net"}, "share", "--export")[-2:] == ["box", "omarchy-local-ai share --export"])
 
 # A paired, running remote model becomes an overlay with its own provider.
 a.write_atomic(a.remote_key_path("box"), "b" * 32, mode=0o600)
@@ -1229,7 +1529,7 @@ def serve(handler):
 now = [1_000_000]
 tracker = a.ClientTracker(a.clients_path(), window_ms=1000, clock=lambda: now[0])
 model = serve(FakeModel)
-proxy = serve(a.make_share_proxy(tracker, ports=lambda: {"shared": model.server_address[1], "private": model.server_address[1]}, shares=lambda: ["shared"]))
+proxy = serve(a.make_share_proxy(tracker, ports=lambda: {"shared": model.server_address[1], "private": model.server_address[1]}, shares=lambda: ["shared"], key=lambda: "k"))
 
 def ask(path, key="k", client="100.64.0.2"):
   connection = http.client.HTTPConnection("127.0.0.1", proxy.server_address[1], timeout=10)
@@ -1246,10 +1546,38 @@ connection = http.client.HTTPConnection("127.0.0.1", proxy.server_address[1], ti
 connection.request("POST", "/shared/v1/chat/completions", body=iter([b"hel", b"lo"]), encode_chunked=True, headers={"Authorization": "Bearer k", "X-Forwarded-For": "100.64.0.2"})
 answer = connection.getresponse()
 first = answer.read1(65536)
+def locked(rid):
+  with open(a.hold_path(rid), "a") as probe:
+    try:
+      a.fcntl.flock(probe, a.fcntl.LOCK_EX | a.fcntl.LOCK_NB)
+      return False
+    except BlockingIOError:
+      return True
+working = locked("shared")
 release.set()
 rest = answer.read()
 connection.close()
 check("the proxy streams each part of the answer as the model sends it", answer.status == 200 and first == b"data: hello\n\n" and rest == b"data: [DONE]\n\n", f"{answer.status} {first!r} {rest!r}")
+for _ in range(100):
+  if not locked("shared"):
+    break
+  a.time.sleep(0.02)
+check("the proxy holds the model until the answer is through", working and not locked("shared"))
+import socket
+stalled = socket.create_connection(("127.0.0.1", proxy.server_address[1]))
+stalled.sendall(b"POST /shared/v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nhel")
+a.time.sleep(0.2)
+check("an upload without the key that never finishes holds nothing", not locked("shared"))
+stalled.close()
+# With the key, the hold is taken before the request reaches the model.
+stalled = socket.create_connection(("127.0.0.1", proxy.server_address[1]))
+stalled.sendall(b"POST /shared/v1/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer k\r\nContent-Length: 100\r\n\r\nhel")
+for _ in range(100):
+  if locked("shared"):
+    break
+  a.time.sleep(0.02)
+check("a request with the key holds the model before it reaches it", locked("shared"))
+stalled.close()
 release.clear()
 release.set()
 status, body = ask("/shared/v1/chat/completions")
@@ -1272,4 +1600,344 @@ check("once everyone is idle nothing counts and nothing is pending", tracker.exp
 proxy.shutdown()
 model.shutdown()
 
+
+# ---- image models
+
+# An image runtime: sd-server names no model, so it maps no alias, and takes a text encoder and a VAE.
+sd_rt = {"image": "registry.example/test/sd@sha256:" + "d" * 64, "tier": "omarchy", "api": "sdcpp", "port": 1234,
+         "health": {"probe": ["curl", "http://127.0.0.1:1234/sdcpp/v1/models/status"]}, "command": ["sd-server"],
+         "reserved": ["--listen-port", "SD_API_KEY"], "run": {"devices": ["render"], "tmpfs": "/tmp"}, "gpus": ["amd"],
+         "inputs": {"model": {"arg": "--diffusion-model"}, "text_encoder": {"arg": "--llm"}, "vae": {"arg": "--vae"}, "key": {"env": "SD_API_KEY"}}}
+picture_variant = {"peak_ram_gib": 14, "peak_gpu_gib": 14}
+picture = {"name": "Picture", "kind": "image", "runtime": "sd", "hardware": recipe["hardware"],
+           "artifacts": [dict(artifact, files=["model.gguf"]),
+                         {"repo": "test/encoder", "revision": "c" * 40, "license": "mit", "files": ["te.gguf"], "text_encoder": "te.gguf"},
+                         {"repo": "test/vae", "revision": "e" * 40, "license": "mit", "files": ["vae/ae.safetensors"], "vae": "vae/ae.safetensors"}],
+           "variant": [picture_variant], "server": {"args": ["--steps", "8"]}}
+both = {"server": runtime, "sd": sd_rt}
+check("an image runtime without an alias and an image recipe without a context validate", not a.validate_runtime("sd", sd_rt) and not a.validate_recipe("picture", picture, both),
+      "\n".join(a.validate_runtime("sd", sd_rt) + a.validate_recipe("picture", picture, both)))
+check("a text recipe still needs a context", any(".ctx" in e for e in a.validate_recipe("model", dict(recipe, variant=[picture_variant]), both)))
+check("an OpenAI runtime still needs an alias", any("'alias'" in e for e in a.validate_runtime("server", dict(runtime, inputs={k: v for k, v in runtime["inputs"].items() if k != "alias"}))))
+check("a recipe's kind is text, image, video or music", any(".kind" in e for e in a.validate_recipe("model", dict(recipe, kind="audio"), both)))
+check("a runtime's api is a known one", any(".api" in e for e in a.validate_runtime("sd", dict(sd_rt, api="grpc"))))
+check("a text encoder or VAE needs a runtime input for it", {"no text_encoder input", "no vae input"} <= {e.split(" but runtime ")[1].split("' has ")[1] for e in a.validate_recipe("picture", dict(picture, runtime="server"), both) if " but runtime " in e})
+trees = {"test/model": [{"type": "file", "path": "model.gguf", "size": 1, "lfs": {"oid": "1" * 64, "size": 1}}],
+         "test/encoder": [{"type": "file", "path": "te.gguf", "size": 1, "lfs": {"oid": "2" * 64, "size": 1}}],
+         "test/vae": [{"type": "file", "path": "vae/ae.safetensors", "size": 1, "lfs": {"oid": "3" * 64, "size": 1}}]}
+with patch.object(a, "hf_tree", side_effect=lambda repo, revision, cache: trees[repo]):
+  picture_files, picture_roles = a.build_artifacts(picture)
+a.validate_files(picture_files, picture_roles)
+_, picture_argv, picture_env, _ = a.server_invocation(sd_rt, picture, picture_variant, picture_roles, "picture")
+check("the diffusion model, text encoder and VAE reach the server, and no context",
+      picture_argv == ["sd-server", "--diffusion-model", "/models/model.gguf", "--llm", "/models/te.gguf", "--vae", "/models/vae/ae.safetensors", "--steps", "8"] and picture_env == {}, repr(picture_argv))
+picture_unit = a.render_container("picture", picture, sd_rt, picture_variant, picture_roles, dict(gpu, render_node="/dev/dri/renderD128"), "f" * 16)
+check("a runtime asking for a /tmp tmpfs gets one, others don't", "Tmpfs=/tmp" in picture_unit and "Tmpfs=" not in text and not a.validate_runtime("sd", sd_rt))
+check("an image model's variant is chosen without a context", a.pick_variant(picture, profile, gpu) == (picture_variant, ""))
+
+# A video model is an image model's kin: no context, and its sound decoder and its LoRA reach
+# the server, the LoRA as the folder sd-server finds it in.
+video_rt = dict(sd_rt, inputs=dict(sd_rt["inputs"], audio_vae={"arg": "--audio-vae"}, lora={"arg": "--lora-model-dir"}))
+clip = dict(picture, name="Clip", kind="video",
+            artifacts=picture["artifacts"] + [{"repo": "test/av", "revision": "b" * 40, "license": "mit", "files": ["vae/audio.safetensors", "loras/turbo.safetensors"],
+                                               "audio_vae": "vae/audio.safetensors", "lora": "loras/turbo.safetensors"}])
+check("a video recipe validates without a context", not a.validate_recipe("clip", clip, {"sd": video_rt}), "\n".join(a.validate_recipe("clip", clip, {"sd": video_rt})))
+clip_trees = dict(trees, **{"test/av": [{"type": "file", "path": "vae/audio.safetensors", "size": 1, "lfs": {"oid": "5" * 64, "size": 1}},
+                                        {"type": "file", "path": "loras/turbo.safetensors", "size": 1, "lfs": {"oid": "6" * 64, "size": 1}}]})
+with patch.object(a, "hf_tree", side_effect=lambda repo, revision, cache: clip_trees[repo]):
+  clip_files, clip_roles = a.build_artifacts(clip)
+_, clip_argv, _, _ = a.server_invocation(video_rt, clip, picture_variant, clip_roles, "clip")
+check("a video model's sound decoder and LoRA folder reach the server",
+      clip_argv[clip_argv.index("--audio-vae") + 1] == "/models/vae/audio.safetensors" and clip_argv[clip_argv.index("--lora-model-dir") + 1] == "/models/loras", repr(clip_argv))
+raises("asking an image model for a context names none", lambda: a.pick_variant(picture, profile, gpu, ctx=4096), "have: none")
+
+# Image models are recommended beside text ones, never instead of them.
+images_best = {"class": [dict(entry, images=["picture"])]}
+check("best.toml lists image models apart from text ones", not a.validate_best(images_best, {"model": recipe, "picture": picture}))
+check("an image model can't compete for the agents' default", any(".recipes: 'picture' is of kind image, not text" in e for e in a.validate_best({"class": [dict(entry, recipes=["picture", "model"])]}, {"model": recipe, "picture": picture})))
+check("nor can a text model be offered as an image one", any(".images: 'model' is of kind text, not image" in e for e in a.validate_best({"class": [dict(entry, images=["model"])]}, {"model": recipe, "picture": picture})))
+img_catalog = SimpleNamespace(root=str(repo), recipes={"model": recipe, "picture": picture}, runtimes=both, best=images_best)
+check("best stays the text recommendation, and image models resolve on their own", a.resolve_best(img_catalog, profile, gpu)[0] == "model" and a.resolve_best(img_catalog, profile, gpu, field="images")[0] == "picture")
+rows = {row["id"]: row for row in a.recipe_listing(img_catalog, profile)}
+check("list rows carry their kind and the best of each kind", (rows["picture"]["kind"], rows["model"]["kind"]) == ("image", "text") and rows["picture"]["best"] and rows["model"]["best"]
+      and rows["picture"]["available"] and rows["picture"]["context"] is None and rows["picture"]["reason"] == "", repr(rows["picture"]))
+# An experimental recipe is kept for trying by name: listed once set up or when asked for, never recommended.
+trial = dict(copy.deepcopy(recipe), experimental=True)
+trial_catalog = SimpleNamespace(root=str(repo), recipes={"model": recipe, "trial": trial}, runtimes=both, best=images_best)
+check("experimental takes only true or false", any(".experimental: true or false" in e for e in a.validate_recipe("trial", dict(trial, experimental="yes"), {"server": runtime})))
+check("an experimental recipe is otherwise valid", not a.validate_recipe("trial", trial, {"server": runtime}))
+check("best.toml can't recommend an experimental recipe", any("'trial' is experimental" in e for e in a.validate_best({"class": [dict(entry, recipes=["trial", "model"])]}, {"model": recipe, "trial": trial})))
+with patch.object(a, "recipe_installed", return_value=False):
+  hidden = {row["id"] for row in a.recipe_listing(trial_catalog, profile)}
+  asked = {row["id"]: row for row in a.recipe_listing(trial_catalog, profile, experimental=True)}
+check("the listing leaves an experimental recipe out", hidden == {"model"}, repr(hidden))
+check("asked for, it lists it and says it's experimental", asked["trial"]["experimental"] and not asked["model"]["experimental"], repr(asked))
+with patch.object(a, "recipe_installed", side_effect=lambda rid: rid == "trial"):
+  installed = {row["id"] for row in a.recipe_listing(trial_catalog, profile)}
+check("once set up, it's listed so it can be started, stopped and removed", installed == {"model", "trial"}, repr(installed))
+printed, saved = [], []
+with patch.object(a, "load_catalog", return_value=trial_catalog), patch.object(a, "machine_profile", return_value=profile), \
+     patch.object(a, "running_models", return_value=set()), patch.object(a, "recipe_installed", return_value=False), \
+     patch.object(a, "write_list_cache", side_effect=saved.append), patch("builtins.print", side_effect=printed.append):
+  a.cmd_list(["--json", "--experimental"])
+shown = {row["id"] for row in json.loads(printed[0])}
+check("list --experimental shows it, and the panel's saved listing still leaves it out",
+      shown == {"model", "trial"} and len(saved) == 1 and {row["id"] for row in saved[0]} == {"model"}, repr((shown, saved)))
+# Video and music models are recommended beside them the same way, each kind its own use best.
+check("best.toml lists video models of their own", not a.validate_best({"class": [dict(entry, videos=["clip"])]}, {"model": recipe, "clip": clip}))
+check("a kind's list takes only that kind", any(".music: 'picture' is of kind image, not music" in e for e in a.validate_best({"class": [dict(entry, music=["picture"])]}, {"model": recipe, "picture": picture})))
+raises("a kind with nothing recommended says so", lambda: a.resolve_best(img_catalog, profile, gpu, field="videos"), "No video model is recommended")
+said = []
+with patch.object(a, "load_catalog", return_value=img_catalog), patch.object(a, "machine_profile", return_value=profile), patch.object(a, "say", side_effect=said.append):
+  asked = a.cmd_use(["best"])
+check("best alone names each kind's pick and sets nothing up", asked == 2 and "  text: model" in said and "  image: picture" in said and "  video: none for this machine yet" in said, repr(said))
+
+# Status rows say what kind of model they are; an image model's has no context.
+picture_manifest = {"schema": 1, "recipe_id": "picture", "recipe": picture, "runtime": sd_rt, "runtime_id": "sd", "image": sd_rt["image"],
+                    "variant": picture_variant, "files": picture_files, "roles": picture_roles, "fileset": "f" * 16, "gpu": gpu["family"], "profile": profile}
+# An image model's start measures nothing, since its server reads its weights in with the
+# first image: it holds its measured peak. A text model holds what its start took.
+check("an image model's memory is its peak, not what its start took",
+      a.memory_used_gib(dict(picture_manifest, observed={"load_seconds": 4, "ram_used_gib": -1.2})) == picture_variant["peak_ram_gib"])
+check("a text model's memory is what its start took",
+      a.memory_used_gib({"recipe": recipe, "variant": {"peak_ram_gib": 40}, "observed": {"ram_used_gib": 38.2}}) == 38.2)
+with patch.object(a, "unit_props", return_value={}), patch.object(a, "free_memory", return_value=(64, 48)):
+  picture_row = a.model_record("picture", picture_manifest, profile)
+  text_row = a.model_record("current", manifest, profile)
+check("an image model's status row says so, without a context, and fits by its memory", (picture_row["kind"], picture_row["ctx"], picture_row["fits"], picture_row["endpoint"]) == ("image", None, True, a.endpoint("picture")), repr(picture_row))
+check("a text model's status row says text", text_row["kind"] == "text" and text_row["ctx"] == variant["ctx"])
+# An edit model says so in its status row; only an image model may be one.
+editor_manifest = dict(picture_manifest, recipe=dict(picture, edit=True))
+with patch.object(a, "unit_props", return_value={}), patch.object(a, "free_memory", return_value=(64, 48)):
+  check("an edit model's status row says it edits", a.model_record("picture", editor_manifest, profile)["edit"] is True and not picture_row["edit"])
+check("only an image model can be an edit model", any(".edit" in e for e in a.validate_recipe("model", dict(recipe, edit=True), {"server": runtime})))
+a.begin_installing("picture-setup", picture)
+check("an image model being set up is listed as one", json.loads(Path(a.state_dir(), "status.json").read_text())["models"]["picture-setup"]["kind"] == "image")
+a.clear_installing("picture-setup")
+check("an installing row from before kinds reads as text", a.install_row("old", {"phase": "waiting"})["kind"] == "text")
+
+# An image model is never the agents' model: not the last one, not the default, not an overlay or pi provider.
+Path(a.state_dir(), "last").unlink(missing_ok=True)
+a.save_model(picture_manifest)
+check("starting an image model doesn't make it the last one started", not Path(a.state_dir(), "last").exists())
+a.write_atomic(os.path.join(a.state_dir(), "last"), "picture\n")
+check("a last that names an image model isn't the agents' default", a.last_model_id() is None)
+with patch.object(a, "known_models", return_value=["picture"]), patch.object(a, "unit_active", return_value=True):
+  raises("an agent launch never falls back to a running image model", lambda: a.resolve_model(running_only=True), "No local model is running")
+  raises("an image model named for an agent is refused", lambda: a.overlay_target("picture"), "image model")
+  check("pi's providers leave image models out", a.local_targets() == [])
+  check("start and stop still find an image model by name", a.resolve_model("picture", running_only=True)["recipe_id"] == "picture")
+os.unlink(os.path.join(a.state_dir(), "last"))
+
+# An image model is shared on the tailnet like a text one, for Fantasi on the other machines.
+with patch.object(a, "shared_recipes", return_value=["picture"]):
+  listed = a.shared_listing({"models": {"picture": dict(picture_row, edit=True)}, "ram_total_gib": 64}, img_catalog, profile, "me.tail.ts.net")["models"]
+  check("a shared image model is listed with its kind and whether it edits", [(m["recipe"], m["kind"], m["edit"]) for m in listed] == [("picture", "image", True)], repr(listed))
+  handlers.clear()
+  with patch.object(a, "tailscale", side_effect=fake_tailscale), patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0, stderr="")):
+    a.publish_shares({"models": {"picture": picture_row}, "ram_total_gib": 64}, img_catalog, profile, force=True)
+  check("and gets a tailnet route", "/local-ai/picture" in handlers, repr(handlers))
+peer = a.clean_listing({"schema": a.NETWORK_SCHEMA, "models": [dict(listed[0]), {"recipe": "old", "name": "Old"}]}, "me.tail.ts.net")["models"]
+check("a peer's listing keeps an image model's kind, and a row without one is text", [(m["kind"], m["edit"]) for m in peer] == [("image", True), ("text", False)], repr(peer))
+image_remote = a.remote_record("spark", "spark.tail.ts.net", peer[0], True, 128, 0)
+with patch.object(a, "resolve_remote", return_value=image_remote):
+  raises("a paired host's image model is refused as an agent's", lambda: a.overlay_target("spark/picture"), "image model")
+with patch.object(a, "load_remotes", return_value={"spark": {"host": "spark"}}), patch.object(a, "load_network", return_value={"hosts": {}, "models": {"spark/picture": image_remote}}):
+  check("nor is it one of pi's providers", a.remote_targets() == [])
+
+# sd-server lists no recipe id: it's ready when its model status, asked with the key, says so.
+status_url = f"http://127.0.0.1:{a.port_for('picture')}/sdcpp/v1/models/status"
+with patch.object(a, "http_status", side_effect=[(401, b""), (200, b'{"state": "ready", "model": "sd-cpp-local"}')]) as http:
+  a.post_start_checks("picture", "test-key", sd_rt)
+check("an sd-server is checked by its model status, without and then with the key",
+      [call.args for call in http.call_args_list] == [(status_url,), (status_url, "test-key")], repr(http.call_args_list))
+for name, answers, message in (("that answers without the key", [(200, b'{"state": "ready"}')], "doesn't enforce its key"),
+                               ("whose model isn't ready", [(401, b""), (200, b'{"state": "loading"}')], "loading, not ready"),
+                               ("that answers no status", [(401, b""), (200, b"not json")], "unknown state")):
+  with patch.object(a, "http_status", side_effect=answers):
+    raises(f"an sd-server {name} is refused", lambda: a.post_start_checks("picture", "test-key", sd_rt), message)
+os.unlink(a.model_manifest_path("picture"))
+
+# A music model runs on acestep.cpp's ace-server, which takes the folder holding its models and
+# loads one only when asked for a song: it's ready when it has found every model a song takes.
+ace_rt = {"image": "registry.example/test/ace@sha256:" + "e" * 64, "tier": "omarchy", "api": "acestep", "port": 8085,
+          "health": {"probe": ["curl", "http://127.0.0.1:8085/health"]}, "command": ["ace-server"],
+          "reserved": ["--port", "ACE_API_KEY"], "run": {"devices": ["render"], "tmpfs": "/tmp"}, "gpus": ["amd"],
+          "inputs": {"model": {"arg": "--models"}, "key": {"env": "ACE_API_KEY"}}}
+song = {"name": "Song", "kind": "music", "runtime": "ace", "hardware": recipe["hardware"],
+        "artifacts": [{"repo": "test/ace", "revision": "a" * 40, "license": "mit", "files": ["lm.gguf", "dit.gguf"], "dest": "acestep", "model": "."}],
+        "variant": [picture_variant]}
+check("a music runtime and a music recipe validate, without an alias or a context", not a.validate_runtime("ace", ace_rt) and not a.validate_recipe("song", song, {"ace": ace_rt}),
+      "\n".join(a.validate_runtime("ace", ace_rt) + a.validate_recipe("song", song, {"ace": ace_rt})))
+ace_tree = [{"type": "file", "path": name, "size": 1, "lfs": {"oid": oid * 64, "size": 1}} for name, oid in (("lm.gguf", "7"), ("dit.gguf", "8"))]
+with patch.object(a, "hf_tree", return_value=ace_tree):
+  song_files, song_roles = a.build_artifacts(song)
+_, song_argv, _, _ = a.server_invocation(ace_rt, song, picture_variant, song_roles, "song")
+check("a music model's folder reaches the server", song_argv == ["ace-server", "--models", "/models/acestep"], repr(song_argv))
+props_url = f"http://127.0.0.1:{a.port_for('song')}/props"
+found = b'{"models": {"lm": ["lm.gguf"], "embedding": ["te.gguf"], "dit": ["dit.gguf"], "vae": ["vae.gguf"]}}'
+with patch.object(a, "http_status", side_effect=[(401, b""), (200, found)]) as http:
+  a.post_start_checks("song", "test-key", ace_rt)
+check("an ace-server is checked by the models it found, without and then with the key",
+      [call.args for call in http.call_args_list] == [(props_url,), (props_url, "test-key")], repr(http.call_args_list))
+for name, answers, message in (("that answers without the key", [(200, found)], "doesn't enforce its key"),
+                               ("missing a model a song takes", [(401, b""), (200, b'{"models": {"lm": ["lm.gguf"], "embedding": [], "dit": ["dit.gguf"]}}')], "found no embedding, vae model"),
+                               ("that lists no models", [(401, b""), (200, b"not json")], "found no lm, embedding, dit, vae model")):
+  with patch.object(a, "http_status", side_effect=answers):
+    raises(f"an ace-server {name} is refused", lambda: a.post_start_checks("song", "test-key", ace_rt), message)
+
+# Stable Audio 3 music runtime: api = "sa3" checks /props for dit, decoder, text_encoder, tokenizer,
+# and vocals = false marks an instrumental-only music recipe.
+sa3_cuda_rt = {"image": "registry.example/test/sa3-cuda@sha256:" + "d" * 64, "tier": "omarchy", "api": "sa3", "port": 8085,
+               "health": {"probe": ["curl", "http://127.0.0.1:8085/health"]}, "command": ["sa3-server"],
+               "reserved": ["--port", "SA3_API_KEY"], "run": {"devices": ["cdi-nvidia"], "tmpfs": "/tmp"}, "gpus": ["nvidia-gb10"],
+               "inputs": {"model": {"arg": "--models"}, "key": {"env": "SA3_API_KEY"}}}
+sa3_cuda_song = {"name": "Stable Audio 3 Medium", "vendor": "stability", "kind": "music", "vocals": False, "runtime": "sa3-cuda",
+                 "hardware": [{"gpu": "nvidia-n1x", "ram_class": 128, "measured": "measurements/model.toml"}],
+                 "artifacts": [{"repo": "test/sa3", "revision": "a" * 40, "license": "other", "files": ["dit.gguf"], "dest": "sa3", "model": "."}],
+                 "variant": [picture_variant]}
+check("an sa3 music runtime and instrumental recipe validate",
+      not a.validate_runtime("sa3-cuda", sa3_cuda_rt) and not a.validate_recipe("sa3-song-cuda", sa3_cuda_song, {"sa3-cuda": sa3_cuda_rt}),
+      "\n".join(a.validate_runtime("sa3-cuda", sa3_cuda_rt) + a.validate_recipe("sa3-song-cuda", sa3_cuda_song, {"sa3-cuda": sa3_cuda_rt})))
+check("vocals is only for music recipes", any(".vocals" in e for e in a.validate_recipe("model", dict(recipe, vocals=False), {"server": runtime})))
+sa3_found = b'{"models": {"dit": ["dit.gguf"], "decoder": ["same.gguf"], "text_encoder": ["t5.gguf"], "tokenizer": ["vocab.gguf"]}}'
+with patch.object(a, "http_status", side_effect=[(401, b""), (200, sa3_found)]):
+  a.post_start_checks("sa3-song-cuda", "test-key", sa3_cuda_rt)
+with patch.object(a, "http_status", side_effect=[(401, b""), (200, b'{"models": {"dit": ["dit.gguf"]}}')]):
+  raises("an sa3-server missing parts is refused", lambda: a.post_start_checks("sa3-song-cuda", "test-key", sa3_cuda_rt), "found no decoder, text_encoder, tokenizer model")
+sa3_inst_rec = a.begin_installing("sa3-song-cuda", sa3_cuda_song)
+sa3_inst_row = a.install_row("sa3-song-cuda", sa3_inst_rec)
+check("an installing instrumental music recipe keeps vocals = False",
+      sa3_inst_rec.get("vocals") is False and sa3_inst_row.get("vocals") is False, repr((sa3_inst_rec, sa3_inst_row)))
+a.clear_installing("sa3-song-cuda")
+
+# A CPU-only music model (Stable Audio 3): runs with gpus = ["cpu"], no GPU devices, peak_gpu_gib = 0,
+# vocals = false, stays available on machines with no supported GPU, and yields to a GPU build of
+# the same model when one runs on the machine.
+sa3_rt = {"image": "registry.example/test/sa3@sha256:" + "d" * 64, "tier": "omarchy", "api": "sa3", "port": 8085,
+          "health": {"probe": ["curl", "http://127.0.0.1:8085/health"]}, "command": ["sa3-server"],
+          "reserved": ["--port", "SA3_API_KEY"], "run": {"tmpfs": "/tmp"}, "gpus": ["cpu"],
+          "inputs": {"model": {"arg": "--models"}, "key": {"env": "SA3_API_KEY"}}}
+sa3_variant = {"peak_ram_gib": 4, "peak_gpu_gib": 0}
+sa3_song = {"name": "Stable Audio 3 Medium", "vendor": "stability", "kind": "music", "vocals": False, "runtime": "sa3",
+            "hardware": [{"gpu": "cpu", "ram_class": 64, "measured": "measurements/model.toml"}],
+            "artifacts": [{"repo": "test/sa3", "revision": "a" * 40, "license": "other", "files": ["dit.tflite"], "dest": "sa3", "model": "."}],
+            "variant": [sa3_variant]}
+check("a CPU music runtime and instrumental recipe validate",
+      not a.validate_runtime("sa3", sa3_rt) and not a.validate_recipe("sa3-song", sa3_song, {"sa3": sa3_rt}),
+      "\n".join(a.validate_runtime("sa3", sa3_rt) + a.validate_recipe("sa3-song", sa3_song, {"sa3": sa3_rt})))
+check("a CPU runtime rejects GPU devices", any("can't use GPU devices" in e for e in a.validate_runtime("sa3", dict(sa3_rt, run={"devices": ["render"]}))))
+cpu_only_profile = {"platform": "x86", "ram_class": 32, "ram_gib": 16, "gpus": []}
+cpu_catalog = SimpleNamespace(root=str(repo), recipes={"model": recipe, "sa3-song": sa3_song, "sa3-song-cuda": sa3_cuda_song},
+                              runtimes={"server": runtime, "sa3": sa3_rt, "sa3-cuda": sa3_cuda_rt}, best={"class": []})
+cpu_rows = {row["id"]: row for row in a.recipe_listing(cpu_catalog, cpu_only_profile)}
+check("a CPU recipe is available on a machine with no supported GPU, while GPU recipes stay unavailable",
+      cpu_rows["sa3-song"]["available"] and cpu_rows["sa3-song"]["vocals"] is False and not cpu_rows["model"]["available"] and not cpu_rows["sa3-song-cuda"]["available"], repr(cpu_rows))
+check("a CPU recipe doesn't fit when RAM is below peak plus desktop reserve",
+      not {row["id"]: row for row in a.recipe_listing(cpu_catalog, dict(cpu_only_profile, ram_gib=8))}["sa3-song"]["available"])
+gb10_profile = {"platform": "aarch64-gb10", "ram_class": 128, "ram_gib": 128,
+                "gpus": [{"vendor": "nvidia", "family": "nvidia-gb10", "render_node": "/dev/dri/renderD128", "memory_gib": 110, "max_memory_gib": 110, "unified": True}]}
+gb10_rows = {row["id"]: row for row in a.recipe_listing(cpu_catalog, gb10_profile)}
+check("when a GPU build of the same model fits, the CPU fallback yields to it in listings",
+      gb10_rows["sa3-song-cuda"]["available"] and not gb10_rows["sa3-song"]["available"], repr(gb10_rows))
+sa3_manifest = {"schema": 1, "recipe_id": "sa3-song", "recipe": sa3_song, "runtime": sa3_rt, "runtime_id": "sa3", "image": sa3_rt["image"],
+                "variant": sa3_variant, "files": [], "roles": {"model": "sa3"}, "fileset": "d" * 16, "gpu": "cpu", "profile": cpu_only_profile}
+with patch.object(a, "unit_props", return_value={}), patch.object(a, "free_memory", return_value=(10, 16)):
+  sa3_row = a.model_record("sa3-song", sa3_manifest, cpu_only_profile)
+check("a CPU music model's status row carries vocals = False and fits by RAM",
+      sa3_row["kind"] == "music" and sa3_row["vocals"] is False and sa3_row["fits"] is True, repr(sa3_row))
+sa3_unit = a.render_container("sa3-song", sa3_song, sa3_rt, sa3_variant, {"model": "sa3"}, a.cpu_device(cpu_only_profile), "d" * 16)
+check("a CPU container unit adds no GPU devices", "AddDevice=" not in sa3_unit and "Tmpfs=/tmp" in sa3_unit)
+
+# Vulkan Stable Audio 3 runtime for AMD GPUs: render node, tmpfs, api = "sa3", multi-artifact dir.
+sa3_vk_rt = {"image": "registry.example/test/sa3-vulkan@sha256:" + "e" * 64, "tier": "omarchy", "api": "sa3", "port": 8085,
+             "health": {"probe": ["curl", "http://127.0.0.1:8085/health"]}, "command": ["sa3-server"],
+             "reserved": ["--port", "SA3_API_KEY"], "run": {"devices": ["render"], "group_add": "keep-groups", "tmpfs": "/tmp"},
+             "gpus": ["amd"], "inputs": {"model": {"arg": "--models"}, "key": {"env": "SA3_API_KEY"}}}
+sa3_vk_variant = {"peak_ram_gib": 4, "peak_gpu_gib": 4}
+sa3_vk_song = {"name": "Stable Audio 3 Medium", "vendor": "stability", "kind": "music", "vocals": False, "runtime": "sa3-vulkan",
+               "hardware": [{"gpu": "amd-strix-halo", "ram_class": 192, "measured": "measurements/model.toml"}],
+               "artifacts": [
+                 {"repo": "test/sa3-m", "revision": "a" * 40, "license": "other", "files": ["dit.gguf", "same.gguf"], "dest": "sa3", "model": "."},
+                 {"repo": "test/t5gemma", "revision": "b" * 40, "license": "gemma", "files": ["t5.gguf", "vocab.gguf"], "dest": "sa3"},
+               ],
+               "variant": [sa3_vk_variant]}
+check("an AMD Vulkan sa3 runtime and multi-artifact instrumental recipe validate",
+      not a.validate_runtime("sa3-vulkan", sa3_vk_rt) and not a.validate_recipe("sa3-vk-song", sa3_vk_song, {"sa3-vulkan": sa3_vk_rt}),
+      "\n".join(a.validate_runtime("sa3-vulkan", sa3_vk_rt) + a.validate_recipe("sa3-vk-song", sa3_vk_song, {"sa3-vulkan": sa3_vk_rt})))
+amd_profile = {"platform": "x86", "ram_class": 192, "ram_gib": 188,
+               "gpus": [{"vendor": "amd", "family": "amd-strix-halo", "render_node": "/dev/dri/renderD128",
+                         "vram_gib": 0.5, "gtt_gib": 180, "unified": True, "memory_gib": 180.5, "max_memory_gib": 180.5, "sysfs": ""}]}
+sa3_vk_unit = a.render_container("sa3-vk-song", sa3_vk_song, sa3_vk_rt, sa3_vk_variant, {"model": "sa3"}, amd_profile["gpus"][0], "e" * 16)
+check("an AMD Vulkan sa3 container unit mounts the render node and tmpfs",
+      "AddDevice=/dev/dri/renderD128" in sa3_vk_unit and "Tmpfs=/tmp" in sa3_vk_unit and "--models" in sa3_vk_unit)
+
+
+# A runtime's warm-up: a malformed one is refused; one prompt of the model's own vocabulary goes
+# out with the key, nothing is sent without a tokenizer, and a failure doesn't fail the start.
+for bad in ({"prompts": 0, "pieces": 20000}, {"prompts": 1}, {"prompts": True, "pieces": 20000}):
+  changed = dict(runtime, warmup=bad)
+  check(f"runtime rejects warmup {bad}", any(".warmup" in e for e in a.validate_runtime("server", changed)))
+check("an OpenAI runtime takes a warm-up", not a.validate_runtime("server", dict(runtime, warmup={"prompts": 1, "pieces": 20000})))
+tok = Path(a.data_dir(), "models", "warm", "f" * 16, "model")
+# A rank folder's tokenizer.json links into /models, which only resolves inside the container.
+rank_tok = Path(a.data_dir(), "models", "warm", "f" * 16 + ".abc.rank0", "model")
+rank_tok.mkdir(parents=True, exist_ok=True)
+(rank_tok / "tokenizer.json").unlink(missing_ok=True)
+(rank_tok / "tokenizer.json").symlink_to("/models/model/tokenizer.json")
+tok.mkdir(parents=True, exist_ok=True)
+(tok / "tokenizer.json").write_text(json.dumps({"model": {"vocab": {"\u0120river": 0, "stone": 1, "<|eos|>": 2}}}))
+sent = []
+class Reply:
+  def __enter__(self): return self
+  def __exit__(self, *exc): return False
+  def read(self, *a): return b"{}"
+def fake_urlopen(request, timeout=None):
+  sent.append(request)
+  return Reply()
+published = []
+def fake_urlopen_checking(request, timeout=None):
+  published.append(a.warming("warm"))
+  return fake_urlopen(request, timeout)
+with patch.object(a.urllib.request, "urlopen", side_effect=fake_urlopen_checking):
+  a.warm_up("warm", "f" * 16, "test-key", {"warmup": {"prompts": 1, "pieces": 300}}, publish=lambda: published.append("published"))
+check("the model shows loading while it warms up, and running after", published[:2] == ["published", True] and not a.warming("warm"), repr(published))
+body = json.loads(sent[0].data) if sent else {}
+text = body.get("messages", [{}])[0].get("content", "")
+check("the warm-up sends one prompt of the model's vocabulary with the key",
+      len(sent) == 1 and sent[0].get_header("Authorization") == "Bearer test-key" and " river" in text and "<|eos|>" not in text and body.get("max_tokens") == 1)
+sent.clear()
+with patch.object(a.urllib.request, "urlopen", side_effect=fake_urlopen):
+  a.warm_up("missing", "f" * 16, "test-key", {"warmup": {"prompts": 1, "pieces": 300}})
+check("no tokenizer, no warm-up prompt", not sent)
+with patch.object(a.urllib.request, "urlopen", side_effect=a.urllib.error.URLError("refused")):
+  a.warm_up("warm", "f" * 16, "test-key", {"warmup": {"prompts": 2, "pieces": 300}})
+check("a failed warm-up leaves no marker behind", not a.warming("warm"))
+Path(a.warming_path("warm")).write_text("999999999\n")
+check("a marker whose process is gone holds nothing back", not a.warming("warm"))
+# An app holds a model while it runs; stop --unless-used leaves a held model, or one a tailnet
+# machine used lately, and stops the rest. The hold ends when the holder's input closes.
+holder = subprocess.Popen([sys.executable, "-I", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import agent_local as a; a.resolve_model = lambda rid: {'recipe_id': rid}; sys.exit(a.main(['hold', 'held']))", os.environ["ENGINE_ROOT"]],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+for _ in range(200):
+  if a.hold_exclusively("held", []) is False:
+    break
+  __import__("time").sleep(0.05)
+Path(a.clients_path()).write_text(json.dumps({"models": {"shared": 1}}))
+stopped = []
+def stop_unless_used(*rids):
+  with patch.object(a, "resolve_model", side_effect=lambda rid: {"recipe_id": rid}), patch.object(a, "running_models", return_value={"held", "shared", "idle"}), \
+       patch.object(a, "load_catalog", return_value={}), patch.object(a, "machine_profile", return_value={}), patch.object(a, "write_status"), \
+       patch.object(a, "evict_idle_weights"), patch.object(a, "stop_unit", side_effect=stopped.append):
+    return a.cmd_stop(["--unless-used", *rids])
+stop_unless_used()
+check("stop --unless-used stops only what no app holds and no tailnet machine uses", stopped == ["idle"], repr(stopped))
+stopped.clear()
+stop_unless_used("idle", "idle")
+check("a model named twice is stopped once", stopped == ["idle"], repr(stopped))
+holder.communicate(b"", timeout=10)
+stopped.clear()
+stop_unless_used("held", "shared")
+check("a hold ends when the holder's input closes", holder.returncode == 0 and stopped == ["held"], repr((holder.returncode, stopped)))
+os.unlink(a.clients_path())
 PY

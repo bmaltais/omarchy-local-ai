@@ -1,0 +1,28 @@
+# llama.cpp's llama-server with Tencent AngelSlim's Hy4-flash patch, built with CUDA for the DGX Spark by
+# Omacom from images/llamacpp-hy4: ggml-org/llama.cpp at the commit AngelSlim pins, with their one patch
+# (the architecture, its vision tower, multi-token prediction and the SPARK-4Bit kernels), which
+# upstream doesn't have yet. The image sets AngelSlim's recommended kernel switches. The driver's
+# libcuda arrives through CDI; the image carries only cudart and cuBLAS.
+# The key comes from LLAMA_API_KEY and covers every route but /health, which says only whether
+# the model has loaded. --offline keeps the server from fetching anything of its own accord.
+image = "ghcr.io/omacom/omarchy-local-ai/llamacpp-hy4@sha256:b146b900da90ef4311660df4286e779e5c18acb0a0d2ee792c378d941c34860e"
+tier = "third-party"
+review = "reviews/llamacpp-hy4-b146b900da90.toml"
+port = 8080
+command = ["llama-server", "--host", "0.0.0.0", "--port", "8080", "--offline", "--no-webui", "--gpu-layers", "all"]
+# Healthy once the model has loaded: /health answers 503 until then.
+health = { probe = ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:8080/health"] }
+# It writes nothing; the tmpfs is for the driver's caches.
+run = { devices = ["cdi-nvidia"], tmpfs = "/tmp" }
+# Its CUDA kernels are built for the GB10's sm_121a.
+gpus = ["nvidia-gb10"]
+reserved = ["--host", "--port", "--api-key", "--api-key-file", "--offline", "--webui", "--ui", "--no-webui", "--no-ui", "--path", "--tools", "--tools-runtime", "--agent", "-ag", "--no-agent", "-no-ag", "--allow-unauthenticated-tools", "--mcp-servers-config", "--mcp-servers-json", "--ui-mcp-proxy", "--webui-mcp-proxy", "--no-ui-mcp-proxy", "--no-webui-mcp-proxy", "--rpc", "--props", "--hf-repo", "-hf", "-hfr", "--hf-file", "-hff", "--hf-token", "-hft", "--model-url", "-mu", "--docker-repo", "-dr", "--mmproj-url", "-mmu", "--spec-draft-hf", "-hfd", "-hfrd", "--hf-repo-draft", "--models-dir", "--models-preset", "--slot-save-path", "--media-path", "--log-file", "--ssl-key-file", "--ssl-cert-file", "LLAMA_API_KEY", "HF_TOKEN"]
+
+[inputs]
+model = { arg = "--model" }
+ctx = { arg = "--ctx-size" }
+alias = { arg = "--alias" }
+key = { env = "LLAMA_API_KEY" }
+temperature = { arg = "--temp" }
+top_p = { arg = "--top-p" }
+top_k = { arg = "--top-k" }

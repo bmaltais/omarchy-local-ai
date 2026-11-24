@@ -1,0 +1,57 @@
+#!/bin/bash
+# What one rank reads besides the checkpoint, made from the checkpoint alone (no GPU, no network), into /prepared:
+#   kit/                    the image's kernel kit with the RoPE tables and image routing bias of this checkpoint,
+#                           every other file checked against the kit's MANIFEST
+#   dsv41_token_map.json    Engram's token map, from the checkpoint's tokenizer
+#   model/                  (rank 0) the folder it serves: the checkpoint linked, with the recipe's chat template
+#   rank-cache/             this rank's weight file (rank<R>of<W>-<index hash>.bin, ~106 GB at TP=2)
+# omarchy-local-ai runs it once per rank and file set: /models holds model/ (the checkpoint) and engram/ (the base
+# model's Engram shards), read-only. Safe to re-run: finished steps are kept.
+#   prepare <rank> <world>
+set -euo pipefail
+rank=${1:?rank} world=${2:?world}
+[[ "$rank" =~ ^[0-9]+$ && "$world" =~ ^[1-9][0-9]*$ ]] && (( rank < world )) || { echo "prepare: bad rank $rank of $world" >&2; exit 2; }
+model=/models/model out=/prepared tools=/opt/tensorfold/tools/inputs
+[[ -f $model/config.json ]] || { echo "prepare: no checkpoint at $model" >&2; exit 1; }
+
+if [[ ! -f $out/kit/.ready ]]; then
+  echo "prepare: kernel kit with this checkpoint's RoPE tables and image routing bias"
+  rm -rf "$out/kit.new" && cp -a /opt/tensorfold/kit "$out/kit.new"
+  python3 "$tools/make_rope.py" "$model/config.json" "$out/kit.new" >/dev/null
+  python3 "$tools/make_bias_vl.py" "$model" "$out/kit.new/vision/gate_bias_vl.safetensors" >/dev/null
+  bad=0
+  while read -r sum path; do
+    [[ -f "$out/kit.new/$path" ]] || { echo "prepare: kit file missing: $path" >&2; bad=1; continue; }
+    [[ "$path" == vision/gate_bias_vl.safetensors ]] && continue   # 1017's own; the kit was recorded on another release
+    [[ "$(sha256sum "$out/kit.new/$path" | cut -d' ' -f1)" == "$sum" ]] || { echo "prepare: kit file differs: $path" >&2; bad=1; }
+  done < "$out/kit.new/MANIFEST"
+  (( ! bad )) || exit 1
+  touch "$out/kit.new/.ready" && mv "$out/kit.new" "$out/kit"
+fi
+
+if [[ ! -s $out/dsv41_token_map.json ]]; then
+  echo "prepare: Engram's token map"
+  python3 "$tools/make_token_map.py" "$model" "$out/dsv41_token_map.json.new" >/dev/null
+  mv "$out/dsv41_token_map.json.new" "$out/dsv41_token_map.json"
+fi
+
+# The folder rank 0 serves: the checkpoint's files linked (they resolve to /models inside the container), with the
+# recipe's chat template, since the release ships its chat format as Python the server can't run.
+if [[ "$rank" == 0 ]]; then
+  rm -rf "$out/model.new" && mkdir -p "$out/model.new"
+  for f in "$model"/*; do ln -s "$f" "$out/model.new/"; done
+  rm -f "$out/model.new/chat_template.jinja"
+  cp /opt/omarchy/chat_template.jinja "$out/model.new/chat_template.jinja"
+  rm -rf "$out/model" && mv "$out/model.new" "$out/model"
+fi
+
+want=$(tf-dsv41-rank-cache "$model" /tmp/index-only "$rank" "$world" --index-only | sha256sum | cut -c1-20)
+mkdir -p "$out/rank-cache"
+if [[ ! -f $out/rank-cache/rank${rank}of${world}-$want.bin ]]; then
+  echo "prepare: weight file of rank $rank of $world (a few minutes)"
+  find "$out/rank-cache" -maxdepth 1 -name "rank${rank}of${world}-*" -delete
+  rm -f "$out/rank-cache/.rank${rank}of${world}.partial"
+  tf-dsv41-rank-cache "$model" "$out/rank-cache" "$rank" "$world" >/dev/null
+fi
+[[ -f $out/rank-cache/rank${rank}of${world}-$want.bin ]] || { echo "prepare: no weight file for rank $rank" >&2; exit 1; }
+echo "prepare: rank $rank of $world ready"

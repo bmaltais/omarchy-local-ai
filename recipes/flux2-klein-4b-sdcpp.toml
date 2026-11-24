@@ -1,0 +1,51 @@
+# Black Forest Labs' FLUX.2 [klein] 4B, distilled to 4 steps, with Qwen3 4B as its text encoder and the
+# FLUX.2 autoencoder, on stable-diffusion.cpp's sd-server. It makes new images and changes one by an
+# instruction, given the picture as a reference image ("include Princess Peach", "make it night").
+name = "FLUX.2 Klein 4B"
+vendor = "bfl"
+kind = "image"
+edit = true
+runtime = "sdcpp"
+# What a setup downloads: the files the artifacts below pin, not the runtime image.
+download_gib = 8.3
+
+[[hardware]]
+gpu = "amd-strix-halo"
+ram_class = 64
+measured = "measurements/flux2-klein-4b-sdcpp-strix-halo-64.toml"
+
+[[hardware]]
+gpu = "amd-strix-halo"
+ram_class = 192
+measured = "measurements/flux2-klein-4b-sdcpp-strix-halo-192.toml"
+
+[[artifacts]]
+repo = "leejet/FLUX.2-klein-4B-GGUF"
+revision = "3b1f5a9dc3abb32238b053aeb3d823c30afdacbd"
+license = "apache-2.0"
+files = ["flux-2-klein-4b-Q8_0.gguf"]
+model = "flux-2-klein-4b-Q8_0.gguf"
+
+[[artifacts]]
+repo = "unsloth/Qwen3-4B-GGUF"
+revision = "22c9fc8a8c7700b76a1789366280a6a5a1ad1120"
+license = "apache-2.0"
+files = ["Qwen3-4B-Q8_0.gguf"]
+text_encoder = "Qwen3-4B-Q8_0.gguf"
+
+[[artifacts]]
+repo = "Comfy-Org/flux2-klein-4B"
+revision = "5b3abca5c0dc1ecd4eaf3340868d09063fc1c965"
+license = "apache-2.0"
+files = ["split_files/vae/flux2-vae.safetensors"]
+vae = "split_files/vae/flux2-vae.safetensors"
+
+# Measured: 9.7 GiB of GPU memory at its peak, generating at 1024x1024.
+[[variant]]
+peak_ram_gib = 11
+peak_gpu_gib = 11
+
+# The VAE decodes in 512-pixel tiles: on an Arc B390 a whole 1024x1024 image takes 16 s, as its
+# buffer can't be pinned, and tiles 6 s, with no seam to see.
+[server]
+args = ["--cfg-scale", "1.0", "--steps", "4", "--sampling-method", "euler", "--vae-tiling", "--vae-tile-size", "512"]

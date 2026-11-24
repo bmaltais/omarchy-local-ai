@@ -13,7 +13,7 @@ import urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, ROOT)
 from agent_local import (LocalError, resolve_model, key_path, choose_gpu, machine_profile,
-                         free_memory, say, meminfo, gib, _read, endpoint, write_atomic)
+                         free_memory, say, meminfo, gib, _read, endpoint, write_atomic, manifest_kind, UNIT_PREFIX)
 
 
 # The machine the numbers came from. On AMD the kernel carries the GPU driver; an NVIDIA driver
@@ -141,42 +141,104 @@ def bench_request(prompt, model, key, max_tokens=512):
   }
 
 
+BENCH_IMAGE_PROMPT = "A lighthouse on a rocky coast at dusk, waves breaking, warm light in the windows, photograph"
+BENCH_IMAGE_SIZE = 1024
+BENCH_IMAGES = 3
+
+
+def server_arg(manifest, flag):
+  """The value the recipe gives a server flag, as `--flag value` or `--flag=value`."""
+  args = manifest["recipe"].get("server", {}).get("args", []) + manifest["variant"].get("args", [])
+  value = None
+  for index, arg in enumerate(args):
+    if arg == flag and index + 1 < len(args):
+      value = args[index + 1]
+    elif arg.startswith(flag + "="):
+      value = arg.split("=", 1)[1]
+  return value
+
+
+def image_request(model, key, size=BENCH_IMAGE_SIZE):
+  """One image through the OpenAI-compatible endpoint at the server's default steps; seconds taken."""
+  body = {"model": model, "prompt": BENCH_IMAGE_PROMPT, "n": 1, "size": f"{size}x{size}", "response_format": "b64_json"}
+  request = urllib.request.Request(
+    f"{endpoint(model)}/images/generations",
+    data=json.dumps(body).encode(),
+    headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+  )
+  start = time.monotonic()
+  with urllib.request.urlopen(request, timeout=1800) as response:
+    answer = json.load(response)
+  if not (answer.get("data") or [{}])[0].get("b64_json"):
+    raise LocalError("The server answered without an image")
+  return round(time.monotonic() - start, 2)
+
+
+def bench_image(rid, key, active):
+  say(f"Benchmarking {rid}: 1 warmup, then {BENCH_IMAGES} images at {BENCH_IMAGE_SIZE}x{BENCH_IMAGE_SIZE}, the recipe's default steps")
+  first = image_request(rid, key)
+  times = []
+  for index in range(BENCH_IMAGES):
+    times.append(image_request(rid, key))
+    say(f"  image {index + 1}: {times[-1]}s")
+  steps = server_arg(active, "--steps")
+  return {
+    "width": BENCH_IMAGE_SIZE,
+    "height": BENCH_IMAGE_SIZE,
+    "steps": int(steps) if steps and steps.isdigit() else None,
+    "images": BENCH_IMAGES,
+    "first_image_s": first,
+    "seconds_per_image": sorted(times)[len(times) // 2],
+  }
+
+
+def nvidia_process_mib(container):
+  """The GPU memory the container's processes hold, in MiB, as nvidia-smi counts it; 0 when it can't say."""
+  try:
+    pids = set(subprocess.run(["podman", "top", container, "hpid"], capture_output=True, text=True, timeout=10).stdout.split()[1:])
+    apps = subprocess.run(["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10).stdout
+  except (OSError, subprocess.SubprocessError):
+    return 0
+  rows = [line.split(",") for line in apps.splitlines() if line.count(",") == 1]
+  return sum(int(used) for pid, used in rows if pid.strip() in pids and used.strip().isdigit())
+
+
 def cmd_bench(argv):
   parser = argparse.ArgumentParser(prog="tools/bench")
   parser.add_argument("recipe", nargs="?", help="the running model (default: the last one started)")
   parser.add_argument("--output", help="write the measurement record here (default: print it)")
   args = parser.parse_args(argv)
   active = resolve_model(args.recipe, running_only=True)
+  image = manifest_kind(active) == "image"
   corpus = os.path.join(ROOT, "bench", "context.txt")
-  if not os.path.isfile(corpus):
+  if not image and not os.path.isfile(corpus):
     raise LocalError("The checkout has no bench/context.txt prompt corpus")
-  with open(corpus, encoding="utf-8") as handle:
-    context = handle.read()
   with open(key_path()) as handle:
     key = handle.read().strip()
   rid = active["recipe_id"]
   gpu = choose_gpu(machine_profile(), active["gpu"])
-  low_ram = [free_memory(gpu)[0]]
+  low_ram, low_gpu = [free_memory(gpu)[0]], [free_memory(gpu)[1]]
+  # A unified NVIDIA GPU has no memory counter of its own, but its driver counts by process.
+  held = [0]
   stop = threading.Event()
 
   def sample():
     while not stop.is_set():
-      low_ram.append(free_memory(gpu)[0])
+      ram, gpu_free = free_memory(gpu)
+      low_ram.append(ram)
+      low_gpu.append(gpu_free)
+      if gpu["vendor"] == "nvidia":
+        held.append(nvidia_process_mib(UNIT_PREFIX + rid))
       stop.wait(0.5)
 
   sampler = threading.Thread(target=sample, daemon=True)
   sampler.start()
   try:
-    say(f"Benchmarking {rid}: short prompt, ~32K-token prompt and a code edit (greedy, thinking off, 512 tokens out)")
-    bench_request("Say ok.", rid, key, max_tokens=8)
-    short = bench_request(BENCH_SHORT, rid, key)
-    say(f"  short: decode {short['decode_tok_s']} tok/s, first token {short['ttft_s']}s")
-    long = bench_request(context + "\n\n" + BENCH_LONG_QUESTION, rid, key)
-    say(f"  long ({long['prompt_tokens']} tokens): first token {long['ttft_s']}s, prefill {long['prefill_tok_s']} tok/s, decode {long['decode_tok_s']} tok/s")
-    with open(os.path.join(ROOT, "bench", "edit.py.txt"), encoding="utf-8") as handle:
-      code = handle.read()
-    edit = bench_request("```python\n" + code + "```\n\n" + BENCH_EDIT_QUESTION, rid, key)
-    say(f"  edit ({edit['prompt_tokens']} tokens): decode {edit['decode_tok_s']} tok/s")
+    if image:
+      # Not under "image", which names the runtime image the record was measured with.
+      timings = {"generation": bench_image(rid, key, active)}
+    else:
+      timings = bench_text(rid, key, corpus)
   finally:
     stop.set()
     sampler.join()
@@ -186,12 +248,13 @@ def cmd_bench(argv):
     pin = {"repo": f["repo"], "revision": f["revision"]}
     if pin not in pins:
       pins.append(pin)
+  observed = active.get("observed") or {}
   record = {
     "recipe": rid,
     "measured_at": time.strftime("%Y-%m-%d"),
     "catalog_version": active.get("catalog", {}).get("version"),
     "image": active["image"],
-    "ctx": active["variant"]["ctx"],
+    "ctx": active["variant"].get("ctx"),
     "machine": {
       "platform": active["profile"]["platform"],
       "gpu": active["gpu"],
@@ -203,18 +266,20 @@ def cmd_bench(argv):
       **({"gpu_driver": driver} if (driver := nvidia_driver(_read("/proc/driver/nvidia/version"))) else {}),
     },
     "memory": {
-      "observed_at_load_gib": (active.get("observed") or {}).get("ram_used_gib"),
+      "observed_at_load_gib": observed.get("ram_used_gib"),
       "min_available_during_bench_gib": round(min(low_ram), 1),
       "total_gib": round(gib(mem.get("MemTotal", 0)), 1),
+      # What the GPU held at its busiest: the load's share plus what generating took on top, or
+      # where the driver counts by process, the most the server's processes held.
+      **({"peak_gpu_gib": round(max(held) / 1024, 1) if any(held) else round(observed["gpu_used_gib"] + low_gpu[0] - min(low_gpu), 1)} if image and observed.get("gpu_used_gib") is not None else {}),
     },
-    "load_seconds": (active.get("observed") or {}).get("load_seconds"),
+    "load_seconds": observed.get("load_seconds"),
     # A Hugging Face revision fixes every file's bytes, and the file set hashes the ones used.
     "fileset": active["fileset"],
     "artifacts": pins,
-    "short": short,
-    "long": long,
-    "edit": edit,
-    "method": "tools/bench: 1 warmup, then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed",
+    **timings,
+    "method": f"tools/bench: 1 warmup, then {BENCH_IMAGES} {BENCH_IMAGE_SIZE}x{BENCH_IMAGE_SIZE} images through /v1/images/generations at the recipe's default steps, the median kept" if image else
+              "tools/bench: 2 warmups (a 128-token reply, a ~4K-token prompt from the corpus tail), then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed",
   }
   text = toml_dumps(record)
   if args.output:
@@ -223,6 +288,26 @@ def cmd_bench(argv):
   else:
     print(text)
   return 0
+
+
+def bench_text(rid, key, corpus):
+  with open(corpus, encoding="utf-8") as handle:
+    context = handle.read()
+  say(f"Benchmarking {rid}: short prompt, ~32K-token prompt and a code edit (greedy, thinking off, 512 tokens out)")
+  # Warm what the measured requests use: a reply long enough to run speculative drafting, and a
+  # few thousand prompt tokens. The prompt is the corpus's tail, so it shares no prefix with the
+  # measured prompts and their prompt caches stay cold.
+  bench_request("Count from 1 to 60, separated by commas.", rid, key, max_tokens=128)
+  bench_request(context[-16000:] + "\n\nSummarize this in one sentence.", rid, key, max_tokens=32)
+  short = bench_request(BENCH_SHORT, rid, key)
+  say(f"  short: decode {short['decode_tok_s']} tok/s, first token {short['ttft_s']}s")
+  long = bench_request(context + "\n\n" + BENCH_LONG_QUESTION, rid, key)
+  say(f"  long ({long['prompt_tokens']} tokens): first token {long['ttft_s']}s, prefill {long['prefill_tok_s']} tok/s, decode {long['decode_tok_s']} tok/s")
+  with open(os.path.join(ROOT, "bench", "edit.py.txt"), encoding="utf-8") as handle:
+    code = handle.read()
+  edit = bench_request("```python\n" + code + "```\n\n" + BENCH_EDIT_QUESTION, rid, key)
+  say(f"  edit ({edit['prompt_tokens']} tokens): decode {edit['decode_tok_s']} tok/s")
+  return {"short": short, "long": long, "edit": edit}
 
 
 if __name__ == "__main__":

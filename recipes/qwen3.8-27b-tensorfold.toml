@@ -12,6 +12,11 @@ measured = "measurements/qwen3.8-27b-tensorfold-gb10-128.toml"
 
 [[hardware]]
 gpu = "nvidia-n1x"
+ram_class = 128
+measured = "measurements/qwen3.8-27b-tensorfold-n1x-128.toml"
+
+[[hardware]]
+gpu = "nvidia-n1x"
 ram_class = 64
 measured = "measurements/qwen3.8-27b-tensorfold-n1x-64.toml"
 

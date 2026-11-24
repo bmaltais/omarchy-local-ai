@@ -1,0 +1,49 @@
+recipe = "hy4-flash-llamacpp-hy4"
+measured_at = "2026-11-20"
+image = "localhost/llamacpp-hy4@sha256:38f38825f793916b72a8e8fc0dbd9b38a88bd460c30faf1251571b76023372ec"
+ctx = 196608
+load_seconds = 32.0
+fileset = "44b8422bdcf8f8f5"
+method = "tools/bench: 2 warmups (a 128-token reply, a ~4K-token prompt from the corpus tail), then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
+
+[machine]
+platform = "aarch64-gb10"
+gpu = "nvidia-gb10"
+ram_class = 128
+system = "NVIDIA NVIDIA_DGX_Spark"
+kernel = "7.3.0-72-omarchy"
+cpu = "Cortex-X925 + Cortex-A725"
+gpu_driver = "615.78.08"
+
+[memory]
+observed_at_load_gib = 95.5
+min_available_during_bench_gib = 19.3
+total_gib = 121.9
+
+[short]
+prompt_tokens = 49
+completion_tokens = 512
+ttft_s = 0.34
+prefill_tok_s = 144.2
+decode_tok_s = 32.7
+total_s = 15.94
+
+[long]
+prompt_tokens = 31707
+completion_tokens = 512
+ttft_s = 49.31
+prefill_tok_s = 643.0
+decode_tok_s = 32.5
+total_s = 65.04
+
+[edit]
+prompt_tokens = 2209
+completion_tokens = 512
+ttft_s = 3.62
+prefill_tok_s = 610.4
+decode_tok_s = 34.3
+total_s = 18.53
+
+[[artifacts]]
+repo = "AngelSlim/Hy4-flash-GGUF"
+revision = "bcbc7db5dcf4162cc1e1b8ed6c65567e843ebe46"

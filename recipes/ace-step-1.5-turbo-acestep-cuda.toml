@@ -1,0 +1,29 @@
+# ACE Studio and StepFun's ACE-Step 1.5 on acestep.cpp's CUDA build for NVIDIA's unified-memory
+# ARM machines, with the Vulkan recipe's weights: its 4B language model writes the song out, the
+# 2B turbo diffusion transformer renders it in 8 steps, with Qwen3 Embedding 0.6B as its text
+# encoder and its own VAE. Never recommended, only offered.
+name = "ACE-Step 1.5 Turbo"
+vendor = "ace-step"
+kind = "music"
+vocals = true
+runtime = "acestep-cuda"
+# What a setup downloads: the files the artifacts below pin, not the runtime image.
+download_gib = 7.57
+
+[[hardware]]
+gpu = "nvidia-n1x"
+ram_class = 128
+measured = "measurements/ace-step-1.5-turbo-acestep-cuda-n1x-128.toml"
+
+[[artifacts]]
+repo = "Serveurperso/ACE-Step-1.5-GGUF"
+revision = "666ac70204440867d8c01ba4b119cc79c95b370a"
+license = "mit"
+files = ["acestep-5Hz-lm-4B-Q8_0.gguf", "acestep-v15-turbo-Q8_0.gguf", "Qwen3-Embedding-0.6B-Q8_0.gguf", "vae-BF16.gguf"]
+dest = "acestep"
+model = "."
+
+# Measured: 6.8 GiB of GPU memory at its peak, making a 180 s song in 31 s; none between songs.
+[[variant]]
+peak_ram_gib = 8
+peak_gpu_gib = 8

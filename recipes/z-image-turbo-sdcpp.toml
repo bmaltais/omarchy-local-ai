@@ -1,0 +1,50 @@
+# Tongyi-MAI's Z-Image Turbo, a diffusion transformer distilled to 8 steps, with Qwen3 4B as its text
+# encoder and the Flux autoencoder as its VAE, on stable-diffusion.cpp's sd-server.
+name = "Z-Image Turbo"
+vendor = "alibaba"
+kind = "image"
+runtime = "sdcpp"
+# What a setup downloads: the files the artifacts below pin, not the runtime image.
+download_gib = 10.42
+
+[[hardware]]
+gpu = "amd-strix-halo"
+ram_class = 64
+measured = "measurements/z-image-turbo-sdcpp-strix-halo-64.toml"
+
+[[hardware]]
+gpu = "amd-strix-halo"
+ram_class = 192
+measured = "measurements/z-image-turbo-sdcpp-strix-halo-192.toml"
+
+[[artifacts]]
+repo = "leejet/Z-Image-Turbo-GGUF"
+revision = "c61c0e422dc8b541b7548cf33a4ef8302b0f8085"
+license = "apache-2.0"
+files = ["z_image_turbo-Q8_0.gguf"]
+model = "z_image_turbo-Q8_0.gguf"
+
+[[artifacts]]
+repo = "unsloth/Qwen3-4B-Instruct-2507-GGUF"
+revision = "a06e946bb6b655725eafa393f4a9745d460374c9"
+license = "apache-2.0"
+files = ["Qwen3-4B-Instruct-2507-Q8_0.gguf"]
+text_encoder = "Qwen3-4B-Instruct-2507-Q8_0.gguf"
+
+# Hugging Face redirects Comfy-Org/z_image_turbo here.
+[[artifacts]]
+repo = "Comfy-Org/Z-Image-Turbo"
+revision = "6fc90a3b1b653e935a0d175e260736de25b84df5"
+license = "apache-2.0"
+files = ["split_files/vae/ae.safetensors"]
+vae = "split_files/vae/ae.safetensors"
+
+# Measured: about 13 GiB of GPU memory generating at 1024x1024.
+[[variant]]
+peak_ram_gib = 14
+peak_gpu_gib = 14
+
+# The VAE decodes in 512-pixel tiles: on an Arc B390 a whole 1024x1024 image takes 16 s, as its
+# buffer can't be pinned, and tiles 6 s, with no seam to see.
+[server]
+args = ["--cfg-scale", "1.0", "--steps", "8", "--vae-tiling", "--vae-tile-size", "512"]

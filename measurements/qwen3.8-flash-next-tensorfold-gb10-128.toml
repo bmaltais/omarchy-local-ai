@@ -1,7 +1,7 @@
 recipe = "qwen3.8-flash-next-tensorfold"
 measured_at = "2026-11-03"
 catalog_version = "0.4.0"
-image = "ghcr.io/omacom/tensorfold@sha256:c88821d872e22f9dc6148173816b654e2c6dcd712fae50bc5e95915e3f817856"
+image = "ghcr.io/omacom/omarchy-local-ai/tensorfold@sha256:c88821d872e22f9dc6148173816b654e2c6dcd712fae50bc5e95915e3f817856"
 ctx = 262144
 load_seconds = 66.0
 fileset = "e7759ea18ac20345"

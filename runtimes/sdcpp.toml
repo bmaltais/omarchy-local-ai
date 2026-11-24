@@ -1,0 +1,27 @@
+# stable-diffusion.cpp's sd-server, for image models, built by Omacom from images/sdcpp (first published from omacom/sdcpp-image) from
+# leejet/stable-diffusion.cpp with two patches open upstream: the key from SD_API_KEY (or
+# --api-key-file), and a clean stop on SIGINT and SIGTERM. Vulkan on the render node only, no ROCm.
+# It lists itself as sd-cpp-local rather than the recipe, so the engine checks it is ready by its
+# model status (api = "sdcpp") instead of /v1/models. Generation defaults (steps, CFG scale) are
+# the model's, set in each recipe's server args.
+image = "ghcr.io/omacom/omarchy-local-ai/sdcpp@sha256:ce64fc9ea6144680161dd5c6355c2bfb3e33822d829b50b7338ba86cad4063b4"
+tier = "third-party"
+review = "reviews/sdcpp-ce64fc9ea614.toml"
+api = "sdcpp"
+port = 1234
+command = ["sd-server", "--listen-ip", "0.0.0.0", "--listen-port", "1234"]
+# Healthy once the model has loaded: its status, asked with the key, says ready.
+health = { probe = ["/bin/sh", "-c", "curl -fsS -H \"Authorization: Bearer $OMARCHY_LOCAL_KEY\" http://127.0.0.1:1234/sdcpp/v1/models/status | grep -q '\"state\": *\"ready\"'"] }
+# It writes scratch files only under /tmp.
+run = { devices = ["render"], group_add = "keep-groups", tmpfs = "/tmp" }
+# Its image carries Mesa's RADV and ANV, so it runs on AMD and Intel GPUs.
+gpus = ["amd", "intel"]
+reserved = ["--listen-ip", "--listen-port", "--api-key", "--api-key-file", "SD_API_KEY"]
+
+[inputs]
+model = { arg = "--diffusion-model" }
+text_encoder = { arg = "--llm" }
+vae = { arg = "--vae" }
+audio_vae = { arg = "--audio-vae" }
+lora = { arg = "--lora-model-dir" }
+key = { env = "SD_API_KEY" }

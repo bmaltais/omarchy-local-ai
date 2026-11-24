@@ -1,0 +1,17 @@
+image = "ghcr.io/omacom/omarchy-local-ai/sdcpp@sha256:ce64fc9ea6144680161dd5c6355c2bfb3e33822d829b50b7338ba86cad4063b4"
+publisher = "Omacom (built from images/sdcpp by this repository's workflow: leejet/stable-diffusion.cpp 532d2c15 with two patches open upstream)"
+reviewer = "Claude Code for David Heinemeier Hansson"
+date = "2026-11-20"
+version = "stable-diffusion.cpp 532d2c15c430a785a712b2d94281f04e733008a4 + patches 0001 (API key from SD_API_KEY or --api-key-file) and 0002 (stop on SIGINT/SIGTERM)"
+source = "open (MIT), https://github.com/leejet/stable-diffusion.cpp; image recipe images/sdcpp"
+license_url = "https://raw.githubusercontent.com/leejet/stable-diffusion.cpp/532d2c15c430a785a712b2d94281f04e733008a4/LICENSE"
+license_sha256 = "b53fa08f515cb5a6fff7b9fd8fcd0961a4b80df29d74372d25e1f9171aa042ee"
+checked = [
+  "license: stable-diffusion.cpp is MIT (the LICENSE at 532d2c15 hashes as above); ggml is MIT; its built-in third-party code keeps its notices: libwebp and libwebm (BSD-3-Clause), utf8proc (MIT), oniguruma (BSD-2-Clause), darts-clone (BSD-2-Clause); the texts ship in /usr/share/licenses/stable-diffusion.cpp",
+  "build: images/sdcpp's Containerfile, built by the images workflow, builds leejet/stable-diffusion.cpp at commit 532d2c15c430a785a712b2d94281f04e733008a4 with its two patches on docker.io/library/archlinux@sha256:fcee73ea1b96e236248f53a213f71276cc9072d9025b58bce9915e32f19963ae, for any x86-64 CPU (GGML_NATIVE off), with vulkan-radeon and vulkan-intel (Mesa 26.3.1): Vulkan only, no ROCm",
+  "behavior: loads the diffusion model, text encoder and VAE from local paths given as arguments; the image carries no model weights, they arrive by the engine's read-only /models mount",
+  "acceptance (2026-11-20): serves with a read-only root and a tmpfs at /tmp, all capabilities dropped, no-new-privileges and only the render node (Vulkan/ANV on an Arc B390, 64 GB), generating 1024x1024 images on the GPU: Z-Image Turbo in 92 s warm (183 s the first time, compiling its shaders), FLUX.2 Klein 4B in 38 s; it writes nothing outside /tmp",
+  "acceptance (2026-11-20): with --network none outbound connections fail (DNS fails)",
+  "acceptance (2026-11-20): rejects requests without the key (401) and serves them with it (200) on /sdcpp/v1/models/status",
+  "acceptance (2026-11-20): stops on SIGTERM in about 0.2 s with status 0",
+]

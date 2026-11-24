@@ -1,0 +1,20 @@
+image = "localhost/llamacpp-hy4@sha256:38f38825f793916b72a8e8fc0dbd9b38a88bd460c30faf1251571b76023372ec"
+publisher = "Omacom (built from images/llamacpp-hy4: ggml-org/llama.cpp 2cbca389 with AngelSlim's hy4-flash-spark.patch)"
+reviewer = "Claude Code for David Heinemeier Hansson"
+date = "2026-11-20"
+version = "llama.cpp 2cbca389f515df455412dafa07e2b1359cc72a6d + AngelSlim/Hy4-flash-GGUF patch/hy4-flash-spark.patch at bcbc7db5 (SHA-256 6ec50722c8b181222a928e0a66cda0159e8dff3e72f8193334f6296f6213dfff), built with CUDA 13.4.3 for compute capability 12.1a"
+source = "open (MIT), https://github.com/ggml-org/llama.cpp; patch https://huggingface.co/AngelSlim/Hy4-flash-GGUF; image recipe images/llamacpp-hy4 in https://github.com/omacom/omarchy-local-ai"
+license_url = "https://raw.githubusercontent.com/ggml-org/llama.cpp/2cbca389f515df455412dafa07e2b1359cc72a6d/LICENSE"
+license_sha256 = "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
+checked = [
+  "license: llama.cpp is MIT (the LICENSE at 2cbca389 hashes as above); ggml is MIT; its vendored third-party code keeps its notices; the texts ship in /usr/share/licenses/llama.cpp, and the patch in /usr/share/doc/llama.cpp",
+  "license: libcudart.so.13, libcublas.so.13 and libcublasLt.so.13 (CUDA 13.4.3) are redistributables under NVIDIA's CUDA EULA, Attachment A, shipped inside this value-added runtime with the EULA text from their packages in /usr/share/licenses/llama.cpp/nvidia",
+  "patch: AngelSlim's (Tencent's) single patch, fetched at a pinned Hugging Face revision and checked by SHA-256, touches only the model architecture (src/models/hy-v4-flash.cpp, llama-arch, llama-model, llama-graph, an index-aware KV cache), its vision tower (tools/mtmd), the CUDA kernels (mmq, mmvq, flash attention, HC fusion, lightning indexer), gguf-py's tensor names and conversion scripts; it adds no network, process or file access beyond reading the model",
+  "build: images/llamacpp-hy4's Containerfile builds the patched source on docker.io/nvidia/cuda@sha256:5626a7d0ecafe3e7c115a452f6b05f20f214f8509346196a7835b205dc5b7fd9 (13.4.3-devel-ubuntu24.04) with GGML_CUDA for 121a, no NCCL, a generic ARMv8 CPU side and no OpenSSL, built with Podman on a DGX Spark; the runtime layer is docker.io/library/ubuntu@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8 with libgomp1, curl and ca-certificates, and carries no CUDA toolkit: libcuda comes from the CDI spec",
+  "behavior: loads the model from the local path given as an argument; the image carries no model weights, they arrive by the engine's read-only /models mount; the runtime starts it with --offline and --no-webui and reserves the download, built-in tools, agent, MCP, RPC and web UI flags",
+  "acceptance (2026-11-20): serves Hy4 flash SPARK-4Bit-Fast with a read-only root and a tmpfs at /tmp, all capabilities dropped (CapEff 0), no-new-privileges and the GPU through CDI on a DGX Spark, at 32-34 tokens a second; writing to / fails",
+  "acceptance (2026-11-20): outbound connections from the container fail",
+  "acceptance (2026-11-20): rejects requests without the key (401) and serves them with it (200) on /v1/models, /props and /slots; /health is open by design and says only whether the model has loaded",
+  "acceptance (2026-11-20): describes a PNG through the vision projector",
+  "acceptance (2026-11-20): stops on SIGTERM without being killed, and the GPU memory is free at once",
+]

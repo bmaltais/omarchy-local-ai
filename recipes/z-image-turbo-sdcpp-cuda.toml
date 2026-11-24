@@ -1,0 +1,39 @@
+# Tongyi-MAI's Z-Image Turbo, a diffusion transformer distilled to 8 steps, on stable-diffusion.cpp's
+# CUDA build for NVIDIA's unified-memory ARM machines. The transformer is Comfy-Org's INT8 file,
+# which the CUDA build runs on its integer kernels: 10 s an image on the N1x, where the Q8_0 GGUF
+# the Vulkan recipe uses takes 17 s and the bf16 file 19 s.
+name = "Z-Image Turbo"
+kind = "image"
+runtime = "sdcpp-cuda"
+# What a setup downloads: the files the artifacts below pin, not the runtime image.
+download_gib = 10.07
+vendor = "alibaba"
+
+[[hardware]]
+gpu = "nvidia-n1x"
+ram_class = 128
+measured = "measurements/z-image-turbo-sdcpp-cuda-n1x-128.toml"
+
+# Hugging Face redirects Comfy-Org/z_image_turbo here.
+[[artifacts]]
+repo = "Comfy-Org/Z-Image-Turbo"
+revision = "6fc90a3b1b653e935a0d175e260736de25b84df5"
+license = "apache-2.0"
+files = ["split_files/diffusion_models/z_image_turbo_int8_convrot.safetensors", "split_files/vae/ae.safetensors"]
+model = "split_files/diffusion_models/z_image_turbo_int8_convrot.safetensors"
+vae = "split_files/vae/ae.safetensors"
+
+[[artifacts]]
+repo = "unsloth/Qwen3-4B-Instruct-2507-GGUF"
+revision = "a06e946bb6b655725eafa393f4a9745d460374c9"
+license = "apache-2.0"
+files = ["Qwen3-4B-Instruct-2507-Q8_0.gguf"]
+text_encoder = "Qwen3-4B-Instruct-2507-Q8_0.gguf"
+
+# Measured: 13.3 GiB of GPU memory at its peak, generating at 1024x1024 in 10.0 s.
+[[variant]]
+peak_ram_gib = 15
+peak_gpu_gib = 15
+
+[server]
+args = ["--cfg-scale", "1.0", "--steps", "8"]

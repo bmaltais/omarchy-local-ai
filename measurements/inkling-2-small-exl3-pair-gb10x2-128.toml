@@ -1,0 +1,49 @@
+recipe = "inkling-2-small-exl3-pair"
+measured_at = "2026-11-21"
+image = "localhost/inkling2-exl3@sha256:d1c1e81cfa3562e15e06d0c9d87a0d20a711655033260d4eaff62d896874be2c"
+ctx = 524288
+load_seconds = 456.0
+fileset = "569f0480536fd0ad"
+method = "tools/bench: 2 warmups (a 128-token reply, a ~4K-token prompt from the corpus tail), then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
+
+[machine]
+platform = "aarch64-gb10"
+gpu = "nvidia-gb10-pair"
+ram_class = 128
+system = "NVIDIA NVIDIA_DGX_Spark"
+kernel = "7.3.0-72-omarchy"
+cpu = "Cortex-X925 + Cortex-A725"
+gpu_driver = "615.78.08"
+
+[memory]
+observed_at_load_gib = 214.6
+min_available_during_bench_gib = 4.3
+total_gib = 121.9
+
+[short]
+prompt_tokens = 46
+completion_tokens = 512
+ttft_s = 1.48
+prefill_tok_s = 31.1
+decode_tok_s = 31.4
+total_s = 17.74
+
+[long]
+prompt_tokens = 38587
+completion_tokens = 512
+ttft_s = 68.79
+prefill_tok_s = 560.9
+decode_tok_s = 33.2
+total_s = 84.2
+
+[edit]
+prompt_tokens = 2891
+completion_tokens = 512
+ttft_s = 5.84
+prefill_tok_s = 495.0
+decode_tok_s = 52.5
+total_s = 15.57
+
+[[artifacts]]
+repo = "Evanguo12/Inkling-2-Small-EXL3-2.55bpw-2Spark"
+revision = "70442b516538ea1911cded1c796e876ff41334d5"

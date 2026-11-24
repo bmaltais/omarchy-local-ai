@@ -1,0 +1,31 @@
+recipe = "ace-step-1.5-turbo-acestep"
+measured_at = "2026-11-18"
+image = "ghcr.io/omacom/omarchy-local-ai/acestep@sha256:cedcf4768ee0e4dce0751e3a5641bc083fd85ee6100a09b9be2e18875dc75220"
+load_seconds = 0.7
+fileset = "75ca030f848772d4"
+method = "a 60 s and a 180 s song with given lyrics through /lm then /synth on the engine-run server, the turbo model's own 8 steps, to 128 kbit/s MP3; GPU memory from the GTT counter over its level before, every half second"
+
+[machine]
+platform = "x86"
+gpu = "amd-strix-halo"
+ram_class = 64
+system = "Framework Desktop (AMD Ryzen AI Max 300 Series)"
+kernel = "7.2.15-2-omarchy"
+cpu = "AMD Eng Sample: 100-000001243-50_Y"
+
+[memory]
+observed_at_load_gib = 0.1
+min_available_during_bench_gib = 24.8
+total_gib = 62.1
+peak_gpu_gib = 6.9
+
+# Writing a song out, then rendering it, for each length.
+[music]
+song_60s_written_s = 12.4
+song_60s_rendered_s = 6.8
+song_180s_written_s = 26.4
+song_180s_rendered_s = 18.6
+
+[[artifacts]]
+repo = "Serveurperso/ACE-Step-1.5-GGUF"
+revision = "666ac70204440867d8c01ba4b119cc79c95b370a"

@@ -1,0 +1,17 @@
+image = "ghcr.io/omacom/omarchy-local-ai/llamacpp@sha256:f0a25219fd9066ec8b44ba781a6450e9e9133384790f320c5309aa49af9c6982"
+publisher = "Omacom (built from omacom/llamacpp-image: ggml-org/llama.cpp b12521 with no patches)"
+reviewer = "Claude Code for David Heinemeier Hansson"
+date = "2026-11-19"
+version = "llama.cpp b12521 (6f311d7ad63dce97a3ad1deaafb7cc044bb8c26c)"
+source = "open (MIT), https://github.com/ggml-org/llama.cpp; image recipe https://github.com/omacom/llamacpp-image"
+license_url = "https://raw.githubusercontent.com/ggml-org/llama.cpp/6f311d7ad63dce97a3ad1deaafb7cc044bb8c26c/LICENSE"
+license_sha256 = "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
+checked = [
+  "license: llama.cpp is MIT (the LICENSE at 6f311d7a hashes as above); ggml is MIT; its vendored third-party code keeps its notices; the texts ship in /usr/share/licenses/llama.cpp",
+  "build: omacom/llamacpp-image's Containerfile builds ggml-org/llama.cpp at commit 6f311d7ad63dce97a3ad1deaafb7cc044bb8c26c with no patches on docker.io/library/archlinux@sha256:fcee73ea1b96e236248f53a213f71276cc9072d9025b58bce9915e32f19963ae, with vulkan-intel 26.2.7: Vulkan and the CPU backends only, built without OpenSSL so the server has no HTTPS client",
+  "behavior: loads the model from the local path given as an argument; the image carries no model weights, they arrive by the engine's read-only /models mount; the runtime starts it with --offline and --no-webui and reserves the download, built-in tools, agent, MCP, RPC and web UI flags",
+  "acceptance (2026-11-19): serves with a read-only root, all capabilities dropped, no-new-privileges and only the render node (Vulkan/ANV on an Arc B390), generating at 42 tokens a second with Qwen3.6 35B-A3B; it writes nothing to its filesystem (Mesa notes it has no shader cache directory and goes without)",
+  "acceptance (2026-11-19): with --network none it still serves locally and outbound connections fail (DNS fails)",
+  "acceptance (2026-11-19): rejects requests without the key (401) and serves them with it (200) on /v1/models, /props, /slots and /v1/chat/completions; /health is open by design and says only whether the model has loaded",
+  "acceptance (2026-11-19): stops on SIGTERM with exit code 0",
+]

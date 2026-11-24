@@ -1,4 +1,4 @@
-image = "ghcr.io/omacom/tensorfold@sha256:c88821d872e22f9dc6148173816b654e2c6dcd712fae50bc5e95915e3f817856"
+image = "ghcr.io/omacom/omarchy-local-ai/tensorfold@sha256:c88821d872e22f9dc6148173816b654e2c6dcd712fae50bc5e95915e3f817856"
 publisher = "Omacom (built from omacom/tensorfold-image, TensorFold's signed upstream release with no patches)"
 reviewer = "Claude Code for David Heinemeier Hansson"
 date = "2026-11-03"

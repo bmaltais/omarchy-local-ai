@@ -1,0 +1,40 @@
+recipe = "flux2-klein-4b-sdcpp"
+measured_at = "2026-11-18"
+image = "ghcr.io/omacom/omarchy-local-ai/sdcpp@sha256:f8f635b6afa594b7243916f6e0cf7f798e1fed838899edea093af3f2772bf37e"
+load_seconds = 4.0
+fileset = "004c5cd45fc1b6f0"
+method = "tools/bench: 1 warmup, then 3 1024x1024 images through /v1/images/generations at the recipe's default steps, the median kept"
+
+[machine]
+platform = "x86"
+gpu = "amd-strix-halo"
+ram_class = 64
+system = "Framework Desktop (AMD Ryzen AI Max 300 Series)"
+kernel = "7.2.15-2-omarchy"
+cpu = "AMD Eng Sample: 100-000001243-50_Y"
+
+[memory]
+observed_at_load_gib = -0.0
+min_available_during_bench_gib = 25.4
+total_gib = 62.1
+peak_gpu_gib = 9.7
+
+[generation]
+width = 1024
+height = 1024
+steps = 4
+images = 3
+first_image_s = 12.28
+seconds_per_image = 10.06
+
+[[artifacts]]
+repo = "leejet/FLUX.2-klein-4B-GGUF"
+revision = "3b1f5a9dc3abb32238b053aeb3d823c30afdacbd"
+
+[[artifacts]]
+repo = "unsloth/Qwen3-4B-GGUF"
+revision = "22c9fc8a8c7700b76a1789366280a6a5a1ad1120"
+
+[[artifacts]]
+repo = "Comfy-Org/flux2-klein-4B"
+revision = "5b3abca5c0dc1ecd4eaf3340868d09063fc1c965"

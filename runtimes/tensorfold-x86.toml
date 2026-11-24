@@ -11,6 +11,8 @@ port = 8888
 command = ["tensorfold-native", "serve", "--host", "0.0.0.0", "--port", "8888", "--no-update-check"]
 health = { probe = ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:8888/health"] }
 run = { devices = ["cdi-nvidia"], memlock = "unlimited" }
+# Its kernels include sm_86 and newer, but only the RTX 3090 is measured; the aarch64 GB10 image is its own runtime.
+gpus = ["nvidia-rtx3090"]
 reserved = ["--host", "--port", "--api-key", "--api-key-file", "--allowed-host", "--allowed-origin", "--learn", "--learn-dir", "--learn-conversations", "--recall", "--recall-dir", "--record", "--dashboard", "--metrics-open", "--speed-up", "--vision-urls", "TENSORFOLD_API_KEY", "TENSORFOLD_NO_UPDATE_CHECK", "TENSORFOLD_MEMORY_RESERVE_GIB", "HF_HUB_OFFLINE", "HF_TOKEN"]
 
 [inputs]

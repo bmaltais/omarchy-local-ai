@@ -1,0 +1,48 @@
+recipe = "qwen3.6-35b-a3b-llamacpp"
+measured_at = "2026-11-19"
+image = "ghcr.io/omacom/omarchy-local-ai/llamacpp@sha256:f0a25219fd9066ec8b44ba781a6450e9e9133384790f320c5309aa49af9c6982"
+ctx = 131072
+load_seconds = 7.0
+fileset = "b7473f080d8ca0af"
+method = "tools/bench: 1 warmup, then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
+
+[machine]
+platform = "x86"
+gpu = "intel-arc-b390"
+ram_class = 64
+system = "Dell Inc. XPS 14 DA14260"
+kernel = "7.2.15-2-omarchy"
+cpu = "Intel(R) Core(TM) Ultra X7 358H"
+
+[memory]
+observed_at_load_gib = 25.3
+min_available_during_bench_gib = 28.3
+total_gib = 62.3
+
+[short]
+prompt_tokens = 41
+completion_tokens = 141
+ttft_s = 0.59
+prefill_tok_s = 69.3
+decode_tok_s = 45.0
+total_s = 3.71
+
+[long]
+prompt_tokens = 31705
+completion_tokens = 512
+ttft_s = 60.79
+prefill_tok_s = 521.6
+decode_tok_s = 32.0
+total_s = 76.77
+
+[edit]
+prompt_tokens = 2306
+completion_tokens = 512
+ttft_s = 4.4
+prefill_tok_s = 524.0
+decode_tok_s = 130.5
+total_s = 8.32
+
+[[artifacts]]
+repo = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+revision = "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d"

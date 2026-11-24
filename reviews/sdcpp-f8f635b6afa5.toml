@@ -1,0 +1,17 @@
+image = "ghcr.io/omacom/omarchy-local-ai/sdcpp@sha256:f8f635b6afa594b7243916f6e0cf7f798e1fed838899edea093af3f2772bf37e"
+publisher = "Omacom (built from omacom/sdcpp-image: leejet/stable-diffusion.cpp 532d2c15 with two patches open upstream)"
+reviewer = "Claude Code for David Heinemeier Hansson"
+date = "2026-11-18"
+version = "stable-diffusion.cpp 532d2c15c430a785a712b2d94281f04e733008a4 + patches 0001 (API key from SD_API_KEY or --api-key-file) and 0002 (stop on SIGINT/SIGTERM)"
+source = "open (MIT), https://github.com/leejet/stable-diffusion.cpp; image recipe https://github.com/omacom/sdcpp-image"
+license_url = "https://raw.githubusercontent.com/leejet/stable-diffusion.cpp/532d2c15c430a785a712b2d94281f04e733008a4/LICENSE"
+license_sha256 = "b53fa08f515cb5a6fff7b9fd8fcd0961a4b80df29d74372d25e1f9171aa042ee"
+checked = [
+  "license: stable-diffusion.cpp is MIT (the LICENSE at 532d2c15 hashes as above); ggml is MIT; its built-in third-party code keeps its notices: libwebp and libwebm (BSD-3-Clause), utf8proc (MIT), oniguruma (BSD-2-Clause), darts-clone (BSD-2-Clause); the texts ship in /usr/share/licenses/stable-diffusion.cpp",
+  "build: omacom/sdcpp-image's Containerfile builds leejet/stable-diffusion.cpp at commit 532d2c15c430a785a712b2d94281f04e733008a4 with its two patches on docker.io/library/archlinux@sha256:fcee73ea1b96e236248f53a213f71276cc9072d9025b58bce9915e32f19963ae, with vulkan-radeon: Vulkan only, no ROCm",
+  "behavior: loads the diffusion model, text encoder and VAE from local paths given as arguments; the image carries no model weights, they arrive by the engine's read-only /models mount",
+  "acceptance (2026-11-18): serves with a read-only root and a tmpfs at /tmp, all capabilities dropped, no-new-privileges and only the render node (Vulkan/RADV on Strix Halo), generating a 1024x1024 image on the GPU in 31 s; it writes nothing outside /tmp",
+  "acceptance (2026-11-18): with --network none it still serves locally and outbound connections fail (DNS fails)",
+  "acceptance (2026-11-18): rejects requests without the key (401) and serves them with it (200) on /sdcpp/v1/models/status; CORS preflight is open by design",
+  "acceptance (2026-11-18): stops on SIGTERM in about 0.2 s",
+]

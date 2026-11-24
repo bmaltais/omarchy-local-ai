@@ -1,0 +1,75 @@
+# llama.cpp's llama-server with Tencent AngelSlim's Hy4-flash patch, built with CUDA for the DGX Spark
+# (GB10), as runtimes/llamacpp-hy4.toml runs it. Upstream llama.cpp doesn't know the model yet
+# (ggml-org/llama.cpp#32517 is open); AngelSlim's one patch adds the architecture, its vision
+# tower, multi-token prediction and the SPARK-4Bit kernels, against the upstream commit it names.
+# The patch is fetched from AngelSlim/Hy4-flash-GGUF at a pinned revision and checked by SHA-256.
+# The driver's libcuda arrives through CDI; the image carries only the CUDA runtime libraries the
+# server links, which NVIDIA's CUDA EULA lists as redistributable (Attachment A).
+
+# CUDA 13.4.3, the toolkit matching the 615 driver's CUDA 13.4, on Ubuntu 24.04.
+ARG BUILD_BASE=docker.io/nvidia/cuda@sha256:5626a7d0ecafe3e7c115a452f6b05f20f214f8509346196a7835b205dc5b7fd9
+ARG BASE=docker.io/library/ubuntu@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
+
+FROM ${BUILD_BASE} AS build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential cmake git ca-certificates curl
+ARG COMMIT=2cbca389f515df455412dafa07e2b1359cc72a6d
+ARG PATCH_REVISION=bcbc7db5dcf4162cc1e1b8ed6c65567e843ebe46
+ARG PATCH_SHA256=6ec50722c8b181222a928e0a66cda0159e8dff3e72f8193334f6296f6213dfff
+RUN git clone https://github.com/ggml-org/llama.cpp /src \
+ && git -C /src checkout --quiet "$COMMIT" \
+ && curl -fsSLo /hy4-flash-spark.patch \
+      "https://huggingface.co/AngelSlim/Hy4-flash-GGUF/resolve/${PATCH_REVISION}/patch/hy4-flash-spark.patch" \
+ && echo "${PATCH_SHA256}  /hy4-flash-spark.patch" | sha256sum -c - \
+ && git -C /src apply /hy4-flash-spark.patch
+# 121a is the GB10's compute capability with its architecture-specific instructions, which the
+# SPARK-4Bit kernels use. The CPU side stays generic ARMv8; NCCL is for several GPUs.
+RUN cmake -S /src -B /build -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DGGML_CUDA_NCCL=OFF -DBUILD_SHARED_LIBS=OFF \
+      -DCMAKE_CUDA_ARCHITECTURES=121a -DCMAKE_BUILD_TYPE=Release -DLLAMA_OPENSSL=OFF \
+      -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_TESTS=OFF \
+ && cmake --build /build --target llama-server -j"$(nproc)"
+# The CUDA libraries llama-server needs at run time, by what it links, with cuBLASLt, which cuBLAS
+# loads. Their packages' copyright files hold the EULA.
+RUN mkdir -p /cuda /licenses/nvidia \
+ && ldd /build/bin/llama-server | awk '/\/usr\/local\/cuda/ { print $3 }' \
+    | while read -r lib; do cp -L "$lib" /cuda/; done \
+ && cp -L /usr/local/cuda/lib64/libcublasLt.so.13 /cuda/ \
+ && for package in cuda-cudart-13-4 libcublas-13-4; do \
+      install -Dm644 "/usr/share/doc/$package/copyright" "/licenses/nvidia/$package"; \
+    done \
+ && ls -la /cuda
+# The licenses of llama.cpp, ggml and the third-party code built in.
+RUN cd /src \
+ && find . -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' \) -print \
+    | while read -r file; do install -Dm644 "$file" "/licenses/${file#./}"; done
+
+FROM ${BASE}
+# OpenMP for ggml's CPU side; curl for the health probe.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libgomp1 curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /cuda/ /usr/local/lib/
+RUN ldconfig
+COPY --from=build /build/bin/llama-server /usr/bin/llama-server
+COPY --from=build /licenses /usr/share/licenses/llama.cpp
+COPY --from=build /hy4-flash-spark.patch /usr/share/doc/llama.cpp/hy4-flash-spark.patch
+# AngelSlim's recommended switches for SPARK-4Bit on Linux. Each acts only where a tensor's type
+# and shape match its kernel, so other models are unaffected.
+ENV GGML_SCHED_BATCH_HOST_INPUTS=0 \
+    GGML_CUDA_FUSE_HC_GATE=1 \
+    GGML_CUDA_FUSE_HC_CONSUMER=1 \
+    GGML_CUDA_REUSE_Q8=1 \
+    GGML_CUDA_SPARK_MMQ_FUSION=1 \
+    GGML_CUDA_SPARK_MMQ_COMPACT_GRID=1 \
+    GGML_CUDA_SPARK_MMQ_TILE=64 \
+    GGML_CUDA_SPARK_MMQ_TILE_FUSED=64 \
+    GGML_CUDA_MMQ_PREC=q4 \
+    GGML_CUDA_CPY_F32_VEC=1 \
+    GGML_CUDA_SPARK_MMVQ_2W=1 \
+    GGML_CUDA_MOE_CONCURRENT=1 \
+    GGML_CUDA_FA_576_WHOLE_TILES=0
+LABEL org.opencontainers.image.source="https://github.com/omacom/omarchy-local-ai"
+LABEL org.opencontainers.image.description="llama.cpp's llama-server with AngelSlim's Hy4-flash patch, built with CUDA for omarchy-local-ai"
+LABEL org.opencontainers.image.licenses="MIT"
+EXPOSE 8080
+CMD ["llama-server", "--host", "0.0.0.0", "--port", "8080"]

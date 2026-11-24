@@ -12,14 +12,14 @@
 # release.pem is the release key (ed25519PublicKey in TensorFold's packaging/runtime-trust.json).
 # The build stops unless the archive's checksum, the signature over it and every unpacked file's checksum match.
 FROM docker.io/library/debian:trixie-slim AS fetch
-ARG TENSORFOLD_VERSION=1.2.7
+ARG TF_VERSION=1.2.7
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl openssl \
     && rm -rf /var/lib/apt/lists/*
 COPY release.pem /fetch/release.pem
 WORKDIR /fetch
 RUN set -eu; \
-    a="tensorfold-$TENSORFOLD_VERSION-linux-x86_64.tar.gz"; \
-    u="https://github.com/ashhart/TensorFold/releases/download/v$TENSORFOLD_VERSION"; \
+    a="tensorfold-$TF_VERSION-linux-x86_64.tar.gz"; \
+    u="https://github.com/ashhart/TensorFold/releases/download/v$TF_VERSION"; \
     curl -fsSLO "$u/$a" -fsSLO "$u/$a.sha256" -fsSLO "$u/$a.sha256.sig"; \
     sha256sum -c "$a.sha256"; \
     { printf 'tensorfold-native-checksum-v1\n'; cat "$a.sha256"; } > signed; \

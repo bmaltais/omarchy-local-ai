@@ -1,0 +1,52 @@
+# MiniMax H3, which makes video with its sound, from a prompt or from a picture as its first
+# frame, on stable-diffusion.cpp's CUDA build for NVIDIA's unified-memory ARM machines. The whole
+# first/last-frame model and the video decoder as Comfy-Org's INT8 files, which the CUDA build
+# runs on its integer kernels, in 4 steps with MiniMax's own turbo LoRA and P-H3's 4B text
+# encoder. On the N1x the pruned model samples no faster than the whole one, and the Q4 GGUF the
+# Vulkan recipe uses takes half as long again. Its license excludes some territories; it is
+# never recommended, only offered.
+name = "MiniMax H3"
+vendor = "minimax"
+kind = "video"
+runtime = "sdcpp-cuda"
+# What a setup downloads: the files the artifacts below pin, not the runtime image.
+download_gib = 41.47
+
+[[hardware]]
+gpu = "nvidia-n1x"
+ram_class = 128
+measured = "measurements/minimax-h3-sdcpp-cuda-n1x-128.toml"
+
+[[artifacts]]
+repo = "Comfy-Org/MiniMax-H3"
+revision = "4b53a35191437de05370da548e59aeabe2a5a09a"
+license = "other: minimax-h3-community-license-agreement"
+files = ["diffusion_models/minimax_h3_fl2va_int8_convrot.safetensors", "vae/minimax_h3_video_vae_int8_convrot.safetensors", "vae/minimax_h3_audio_vae_fp32.safetensors", "loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"]
+model = "diffusion_models/minimax_h3_fl2va_int8_convrot.safetensors"
+vae = "vae/minimax_h3_video_vae_int8_convrot.safetensors"
+audio_vae = "vae/minimax_h3_audio_vae_fp32.safetensors"
+lora = "loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"
+
+[[artifacts]]
+repo = "PrunaAI/P-H3-Image-Comfy"
+revision = "44a0fb73f299da1bb715bdb5ff59ce3fd3c6f543"
+license = "other: minimax-h3-community-license-agreement"
+files = ["text_encoders/p-h3-image_text_encoder_int8_convrot.safetensors"]
+text_encoder = "text_encoders/p-h3-image_text_encoder_int8_convrot.safetensors"
+
+# Measured: 44.6 GiB of GPU memory at its peak, making a 2.3 s 864x480 clip in 57 s.
+[[variant]]
+peak_ram_gib = 46
+peak_gpu_gib = 46
+
+# Clips are 24 fps, up to the 15 s H3 is made for. How the peak grows with the clip is measured on
+# the Strix Halo (minimax-h3-sdcpp): about 0.155 GiB a frame, which is the clip's own working
+# memory rather than the backend's.
+[video]
+fps = 24
+max_seconds = 15
+reference_frames = 56
+gib_per_frame = 0.155
+
+[server]
+args = ["--cfg-scale", "1.0", "--steps", "4"]

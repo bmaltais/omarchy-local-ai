@@ -1,0 +1,120 @@
+# TensorFold's native server (tensorfold-native) from its signed upstream release, for omarchy-local-ai.
+# Nothing is compiled from TensorFold here: the release archive is fetched, checked against the
+# SHA-256 the release publishes, and unpacked. Its CUDA kernels are embedded in the executable and the
+# NVIDIA driver's libcuda arrives through the CDI spec at run time, so the image carries no CUDA toolkit.
+#
+# Three libraries the server loads at run time are added, each pinned by checksum:
+# - libcublasLt 13 (CUDA 13.4's cuBLAS 13.8.0.4), for the vision towers and cuBLASLt projections, taken
+#   from NVIDIA's package, a redistributable under the CUDA EULA (Attachment A), whose text ships beside it.
+# - libturbojpeg 3.1.4.1 for JPEG pictures and libwebpdecoder 1.6.0 for WebP, built from their signed
+#   source releases: Debian ships 2.1.5 and 1.5.0, and the server refuses other releases.
+#
+#   podman build --platform linux/arm64 -t tensorfold:1.2.10 images/tensorfold   (GB10 / N1x)
+#   podman build --platform linux/amd64 -t tensorfold:1.2.10 images/tensorfold   (RTX)
+
+ARG DEBIAN=docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+
+FROM ${DEBIAN} AS jpeg
+ARG LJT_VERSION=3.1.4.1
+ARG LJT_SHA256=ecae8008e2cc9ade2f2c1bb9d5e6d4fb73e7c433866a056bd82980741571a022
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl cmake nasm gcc libc6-dev make \
+ && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSLo /tmp/ljt.tar.gz "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${LJT_VERSION}/libjpeg-turbo-${LJT_VERSION}.tar.gz" \
+ && echo "${LJT_SHA256}  /tmp/ljt.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/ljt.tar.gz -C /tmp \
+ && cmake -S "/tmp/libjpeg-turbo-${LJT_VERSION}" -B /tmp/build -DCMAKE_BUILD_TYPE=Release \
+      -DENABLE_STATIC=OFF -DWITH_JAVA=OFF -DCMAKE_INSTALL_PREFIX=/opt/ljt -DCMAKE_INSTALL_LIBDIR=lib \
+ && cmake --build /tmp/build -j"$(nproc)" \
+ && cmake --install /tmp/build
+
+FROM jpeg AS webp
+ARG WEBP_VERSION=1.6.0
+ARG WEBP_SHA256=e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564
+RUN curl -fsSLo /tmp/webp.tar.gz "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-${WEBP_VERSION}.tar.gz" \
+ && echo "${WEBP_SHA256}  /tmp/webp.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/webp.tar.gz -C /tmp \
+ && cmake -S "/tmp/libwebp-${WEBP_VERSION}" -B /tmp/webp-build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+      -DWEBP_BUILD_ANIM_UTILS=OFF -DWEBP_BUILD_CWEBP=OFF -DWEBP_BUILD_DWEBP=OFF -DWEBP_BUILD_GIF2WEBP=OFF \
+      -DWEBP_BUILD_IMG2WEBP=OFF -DWEBP_BUILD_VWEBP=OFF -DWEBP_BUILD_WEBPINFO=OFF -DWEBP_BUILD_WEBPMUX=OFF \
+      -DWEBP_BUILD_EXTRAS=OFF -DCMAKE_INSTALL_PREFIX=/opt/webp -DCMAKE_INSTALL_LIBDIR=lib \
+ && cmake --build /tmp/webp-build -j"$(nproc)" \
+ && cmake --install /tmp/webp-build
+
+FROM ${DEBIAN} AS cublas
+ARG TARGETARCH
+ARG CUBLAS_DEB=libcublas-13-4_13.8.0.4-1
+ARG CUBLAS_SHA256_ARM64=f4ae349c93e30bee37e2a667f5c98336ccb3bfae27c90b6a4b1228b5141f44aa
+ARG CUBLAS_SHA256_AMD64=57a23e176a8c23e22a2331c0167b2aeaa9c16739aa95c4ac347bad49d9e30f79
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+RUN case "${TARGETARCH}" in \
+      arm64) repo=debian13/sbsa; sum="${CUBLAS_SHA256_ARM64}" ;; \
+      amd64) repo=debian12/x86_64; sum="${CUBLAS_SHA256_AMD64}" ;; \
+      *) echo "unsupported architecture ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && deb="${CUBLAS_DEB}_${TARGETARCH}.deb" \
+ && curl -fsSLo "/tmp/${deb}" "https://developer.download.nvidia.com/compute/cuda/repos/${repo}/${deb}" \
+ && echo "${sum}  /tmp/${deb}" | sha256sum -c - \
+ && dpkg-deb -x "/tmp/${deb}" /tmp/cublas \
+ && mkdir -p /opt/cuda/lib \
+ && cp -a /tmp/cublas/usr/local/cuda-*/targets/*/lib/libcublasLt.so.13* /opt/cuda/lib/ \
+ && cp /tmp/cublas/usr/share/doc/libcublas-13-4/copyright /opt/cuda/NVIDIA-CUDA-EULA.txt
+
+FROM ${DEBIAN} AS tensorfold
+ARG TARGETARCH
+ARG TF_VERSION=1.2.10
+ARG TF_SHA256_ARM64=c335c44f81d55847a5f81d74a94ac3d09f81bd6688247cff972cf1f63fc18105
+ARG TF_SHA256_AMD64=bc77f6d4112dd67a3298bd2560b9f0e7c9a54d3c5b0036a9c52c0d27f6c7e9fd
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+RUN case "${TARGETARCH}" in \
+      arm64) arch=aarch64; sum="${TF_SHA256_ARM64}" ;; \
+      amd64) arch=x86_64; sum="${TF_SHA256_AMD64}" ;; \
+      *) echo "unsupported architecture ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && name="tensorfold-${TF_VERSION}-linux-${arch}" \
+ && curl -fsSLo /tmp/tf.tar.gz "https://github.com/ashhart/TensorFold/releases/download/v${TF_VERSION}/${name}.tar.gz" \
+ && echo "${sum}  /tmp/tf.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/tf.tar.gz -C /tmp \
+ && (cd "/tmp/${name}" && sha256sum -c SHA256SUMS) \
+ && mv "/tmp/${name}" /opt/tensorfold
+
+FROM ${DEBIAN}
+ARG TF_VERSION=1.2.10
+# curl is the health probe; nothing else is added to the base.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=tensorfold /opt/tensorfold /opt/tensorfold
+COPY --from=jpeg /opt/ljt/lib/libturbojpeg.so* /opt/tensorfold/lib/
+COPY --from=jpeg /tmp/libjpeg-turbo-3.1.4.1/LICENSE.md /opt/tensorfold/LICENSES/libjpeg-turbo-LICENSE.md
+COPY --from=jpeg /tmp/libjpeg-turbo-3.1.4.1/README.ijg /opt/tensorfold/LICENSES/libjpeg-turbo-README.ijg
+COPY --from=webp /opt/webp/lib/libwebpdecoder.so* /opt/tensorfold/lib/
+COPY --from=webp /tmp/libwebp-1.6.0/COPYING /opt/tensorfold/LICENSES/libwebp-COPYING
+COPY --from=webp /tmp/libwebp-1.6.0/PATENTS /opt/tensorfold/LICENSES/libwebp-PATENTS
+COPY --from=cublas /opt/cuda/lib /opt/cuda/lib
+COPY --from=cublas /opt/cuda/NVIDIA-CUDA-EULA.txt /opt/tensorfold/LICENSES/NVIDIA-CUDA-EULA-cuBLAS.txt
+# The root file system is read only under omarchy-local-ai; the server's caches go to the tmpfs /tmp.
+ENV PATH=/opt/tensorfold/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    HOME=/tmp \
+    XDG_CACHE_HOME=/tmp/cache \
+    LD_LIBRARY_PATH=/opt/cuda/lib \
+    TENSORFOLD_LIBTURBOJPEG=/opt/tensorfold/lib/libturbojpeg.so.0 \
+    TENSORFOLD_LIBWEBP=/opt/tensorfold/lib/libwebpdecoder.so.3 \
+    TENSORFOLD_NO_UPDATE_CHECK=1
+# Flash Next's prompt passes take 3,072 rows when no other stream is decoding (1,536 beside one):
+# on a GB10 that lifts 16K-token prefill from 1,948 to 2,119 tok/s with decode unchanged. Other
+# families do not read it.
+ENV TF_FLASHNEXT_CHUNK_SOLO=3072
+# TensorFold keeps 12.2 GiB of device memory free by default; 9 GiB leaves it the headroom it needs on a
+# 128 GB GB10 (a 194K-token prompt and a follow-up turn peak with room to spare) and gives the 2.8 GiB
+# to the prompt cache, which is what lets an agent's next turn resume instead of prefilling again.
+ENV TENSORFOLD_MEMORY_RESERVE_GIB=9
+LABEL org.opencontainers.image.title="tensorfold" \
+      org.opencontainers.image.version="${TF_VERSION}" \
+      org.opencontainers.image.source="https://github.com/omacom/omarchy-local-ai" \
+      org.opencontainers.image.licenses="Apache-2.0 AND MIT AND BSD-3-Clause AND IJG AND Zlib AND LicenseRef-NVIDIA-CUDA-EULA" \
+      org.opencontainers.image.description="TensorFold ${TF_VERSION} native server (upstream signed release) for omarchy-local-ai"
