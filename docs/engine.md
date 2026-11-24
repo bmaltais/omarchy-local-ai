@@ -96,6 +96,9 @@ A discrete NVIDIA GPU (an RTX 3090, say) is its own family, `nvidia-rtx3090`, na
 its memory class is its VRAM rounded up to 8, 12, 16, 24, 32, 48, 80 or 96 GB: a `[[hardware]]` or `[[class]]`
 entry for it says `vram_class = 24`, not `ram_class`. System RAM then only has to hold the recipe's
 `peak_ram_gib`, which admission checks beside the VRAM. Unified-memory GPUs (GB10, N1x, Strix) keep `ram_class`.
+A model set up on a discrete card is bound to it by its `nvidia-smi` UUID, both in its container and in
+every later start's memory check, so a renumbering or a second card of the same family can't split the two;
+`--gpu` takes a UUID as well as a family.
 An Intel GPU is integrated graphics on the `xe` kernel driver (Lunar Lake and newer), named by
 `INTEL_FAMILIES` or else `intel-xe-<device id>`, addressing
 three quarters of RAM up to the kernel's `ttm.pages_limit`; `use` raises that limit as it does for a unified AMD GPU, so a model fits by the three quarters. Memory a GPU driver freed and still

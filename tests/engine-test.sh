@@ -413,6 +413,12 @@ with patch.object(a, "nvidia_free_gib", return_value=None), patch.object(a, "mem
   check("a failed VRAM reading counts as no free memory, not a free card", a.free_memory(found[0]) == (60.0, 0.0))
 cdi_rt = {"run": {"devices": ["cdi-nvidia"]}}
 check("a discrete GPU's container gets only that card, bound by UUID so a renumbering can't move it", a.device_lines(cdi_rt, found[1]) == ["AddDevice=nvidia.com/gpu=GPU-bbbb"])
+two = {"platform": "x86", "ram_class": 96, "ram_gib": 78, "gpus": [found[1], found[0]]}
+check("a set-up model keeps the card its unit is bound to when nvidia-smi lists the cards in another order",
+      a.manifest_gpu(two, {"gpu": "nvidia-rtx3090", "gpu_uuid": "GPU-aaaa"})["nvidia_uuid"] == "GPU-aaaa"
+      and a.choose_gpu(two, "GPU-bbbb")["nvidia_uuid"] == "GPU-bbbb")
+raises("a model whose card is gone isn't started on another one",
+       lambda: a.manifest_gpu({"platform": "x86", "ram_class": 96, "ram_gib": 78, "gpus": [found[1]]}, {"gpu": "nvidia-rtx3090", "gpu_uuid": "GPU-aaaa"}))
 check("a unified GPU's container gets the whole device", a.device_lines(cdi_rt, {"vendor": "nvidia", "family": "nvidia-gb10", "unified": True}) == ["AddDevice=nvidia.com/gpu=all"])
 check("VRAM rounds up to its class (23.99 GiB is 24, 200 caps at 96)", a.vram_class(24) == 24 and a.vram_class(23.99) == 24 and a.vram_class(11) == 12 and a.vram_class(200) == 96)
 vgpu, rgpu = found[0], {"vendor": "nvidia", "family": "nvidia-gb10", "unified": True, "memory_gib": 120}

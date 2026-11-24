@@ -523,11 +523,12 @@ def machine_profile():
 
 
 def choose_gpu(profile, family=None):
+  """The GPU named by family, or by UUID for a discrete NVIDIA card; else the one with the most memory."""
   if family == "cpu":
     return cpu_device(profile)
   gpus = profile["gpus"]
   if family:
-    matches = [gpu for gpu in gpus if gpu["family"] == family]
+    matches = [gpu for gpu in gpus if family in (gpu["family"], gpu.get("nvidia_uuid"))]
     if not matches:
       raise LocalError(f"No {family} GPU on this machine (found: {', '.join(g['family'] for g in gpus) or 'none'})")
     return max(matches, key=lambda gpu: gpu["memory_gib"])
@@ -540,6 +541,12 @@ def choose_gpu(profile, family=None):
   if len(rivals) > 1:
     raise LocalError(f"Several GPU families tie for the most memory ({', '.join(sorted(rivals))}); choose one with --gpu")
   return best
+
+
+def manifest_gpu(profile, manifest):
+  """The GPU a set-up model runs on: for a discrete NVIDIA card the very card its unit is bound to,
+  by UUID, so admission checks the memory of the card the container gets; else the best of its family."""
+  return choose_gpu(profile, manifest.get("gpu_uuid") or manifest.get("gpu"))
 
 
 def recipe_gpu(profile, recipe, family=None, runtime=None):
@@ -3639,6 +3646,7 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
     "runtime_id": recipe["runtime"],
     "profile": profile,
     "gpu": gpu["family"],
+    **({"gpu_uuid": gpu["nvidia_uuid"]} if gpu.get("nvidia_uuid") else {}),
     "variant": variant,
     "recipe": recipe,
     "runtime": runtime,
@@ -3747,7 +3755,7 @@ def start_fit(manifest, profile):
   Rewritten with every start and stop, the moments free memory changes."""
   variant = manifest["variant"]
   try:
-    gpu = choose_gpu(profile, manifest.get("gpu"))
+    gpu = manifest_gpu(profile, manifest)
   except LocalError as error:
     return False, error.short
   if variant["peak_gpu_gib"] > 0 and variant["peak_gpu_gib"] > gpu["memory_gib"]:
@@ -3781,12 +3789,12 @@ def add_clip_lengths(record, catalog, profile, pending=None):
   manifest_of = lambda rid: pending.get(rid) or load_model(rid)
   def gpu_of(manifest):
     try:
-      gpu = choose_gpu(profile, manifest.get("gpu"))
+      gpu = manifest_gpu(profile, manifest)
     except LocalError:
       return None
     # A pair's entry is this machine's own GPU, with its memory per node: the same card.
     family = next((single for single, pair in PAIR_FAMILIES.items() if pair == gpu["family"]), gpu["family"])
-    return gpu, (family, gpu.get("render_node", ""), gpu.get("sysfs", ""))
+    return gpu, (family, gpu.get("render_node", ""), gpu.get("sysfs", ""), gpu.get("nvidia_uuid", ""))
   holding = {}
   for rid, model in record["models"].items():
     loaded = rid in pending or model["unit"] in ("active", "activating", "deactivating", "removing")
@@ -3879,7 +3887,7 @@ def pending_update(manifest, catalog, profile):
     runtime = catalog.runtimes.get((recipe or {}).get("runtime"))
     if not recipe or not runtime:
       return None
-    gpu = choose_gpu(profile, manifest["gpu"])
+    gpu = manifest_gpu(profile, manifest)
     # The context it was set up with stays the user's choice.
     variant, _ = compatibility(catalog, rid, profile, gpu, manifest["variant"].get("ctx"))
     if variant is None:
@@ -4256,7 +4264,7 @@ def cmd_update(argv):
         was_running = unit_active(rid)
         default = _read(os.path.join(state_dir(), "last"))
         ctx = manifest["variant"].get("ctx")
-        code = cmd_use([rid, "--gpu", manifest["gpu"]] + (["--ctx", str(ctx)] if ctx else []))
+        code = cmd_use([rid, "--gpu", manifest.get("gpu_uuid") or manifest["gpu"]] + (["--ctx", str(ctx)] if ctx else []))
         if code == 0 and not was_running and unit_active(rid):
           code = cmd_stop([rid])
         # An update is upkeep: the agents' default stays the model the user last started.
@@ -4414,7 +4422,7 @@ def _start(args, catalog, profile):
     return 0
   # Here too, not only at refresh: refresh may be what the old hooks failed to run.
   repair_unit_hooks()
-  gpu = choose_gpu(profile, manifest["gpu"])
+  gpu = manifest_gpu(profile, manifest)
   # Shown as loading from the click on; the memory checks below take seconds.
   clear_error(rid)
   started = time.time()
