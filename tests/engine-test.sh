@@ -1150,6 +1150,81 @@ done_now, total_now, rate_now = resumed.snapshot()
 check("a resumed download's saved bytes count toward the bar", done_now == 4 * 2**20 and total_now == 10 * 2**20)
 check("a resumed download's saved bytes don't count as speed", rate_now == 0)
 
+# Pre-sizing the runtime image reserves its download and unpack share upfront, skipped
+# layers don't spike download speed, and unpacking advances the bar without faking speed.
+planned = a.Progress()
+planned.samples = [(planned.started - 1, 0)]
+planned.expect_image(10 * 2**20)
+planned.grow(20 * 2**20)
+planned.add(20 * 2**20)
+done_w, total_w, rate_w = planned.snapshot()
+extract_share = int(10 * 2**20 * a.IMAGE_EXTRACT_WEIGHT)
+check("pre-sizing reserves image download and unpack on the bar before the pull starts", done_w == 20 * 2**20 and total_w == 30 * 2**20 + extract_share and done_w < total_w, f"{done_w}/{total_w}")
+skipped_prog = a.Progress()
+skipped_prog.samples = [(skipped_prog.started - 1, 0)]
+skipped_prog.pulled(4 * 2**20, 10 * 2**20, skipped=4 * 2**20, extract_done=0, extract_total=extract_share)
+done_s, total_s, rate_s = skipped_prog.snapshot()
+check("skipped image layers advance the bar without counting as network speed", done_s == 4 * 2**20 and total_s == 10 * 2**20 + extract_share and rate_s == 0, f"{done_s}/{total_s}@{rate_s}")
+skipped_prog.samples = [(a.time.time() - 1, 4 * 2**20)]
+skipped_prog.pulled(4 * 2**20, 10 * 2**20, skipped=4 * 2**20, extract_done=extract_share // 2, extract_total=extract_share)
+done_e, total_e, rate_e = skipped_prog.snapshot()
+check("image unpacking advances the bar without reporting a fake network rate", done_e == 4 * 2**20 + extract_share // 2 and rate_e == 0, f"{done_e}/{total_e}@{rate_e}")
+
+# Extraction fraction moves smoothly across layer commits and disk writes, capping below 1 while running.
+f0 = a._extract_fraction(0, 10, 0, 1000)
+f1 = a._extract_fraction(0, 10, 500, 1000)
+f2 = a._extract_fraction(5, 10, 1250, 1000)
+f3 = a._extract_fraction(10, 10, 10000, 1000)
+check("extraction fraction rises smoothly with writes and layer commits", 0 == f0 < f1 < f2 < f3 <= 0.98, f"{f0}, {f1}, {f2}, {f3}")
+
+# Temporary pull byte tracking stays monotonic even if Podman deletes finished blob files.
+with tempfile.TemporaryDirectory() as td:
+  seen = {}
+  p1 = Path(td, "1")
+  p1.write_bytes(b"a" * 100)
+  b1 = a._track_dir_bytes(td, seen)
+  p1.unlink()
+  Path(td, "2").write_bytes(b"b" * 50)
+  b2 = a._track_dir_bytes(td, seen)
+check("pull temp byte tracking never drops when blobs are removed", b1 == 100 and b2 == 150, f"{b1} -> {b2}")
+
+# ensure_image reads exact blob bytes from its private TMPDIR, tracks overlay commits, and cleans up.
+with tempfile.TemporaryDirectory() as fake_overlay:
+  a.clear_installing("puller")
+  a.begin_installing("puller", {"name": "Puller"})
+  pull_prog = a.Progress(rid="puller")
+  pull_prog.expect_image(1024)
+  seen_snapshots = []
+  orig_pulled = pull_prog.pulled
+  def record_pulled(got, total, skipped=0, extract_done=None, extract_total=None):
+    seen_snapshots.append((got, total, skipped, extract_done, extract_total))
+    orig_pulled(got, total, skipped=skipped, extract_done=extract_done, extract_total=extract_total)
+  pull_prog.pulled = record_pulled
+  fake_pull = (
+    "import os, sys, time; "
+    "tmp = os.environ['TMPDIR']; "
+    "print('Copying blob aaaaaaaaaaaa [----] 0.0b / 512b', flush=True); "
+    "open(os.path.join(tmp, '1'), 'wb').write(b'x' * 512); "
+    "time.sleep(0.35); "
+    "print('Copying blob bbbbbbbbbbbb skipped: already exists', flush=True); "
+    "print('Copying blob aaaaaaaaaaaa done   | ', flush=True); "
+    "os.mkdir(os.path.join(os.environ['FAKE_OVERLAY'], 'c' * 64)); "
+    "time.sleep(0.35)"
+  )
+  real_popen = a.subprocess.Popen
+  def fake_popen(argv, **kwargs):
+    env = dict(kwargs.get("env") or {}, FAKE_OVERLAY=fake_overlay)
+    kwargs["env"] = env
+    return real_popen([sys.executable, "-c", fake_pull], **kwargs)
+  with patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=1)), \
+       patch.object(a, "_podman_overlay_dir", return_value=fake_overlay), \
+       patch.object(a.subprocess, "Popen", side_effect=fake_popen):
+    a.ensure_image("ghcr.io/example/img@sha256:" + "d" * 64, pull_prog, expected_layers={"aaaaaaaaaaaa": 512, "bbbbbbbbbbbb": 512}, rid="puller")
+  check("ensure_image reaches 100% of download and unpack on completion", seen_snapshots and seen_snapshots[-1][:3] == (1024.0, 1024.0, 512.0) and seen_snapshots[-1][3] == seen_snapshots[-1][4] and seen_snapshots[-1][4] > 0, repr(seen_snapshots[-3:]))
+  check("ensure_image saw intermediate TMPDIR byte progress before PTY done", any(512 <= s[0] < 1024 for s in seen_snapshots) or any(s[3] and s[3] < s[4] for s in seen_snapshots), repr(seen_snapshots))
+  check("ensure_image clears its temp dir after pulling", not list(Path(a.data_dir(), "staging").glob("podman-pull-*")))
+  a.clear_installing("puller")
+
 # A new attempt replaces a failed setup's record rather than inheriting it.
 a.begin_installing("retried", {"name": "Retried"})
 a.fail_installing("retried", "Download failed")
@@ -1166,12 +1241,15 @@ staging.mkdir(parents=True, exist_ok=True)
 mine, other = "a" * 64 + ".part", "b" * 64 + ".part"
 (staging / mine).write_bytes(b"x" * 10)
 (staging / other).write_bytes(b"y" * 10)
+pull_dir = staging / "podman-pull-cancelled"
+pull_dir.mkdir(exist_ok=True)
+(pull_dir / "1").write_bytes(b"z" * 12)
 a.begin_installing("cancelled", {"name": "Cancelled"})
-a.update_installing("cancelled", partials=[mine, "../escape.part"])
+a.update_installing("cancelled", partials=[mine, "../escape.part"], pull_tmp=pull_dir.name)
 with patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0, stdout="")) as stop, patch.object(a, "known_models", return_value=[]), patch.object(a, "write_unit_files"), patch.object(a, "refresh_list_cache"), patch.object(a, "write_status"):
   a.cmd_remove(["cancelled"])
 check("cancelling a setup stops its model service", ("stop", a.unit_name("cancelled")) in [call.args for call in stop.call_args_list])
-check("cancelling a setup drops only its own partial downloads", not (staging / mine).exists() and (staging / other).exists())
+check("cancelling a setup drops only its own partial downloads and pull temp dir", not (staging / mine).exists() and (staging / other).exists() and not pull_dir.exists())
 
 # --detach hands the setup to a transient user unit and returns.
 a.clear_installing(rid)
