@@ -1,5 +1,5 @@
-image = "localhost/tensorfold-inkling2@sha256:15f024a171c9b06a41d889cab2faa76babf8d6241e014d80d6ef11b69014dc28"
-publisher = "Omacom (built from images/tensorfold-inkling2: jschmied/TensorFold dc2ca8a1 with MiaAI-Lab's Inkling-2-Mini-DGX-Spark-TensorFold patches at 6061fa89)"
+image = "ghcr.io/omacom/omarchy-local-ai/tensorfold-inkling2@sha256:c157c7e81a23e7d95566cacdf04496cbce5dc2dc263d3a117af3ac377b64b0b6"
+publisher = "Omacom (published by .github/workflows/images.yml as tensorfold-inkling2:dc2ca8a1-43 from images/tensorfold-inkling2: jschmied/TensorFold dc2ca8a1 with MiaAI-Lab's Inkling-2-Mini-DGX-Spark-TensorFold patches at 6061fa89)"
 reviewer = "Claude Code for David Heinemeier Hansson"
 date = "2026-11-25"
 version = "TensorFold at dc2ca8a1785df6ee5c8489ee7cd18e29cf7b4568 (the head of ashhart/TensorFold PR #4441, Jürgen Schmied's Inkling 2 Mini CUDA engine, on main 1587c8ca) with MiaAI-Lab's 17 patches at 6061fa89a34d2a245bc4a230f04948f312347a5e, built with Zig 0.17.0 and libtfgrammar over xgrammar v0.2.8 (97787376) on nvcr.io/nvidia/pytorch 26.07 (arm64)"
@@ -15,4 +15,5 @@ checked = [
   "acceptance (2026-11-25): rejects requests without the key or with a wrong one (401) and serves them with it (200) on /v1/models and /v1/chat/completions; /health is open by design",
   "acceptance (2026-11-25): reads text from a PNG through the vision tower, and makes a tool call and answers from its result",
   "acceptance (2026-11-25): stops on SIGTERM in about a second, and the memory is free at once",
+  "provenance (2026-11-25): this digest is CI's build of the same images/tensorfold-inkling2 Containerfile at the same pins (#111); the acceptance checks above ran on the local build of it (localhost/tensorfold-inkling2@sha256:15f024a1), and on this one only that it pulls publicly and carries tensorfold-native, curl and the serving environment",
 ]

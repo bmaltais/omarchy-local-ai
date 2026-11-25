@@ -1,12 +1,12 @@
 # TensorFold's native server with the Inkling 2 Mini CUDA engine (ashhart/TensorFold PR #4441, Jürgen Schmied's fork
 # at dc2ca8a1) and MiaAI-Lab's 17 patches for it (the DSpark drafter, FP8 KV and attention projections, FP4/MXFP8
 # prefill tensor cores, vision, structured output and Inkling's reply parser), built on NVIDIA's PyTorch container by
-# images/tensorfold-inkling2. Configured by `tensorfold-native serve` arguments, with the model directory bare and the
+# images/tensorfold-inkling2 and published by its workflow. Configured by `tensorfold-native serve` arguments, with the model directory bare and the
 # key in TENSORFOLD_API_KEY. The image sets MiaAI-Lab's serving environment: a 9 GiB reserve, FP8 attention
 # projections and tensor-core prefill.
-image = "localhost/tensorfold-inkling2@sha256:15f024a171c9b06a41d889cab2faa76babf8d6241e014d80d6ef11b69014dc28"
+image = "ghcr.io/omacom/omarchy-local-ai/tensorfold-inkling2@sha256:c157c7e81a23e7d95566cacdf04496cbce5dc2dc263d3a117af3ac377b64b0b6"
 tier = "third-party"
-review = "reviews/tensorfold-inkling2-15f024a171c9.toml"
+review = "reviews/tensorfold-inkling2-c157c7e81a23.toml"
 port = 8888
 command = ["tensorfold-native", "serve", "--host", "0.0.0.0", "--port", "8888", "--no-update-check"]
 health = { probe = ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:8888/health"] }
