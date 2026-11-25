@@ -1,0 +1,49 @@
+recipe = "inkling-2-mini-tensorfold"
+measured_at = "2026-11-25"
+image = "ghcr.io/omacom/omarchy-local-ai/tensorfold-inkling2@sha256:c157c7e81a23e7d95566cacdf04496cbce5dc2dc263d3a117af3ac377b64b0b6"
+ctx = 262144
+load_seconds = 19.0
+fileset = "7a9eaaa9bfb36b0e"
+method = "tools/bench: 2 warmups (a 128-token reply, a ~4K-token prompt from the corpus tail), then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
+
+[machine]
+platform = "aarch64-n1x"
+gpu = "nvidia-n1x"
+ram_class = 64
+system = "Dell Inc. XPS 16 DX16263"
+kernel = "7.3.6-2-omarchy"
+cpu = "Cortex-X925 + Cortex-A725"
+gpu_driver = "620.73.04"
+
+[memory]
+observed_at_load_gib = 29.8
+min_available_during_bench_gib = 18.7
+total_gib = 57.5
+
+[short]
+prompt_tokens = 44
+completion_tokens = 512
+ttft_s = 0.15
+prefill_tok_s = 302.3
+decode_tok_s = 60.9
+total_s = 8.54
+
+[long]
+prompt_tokens = 38585
+completion_tokens = 512
+ttft_s = 17.48
+prefill_tok_s = 2207.6
+decode_tok_s = 48.8
+total_s = 27.95
+
+[edit]
+prompt_tokens = 2889
+completion_tokens = 512
+ttft_s = 1.24
+prefill_tok_s = 2324.9
+decode_tok_s = 67.9
+total_s = 8.77
+
+[[artifacts]]
+repo = "thinkingmachines/Inkling-2-Mini"
+revision = "7a67ae2314b44ef05c87fd1d4d311c58aaeb18f6"
