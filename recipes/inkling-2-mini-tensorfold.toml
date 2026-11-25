@@ -1,0 +1,43 @@
+name = "Inkling 2 Mini"
+runtime = "tensorfold-inkling2"
+vendor = "thinkingmachines"
+architecture = "moe"
+# Screenshots and photos through the checkpoint's vision tower, which --vision loads.
+input = ["text", "image"]
+
+[[hardware]]
+gpu = "nvidia-gb10"
+ram_class = 128
+measured = "measurements/inkling-2-mini-tensorfold-gb10-128.toml"
+
+# Thinking Machines' own checkpoint, at the precision it was trained in: NVFP4 experts in layers 0-19, MXFP8 in
+# 20-23, the rest BF16 (19.5 GB), and the 3-layer DSpark drafter beside it, which --drafter reads from the same
+# folder. A 26.4B-A3.4B looped mixture of experts: its middle 12 layers run three times a token. The revision
+# MiaAI-Lab's recipe pins.
+[[artifacts]]
+repo = "thinkingmachines/Inkling-2-Mini"
+revision = "7a67ae2314b44ef05c87fd1d4d311c58aaeb18f6"
+license = "apache-2.0"
+files = ["*.safetensors", "*.json", "*.jinja", "tiktoken/*"]
+dest = "model"
+model = "."
+draft = "."
+
+# Measured on a DGX Spark running the Omarchy desktop: 69.9 GiB at load, with the eight windows' FP8 K/V and the
+# prompt cache set aside up front, which left 44.5 GiB free at the lowest. It loads in 18 s.
+[[variant]]
+ctx = 262144
+peak_ram_gib = 72
+peak_gpu_gib = 70
+
+# The checkpoint's generation defaults: temperature 1.0, no top-p or top-k cut.
+[sampling]
+temperature = 1.0
+top_p = 1.0
+top_k = 0
+
+# MiaAI-Lab's settings: eight requests at once, each with its whole window set aside at the start; replies up to 32K
+# tokens; thinking on, as the model reasons even at its lowest effort; up to 50 pictures a request, as every
+# TensorFold recipe here allows; the K/V cache in FP8.
+[server]
+args = ["--parallel", "8", "--max-tokens", "32768", "--thinking", "--vision", "--vision-max-images", "50", "--kv-cache", "fp8"]

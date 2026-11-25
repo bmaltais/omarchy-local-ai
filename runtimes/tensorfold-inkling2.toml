@@ -1,0 +1,27 @@
+# TensorFold's native server with the Inkling 2 Mini CUDA engine (ashhart/TensorFold PR #4441, Jürgen Schmied's fork
+# at dc2ca8a1) and MiaAI-Lab's 17 patches for it (the DSpark drafter, FP8 KV and attention projections, FP4/MXFP8
+# prefill tensor cores, vision, structured output and Inkling's reply parser), built on NVIDIA's PyTorch container by
+# images/tensorfold-inkling2. Configured by `tensorfold-native serve` arguments, with the model directory bare and the
+# key in TENSORFOLD_API_KEY. The image sets MiaAI-Lab's serving environment: a 9 GiB reserve, FP8 attention
+# projections and tensor-core prefill.
+image = "localhost/tensorfold-inkling2@sha256:15f024a171c9b06a41d889cab2faa76babf8d6241e014d80d6ef11b69014dc28"
+tier = "third-party"
+review = "reviews/tensorfold-inkling2-15f024a171c9.toml"
+port = 8888
+command = ["tensorfold-native", "serve", "--host", "0.0.0.0", "--port", "8888", "--no-update-check"]
+health = { probe = ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:8888/health"] }
+# The tmpfs holds the driver's compiled-kernel cache.
+run = { devices = ["cdi-nvidia"], memlock = "unlimited", tmpfs = "/tmp" }
+# Its CUDA kernels are built for the GB10's sm_121 (the N1x shares its class).
+gpus = ["nvidia-gb10"]
+reserved = ["--host", "--port", "--api-key", "--api-key-file", "--allowed-host", "--allowed-origin", "--learn", "--learn-dir", "--learn-conversations", "--recall", "--recall-dir", "--record", "--dashboard", "--metrics-open", "--speed-up", "--vision-urls", "TENSORFOLD_API_KEY", "TENSORFOLD_NO_UPDATE_CHECK", "TENSORFOLD_MEMORY_RESERVE_GIB", "HF_HUB_OFFLINE", "HF_TOKEN"]
+
+[inputs]
+model = { positional = true }
+draft = { arg = "--drafter" }
+ctx = { arg = "--context" }
+alias = { arg = "--name" }
+key = { env = "TENSORFOLD_API_KEY" }
+temperature = { arg = "--temperature" }
+top_p = { arg = "--top-p" }
+top_k = { arg = "--top-k" }
