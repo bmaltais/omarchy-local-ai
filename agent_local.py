@@ -3692,7 +3692,7 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
   if fresh:
     # Until the manifest exists, removal knows the image from the record.
     update_installing(rid, image=runtime["image"])
-  ensure_image(runtime["image"], progress, expected_layers=image_plan, rid=rid if fresh else None)
+  ensure_image(runtime["image"], progress, expected_layers=image_plan, rid=rid)
   key = ensure_key()
   if runtime.get("pair"):
     if not profile.get("pair"):
@@ -4531,6 +4531,18 @@ def _start(args, catalog, profile):
   return 0
 
 
+def _remove_pull_tmp(setting_up):
+  pull_tmp = (setting_up or {}).get("pull_tmp")
+  if not isinstance(pull_tmp, str) or not re.fullmatch(r"podman-pull-[^/]+", pull_tmp):
+    return 0
+  path = os.path.join(data_dir(), "staging", pull_tmp)
+  if not os.path.isdir(path):
+    return 0
+  freed = sum(os.path.getsize(os.path.join(r, n)) for r, _, ns in os.walk(path) for n in ns if os.path.isfile(os.path.join(r, n)))
+  shutil.rmtree(path, ignore_errors=True)
+  return freed
+
+
 def cmd_remove(argv):
   parser = argparse.ArgumentParser(prog="omarchy models remove")
   parser.add_argument("recipe")
@@ -4565,12 +4577,7 @@ def cmd_remove(argv):
           if os.path.exists(path):
             freed += os.path.getsize(path)
             os.unlink(path)
-      pull_tmp = setting_up.get("pull_tmp")
-      if isinstance(pull_tmp, str) and re.fullmatch(r"podman-pull-[^/]+", pull_tmp):
-        path = os.path.join(data_dir(), "staging", pull_tmp)
-        if os.path.isdir(path):
-          freed += sum(os.path.getsize(os.path.join(r, n)) for r, _, ns in os.walk(path) for n in ns if os.path.isfile(os.path.join(r, n)))
-          shutil.rmtree(path, ignore_errors=True)
+      freed += _remove_pull_tmp(setting_up)
       write_status(catalog, profile)
       refresh_list_cache(catalog, profile)
       say(f"Cancelled the setup of {rid}" + (f", freeing {gib(freed):.1f} GiB" if freed else ""))
@@ -4592,7 +4599,8 @@ def cmd_remove(argv):
       if manifest:
         pair_remove(manifest, args.local_only)
       result = _remove_files(rid)
-      # An update cancelled above leaves its progress behind.
+      # An update cancelled above leaves its progress and pull staging behind.
+      _remove_pull_tmp(load_installing(rid) or setting_up)
       clear_installing(rid)
       if size_gib > 1:
         write_atomic(os.path.join(state_dir(), "removal_rate"), f"{(time.time() - deleting) / size_gib:.4f}\n")

@@ -1251,6 +1251,17 @@ with patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0, std
 check("cancelling a setup stops its model service", ("stop", a.unit_name("cancelled")) in [call.args for call in stop.call_args_list])
 check("cancelling a setup drops only its own partial downloads and pull temp dir", not (staging / mine).exists() and (staging / other).exists() and not pull_dir.exists())
 
+# Cancelling a background update on an installed model also cleans up its pull temp dir.
+upd_pull = staging / "podman-pull-update"
+upd_pull.mkdir(exist_ok=True)
+(upd_pull / "1").write_bytes(b"u" * 16)
+a.save_model({"schema": 1, "recipe_id": "updating-model", "files": [], "recipe": {}, "runtime": {}, "variant": {}, "image": ""}, started=False)
+a.begin_installing("updating-model", {"name": "Updating"})
+a.update_installing("updating-model", pull_tmp=upd_pull.name)
+with patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0, stdout="")), patch.object(a, "unit_active", return_value=False), patch.object(a, "known_models", return_value=[]), patch.object(a, "write_unit_files"), patch.object(a, "refresh_list_cache"), patch.object(a, "write_status"), patch.object(a, "_remove_files", return_value=(0, [])):
+  a.cmd_remove(["updating-model"])
+check("removing a model with a cancelled background update drops its pull temp dir", not upd_pull.exists() and a.load_installing("updating-model") is None)
+
 # --detach hands the setup to a transient user unit and returns.
 a.clear_installing(rid)
 with patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=3)), patch.object(a, "load_model", return_value=None), patch.object(a.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as run:
