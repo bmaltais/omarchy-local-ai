@@ -1,0 +1,19 @@
+#!/bin/bash
+# Gufo behind the key: Caddy answers on the --port it is given and refuses any request without the key in GUFO_API_KEY,
+# and Gufo listens behind it on the container's loopback, which nothing outside the container reaches. Every other
+# argument goes to `gufo serve`, so `serve llm --model ...` is `gufo serve llm --model ...`.
+set -euo pipefail
+port=8080 args=()
+while (($#)); do
+  case $1 in
+    --port) port=$2; shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+if [[ -z ${GUFO_API_KEY:-} ]]; then
+  echo "serve: GUFO_API_KEY is empty" >&2
+  exit 1
+fi
+upstream=18080
+CADDY_PORT="$port" CADDY_UPSTREAM="127.0.0.1:$upstream" caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
+exec gufo serve "${args[@]}" --host 127.0.0.1 --port "$upstream"

@@ -1,0 +1,15 @@
+# The key check in front of Gufo, which has had none of its own since 0.29: every route needs the key in
+# GUFO_API_KEY, and the rest streams to Gufo on the container's own loopback, as it comes. serve sets the port.
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+http://:{$CADDY_PORT} {
+	@refused not header Authorization "Bearer {$GUFO_API_KEY}"
+	respond @refused 401
+	reverse_proxy {$CADDY_UPSTREAM} {
+		flush_interval -1
+	}
+}
