@@ -1808,6 +1808,39 @@ with patch.object(a, "shared_recipes", return_value=["picture"]):
   with patch.object(a, "tailscale", side_effect=fake_tailscale), patch.object(a, "tailscale_status", return_value=ts_status), patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0, stderr="")):
     a.publish_shares({"models": {"picture": picture_row}, "ram_total_gib": 64}, img_catalog, profile, force=True)
   check("and gets a tailnet route", "/local-ai/picture" in handlers, repr(handlers))
+# A paired host lists each shared model's speeds for the GPU that model runs on: single-node
+# recipes match the single GPU rather than the pair GPU that outranks it in choose_gpu().
+pair_meas_dir = Path(os.environ["HOME"], "pair-shared-catalog")
+(pair_meas_dir / "measurements").mkdir(parents=True)
+(pair_meas_dir / "measurements" / "single.toml").write_text("[long]\ndecode_tok_s = 52.2\nprefill_tok_s = 3033.0\n")
+(pair_meas_dir / "measurements" / "pair.toml").write_text("[long]\ndecode_tok_s = 64.8\nprefill_tok_s = 1095.5\n")
+(pair_meas_dir / "measurements" / "cpu.toml").write_text("[long]\ndecode_tok_s = 12.5\nprefill_tok_s = 80.0\n")
+single_rt = dict(runtime, gpus=["nvidia-gb10"])
+pair_rt = dict(runtime, gpus=["nvidia-gb10-pair"], pair=True)
+cpu_rt = dict(runtime, gpus=["cpu"], run={"tmpfs": "/tmp"})
+single_rec = dict(recipe, runtime="single", hardware=[{"gpu": "nvidia-gb10", "ram_class": 128, "measured": "measurements/single.toml"}])
+pair_rec = dict(recipe, runtime="pair", hardware=[{"gpu": "nvidia-gb10-pair", "ram_class": 128, "measured": "measurements/pair.toml"}])
+cpu_rec = dict(recipe, runtime="cpu", hardware=[{"gpu": "cpu", "ram_class": 128, "measured": "measurements/cpu.toml"}])
+pair_shared_catalog = SimpleNamespace(root=str(pair_meas_dir),
+                                      recipes={"single": single_rec, "pair": pair_rec, "cpu-only": cpu_rec},
+                                      runtimes={"single": single_rt, "pair": pair_rt, "cpu": cpu_rt}, best={"class": []})
+pair_shared_profile = {"platform": "aarch64-gb10", "ram_class": 128, "ram_gib": 128, "gpus": [
+  {"vendor": "nvidia", "family": "nvidia-gb10", "render_node": "/dev/dri/renderD128", "memory_gib": 110, "max_memory_gib": 110, "unified": True},
+  {"vendor": "nvidia", "family": "nvidia-gb10-pair", "render_node": "/dev/dri/renderD128", "memory_gib": 220, "max_memory_gib": 220, "unified": True, "nodes": 2},
+]}
+shared_rows = {rid: dict(text_row, recipe=rid, name=rid) for rid in ("single", "pair", "cpu-only")}
+with patch.object(a, "shared_recipes", return_value=["single", "pair", "cpu-only"]), patch.object(a, "load_model", return_value=None):
+  pair_listed = {m["recipe"]: (m["decode_tok_s"], m["prefill_tok_s"]) for m in a.shared_listing({"models": shared_rows, "ram_total_gib": 128}, pair_shared_catalog, pair_shared_profile, "spark.tail.ts.net")["models"]}
+check("a paired host publishes each shared model's own GPU measurement, including single-node and CPU recipes",
+      pair_listed == {"single": (52.2, 3033.0), "pair": (64.8, 1095.5), "cpu-only": (12.5, 80.0)}, repr(pair_listed))
+with patch.object(a, "shared_recipes", return_value=["single"]), patch.object(a, "load_model", return_value={"gpu": "nvidia-gb10", "recipe": single_rec, "runtime": single_rt, "variant": variant}):
+  single_listed = a.shared_listing({"models": {"single": shared_rows["single"]}, "ram_total_gib": 128}, pair_shared_catalog, pair_shared_profile, "spark.tail.ts.net")["models"]
+check("a shared model's manifest GPU selects its measurement on a paired host",
+      [(m["decode_tok_s"], m["prefill_tok_s"]) for m in single_listed] == [(52.2, 3033.0)], repr(single_listed))
+with patch.object(a, "shared_recipes", return_value=["cpu-only"]), patch.object(a, "load_model", return_value={"gpu": "cpu", "recipe": cpu_rec, "runtime": cpu_rt, "variant": variant}):
+  cpu_listed = a.shared_listing({"models": {"cpu-only": shared_rows["cpu-only"]}, "ram_total_gib": 128}, pair_shared_catalog, {"platform": "x86", "ram_class": 128, "ram_gib": 128, "gpus": []}, "host.tail.ts.net")["models"]
+check("a host with no supported GPU still publishes a shared CPU model's measurement",
+      [(m["decode_tok_s"], m["prefill_tok_s"]) for m in cpu_listed] == [(12.5, 80.0)], repr(cpu_listed))
 peer = a.clean_listing({"schema": a.NETWORK_SCHEMA, "models": [dict(listed[0]), {"recipe": "old", "name": "Old"}]}, "me.tail.ts.net")["models"]
 check("a peer's listing keeps an image model's kind, and a row without one is text", [(m["kind"], m["edit"]) for m in peer] == [("image", True), ("text", False)], repr(peer))
 image_remote = a.remote_record("spark", "spark.tail.ts.net", peer[0], True, 128, 0)

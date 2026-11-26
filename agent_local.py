@@ -5028,18 +5028,19 @@ def serve_off(path):
 
 def shared_listing(record, catalog, profile, dns):
   """What other machines on the tailnet see: the shared models and their state."""
-  try:
-    gpu = choose_gpu(profile)
-  except LocalError:
-    gpu = None
   models = []
   for rid in shared_recipes():
     model = record["models"].get(rid)
     if not model:
       continue
-    recipe = catalog.recipes.get(rid) or (load_model(rid) or {}).get("recipe") or {}
-    measured = load_measurement(catalog, recipe, profile, gpu).get("long", {}) if gpu and recipe else {}
     manifest = load_model(rid) or {}
+    recipe = catalog.recipes.get(rid) or manifest.get("recipe") or {}
+    runtime = catalog.runtimes.get(recipe.get("runtime")) or manifest.get("runtime")
+    try:
+      gpu = recipe_gpu(profile, recipe, manifest.get("gpu"), runtime) if recipe else None
+    except LocalError:
+      gpu = None
+    measured = load_measurement(catalog, recipe, profile, gpu).get("long", {}) if gpu and recipe else {}
     models.append({
       "recipe": rid,
       "name": model["name"],
