@@ -7,6 +7,14 @@
 # list the models recommended beside them for each kind, `use best image` and so on, in the same
 # order of preference, and never compete with `recipes` or each other.
 
+# No text model fits in the 23 GiB a 32 GB machine leaves beside the desktop, but pictures and
+# songs do.
+[[class]]
+gpu = "amd-strix-halo"
+ram_class = 32
+images = ["flux2-klein-4b-sdcpp", "z-image-turbo-sdcpp"]
+music = ["ace-step-1.5-turbo-acestep"]
+
 # 27B also fits at 128 and 192 GB, but on agent work it is much weaker and about a third the
 # speed, so those get Flash Next alone. At 64 GB only 27B fits.
 [[class]]

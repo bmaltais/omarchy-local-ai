@@ -1102,9 +1102,14 @@ def validate_best(best, recipes):
     if selectors in seen:
       errors.append(f"{where}: same selectors as class[{seen[selectors]}]")
     seen[selectors] = index
+    # A machine too small for any text model can still be recommended pictures, clips or music,
+    # so a class needs a list of some kind, not necessarily text.
     names = entry.get("recipes", [])
-    if not isinstance(names, list) or not names:
-      errors.append(f"{where}.recipes: must be a non-empty list")
+    if not isinstance(names, list):
+      errors.append(f"{where}.recipes: must be a list")
+      continue
+    if not any(entry.get(field) for field in BEST_FIELDS.values()):
+      errors.append(f"{where}: must recommend at least one model ({', '.join(BEST_FIELDS.values())})")
       continue
     # `recipes` choose the agents' model and `use best text`; the other kinds' lists, the models
     # recommended beside it, each its own `use best <kind>`.
