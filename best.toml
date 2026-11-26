@@ -8,7 +8,9 @@
 # order of preference, and never compete with `recipes` or each other.
 
 # 27B also fits at 128 and 192 GB, but on agent work it is much weaker and about a third the
-# speed, so those get Flash Next alone. At 64 GB only 27B fits.
+# speed, so those get Flash Next alone. At 64 GB Inkling 2 Mini leads: on Gufo 0.37 it loads in
+# 31.4 GiB with a 256K window and decodes ~3x faster than Qwen3.8 27B on long prompts (73.3 vs
+# 24.0 tok/s, 1636 vs 568 tok/s prefill).
 [[class]]
 gpu = "amd-strix-halo"
 ram_class = 128
@@ -24,7 +26,7 @@ music = ["stable-audio-3-medium-vulkan"]
 [[class]]
 gpu = "amd-strix-halo"
 ram_class = 64
-recipes = ["qwen3.8-27b-gufo"]
+recipes = ["inkling-2-mini-gufo", "qwen3.8-27b-gufo"]
 images = ["flux2-klein-4b-sdcpp", "z-image-turbo-sdcpp"]
 videos = ["minimax-h3-sdcpp"]
 music = ["ace-step-1.5-turbo-acestep"]
