@@ -1,5 +1,8 @@
 # The recommendation per hardware class, in order. `use best` picks the first recipe in the
-# exact gpu/ram_class pair that fits the machine; later entries are fallbacks for static reasons only.
+# gpu/ram_class pair that fits the machine; later entries are fallbacks for static reasons only.
+# A bigger machine takes each kind's list from the nearest smaller class of its GPU that has one,
+# until its own class lists that kind: a recommendation is measured on the smallest machine that
+# makes it, and every bigger one of the same GPU inherits it.
 # Kept by hand, and what the agents panel puts forward: any recipe whose runtime runs on a machine
 # and that fits it can be added from Local AI, but only these are recommended. A recipe may be listed
 # only for classes it has a measurement record for.

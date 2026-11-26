@@ -113,7 +113,11 @@ check("identical best selectors are rejected", any("same selectors" in e for e i
 check("best cannot recommend an unmeasured class", any("no measured" in e for e in a.validate_best({"class": [dict(entry, ram_class=128)]}, {"model": recipe})))
 
 catalog = SimpleNamespace(recipes={"model": copy.deepcopy(recipe)}, runtimes={"server": runtime}, best={"class": [entry]})
-check("best requires an exact GPU and RAM pair", a.match_class({"class": [entry]}, profile, dict(gpu, family="other")) is None and a.match_class({"class": [entry]}, dict(profile, ram_class=128), gpu) is None)
+check("best requires the same GPU", a.match_class({"class": [entry]}, profile, dict(gpu, family="other")) is None)
+check("a smaller machine doesn't take a bigger one's best", a.match_class({"class": [dict(entry, ram_class=128)]}, profile, gpu) is None)
+check("a bigger machine takes the nearest smaller class's best", a.match_class({"class": [dict(entry, ram_class=32), entry]}, dict(profile, ram_class=192), gpu)["ram_class"] == 64)
+check("a bigger machine keeps its own best", a.match_class({"class": [entry, dict(entry, ram_class=128, recipes=["other"])]}, dict(profile, ram_class=128), gpu)["recipes"] == ["other"])
+check("a kind a bigger class doesn't list comes from a smaller one", a.match_class({"class": [dict(entry, music=["song"]), dict(entry, ram_class=128, recipes=["other"])]}, dict(profile, ram_class=128), gpu, "music")["music"] == ["song"])
 check("best requires a GPU selector", any(".gpu" in e for e in a.validate_best({"class": [{"ram_class": 64, "recipes": ["model"]}]}, {"model": recipe})))
 check("best rejects platform selectors", any(".platform" in e for e in a.validate_best({"class": [dict(entry, platform="x86")]}, {"model": recipe})))
 catalog.recipes["model"]["variant"] = [variant, dict(variant, ctx=8192), dict(variant, ctx=16384, peak_ram_gib=60)]
