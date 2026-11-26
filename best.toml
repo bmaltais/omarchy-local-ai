@@ -33,7 +33,7 @@ music = ["ace-step-1.5-turbo-acestep"]
 [[class]]
 gpu = "nvidia-gb10"
 ram_class = 128
-recipes = ["qwen3.8-flash-next-tensorfold", "inkling-2-mini-tensorfold", "qwen3.8-27b-tensorfold"]
+recipes = ["qwen3.8-flash-next-tensorfold", "inkling-2-mini-tensorfold"]
 images = ["flux2-klein-4b-sdcpp-cuda", "z-image-turbo-sdcpp-cuda"]
 videos = ["minimax-h3-sdcpp-cuda"]
 music = ["ace-step-1.5-turbo-acestep-cuda"]
