@@ -1,0 +1,30 @@
+# Gufo, the open-source (MIT) Strix Halo engine, as runtimes/gufo.toml runs it, published as
+# ghcr.io/omacom/omarchy-local-ai/gufo. gufo-org's own runtime image at a pinned digest, unchanged, with Caddy in front:
+# Gufo dropped its API key in 0.29 ("Gufo ignores API keys"), so Caddy answers on the engine's port, refuses any
+# request without the key in GUFO_API_KEY and streams the rest to Gufo on the container's loopback.
+
+# Gufo's release tag for BASE_IMAGE, which names the published image (0.37.0-<n>).
+ARG BUILD=0.37.0
+# ghcr.io/gufo-org/toolboxes/gufo-runtime:0.37.0 (commit 684b716a567aee9e016cbe1e4fec22ae9344a7e8)
+ARG BASE_IMAGE=ghcr.io/gufo-org/toolboxes/gufo-runtime@sha256:9548e9946c18cab9d135dd5dc2fad47e7bae0285d6240c100bb36a855bb1d4dc
+
+# Gufo's image has no tar, so Caddy is unpacked in Alpine.
+# docker.io/library/alpine:3.22
+FROM docker.io/library/alpine@sha256:9db2934886712d877c932e07249c75a59e6ca27adfbccc05261987a17bef2d63 AS caddy
+# Caddy's release, checked by the SHA-512 its checksums file gives.
+ARG CADDY_VERSION=2.11.9
+ARG CADDY_SHA512=0e85544340290a16ce4bfb76fe7d65e9de1bf3a6e67f5ccfff30b30d27ea4c73e078077b7bf3e58ae60b6b12e44327705287059c775bca5782e8ee85ea7edd75
+RUN wget -qO /tmp/caddy.tar.gz "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_amd64.tar.gz" \
+ && echo "${CADDY_SHA512}  /tmp/caddy.tar.gz" | sha512sum -c - \
+ && mkdir /tmp/caddy && tar -xzf /tmp/caddy.tar.gz -C /tmp/caddy caddy LICENSE
+
+FROM ${BASE_IMAGE}
+COPY --from=caddy /tmp/caddy/caddy /usr/bin/caddy
+COPY --from=caddy /tmp/caddy/LICENSE /usr/share/licenses/caddy/LICENSE
+COPY Caddyfile /etc/caddy/Caddyfile
+COPY serve /usr/bin/serve
+LABEL org.opencontainers.image.source="https://github.com/omacom/omarchy-local-ai"
+LABEL org.opencontainers.image.description="Gufo 0.37.0 behind a key, for omarchy-local-ai"
+LABEL org.opencontainers.image.licenses="MIT"
+ENTRYPOINT []
+CMD ["serve"]
