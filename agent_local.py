@@ -47,6 +47,8 @@ SECRET = "omarchy-agent-local-key"
 KEY_ENV = "OMARCHY_LOCAL_KEY"
 KEY_PLACEHOLDER = "@OMARCHY_LOCAL_KEY@"
 RESERVE_GIB = 8
+# Recipes left out of the listings and the recommendations: kept for trying by name, or no longer offered.
+HIDDEN_FLAGS = ("experimental", "retired")
 # This engine's own entry script, which the units and detached setups it writes run by path.
 ENGINE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "omarchy-local-ai")
 # How often a setup rewrites its progress for the panel, and the window its speed is averaged over.
@@ -923,9 +925,13 @@ def validate_recipe(rid, recipe, runtimes, root=None):
   # Whether a music model sings with lyrics; omitted means true.
   if "vocals" in recipe and (not isinstance(recipe["vocals"], bool) or kind != "music"):
     errors.append(f"{where}.vocals: true or false, for music models only")
-  # A model kept for trying by name: out of the listings until it's set up, and never recommended.
-  if "experimental" in recipe and not isinstance(recipe["experimental"], bool):
-    errors.append(f"{where}.experimental: true or false")
+  # A model kept for trying by name (experimental) or no longer offered (retired): out of the
+  # listings until it's set up, and never recommended.
+  for flag in HIDDEN_FLAGS:
+    if flag in recipe and not isinstance(recipe[flag], bool):
+      errors.append(f"{where}.{flag}: true or false")
+  if all(recipe.get(flag) is True for flag in HIDDEN_FLAGS):
+    errors.append(f"{where}: experimental or retired, not both")
   # What a setup downloads, for a first-run screen to say before it starts.
   if "download_gib" in recipe and (not isinstance(recipe["download_gib"], (int, float)) or isinstance(recipe["download_gib"], bool)
                                    or not math.isfinite(recipe["download_gib"]) or recipe["download_gib"] <= 0):
@@ -1117,8 +1123,9 @@ def validate_best(best, recipes):
       if recipe_kind(recipe) != kind:
         errors.append(f"{where}.{field}: '{name}' is of kind {recipe_kind(recipe)}, not {kind}")
         continue
-      if recipe.get("experimental"):
-        errors.append(f"{where}.{field}: '{name}' is experimental, so it can't be recommended")
+      hidden = next((flag for flag in HIDDEN_FLAGS if recipe.get(flag)), None)
+      if hidden:
+        errors.append(f"{where}.{field}: '{name}' is {hidden}, so it can't be recommended")
         continue
       qualified = any(
         hw.get("ram_class") == entry.get("ram_class")
@@ -1288,9 +1295,11 @@ def _resolve_class(catalog, profile, gpu, ctx=None, field="recipes"):
   raise LocalError(f"No recommended recipe fits this machine: {details}")
 
 
-def recipe_listing(catalog, profile, running=(), experimental=False):
-  """The catalog's recipes for this machine. An experimental one is left out unless it's set up
-  here, so it can still be started, stopped and removed, or experimental asks for them all."""
+def recipe_listing(catalog, profile, running=(), experimental=False, retired=False):
+  """The catalog's recipes for this machine. An experimental or retired one is left out unless
+  it's set up here, so it can still be started, stopped and removed, or experimental or retired
+  asks for those too."""
+  shown = {"experimental": experimental, "retired": retired}
   rows = []
   try:
     gpu = choose_gpu(profile)
@@ -1305,7 +1314,7 @@ def recipe_listing(catalog, profile, running=(), experimental=False):
         pass
   for rid in sorted(catalog.recipes):
     recipe = catalog.recipes[rid]
-    if recipe.get("experimental") and not experimental and not recipe_installed(rid):
+    if any(recipe.get(flag) and not shown[flag] for flag in HIDDEN_FLAGS) and not recipe_installed(rid):
       continue
     runtime = catalog.runtimes.get(recipe.get("runtime"), {})
     if gpu or runtime_is_cpu(runtime):
@@ -1328,6 +1337,7 @@ def recipe_listing(catalog, profile, running=(), experimental=False):
       "architecture": recipe.get("architecture", ""),
       "installed": recipe_installed(rid),
       "experimental": bool(recipe.get("experimental")),
+      "retired": bool(recipe.get("retired")),
       "available": variant is not None,
       "reason": "" if variant else reason,
       # The recommendation of its kind: the agents' model, or the image model beside it.
@@ -3589,6 +3599,8 @@ def cmd_use(argv):
       raise LocalError(f"{rid} can't run on this machine: {reason}")
     if recipe.get("experimental"):
       say(f"{rid} is experimental: kept for trying, and not recommended for any machine")
+    elif recipe.get("retired"):
+      say(f"{rid} is retired: no longer offered or recommended, and kept so a setup of it keeps working")
   measured_load = load_measurement(catalog, catalog.recipes[rid], profile, gpu).get("load_seconds")
   # Before a detached setup leaves this process, so polkit can still ask in the user's session.
   raise_gpu_memory(variant, gpu, args.detach)
@@ -3775,6 +3787,7 @@ def cmd_list(argv):
   parser = argparse.ArgumentParser(prog="omarchy models list")
   parser.add_argument("--json", action="store_true")
   parser.add_argument("--experimental", action="store_true", help="also list the experimental models, which are kept for trying by name")
+  parser.add_argument("--retired", action="store_true", help="also list the retired models, which are no longer offered")
   args = parser.parse_args(argv)
   profile = machine_profile()
   catalog = load_catalog()
@@ -3782,8 +3795,8 @@ def cmd_list(argv):
   rows = recipe_listing(catalog, profile, running)
   # The panel's cache stays the default listing, whatever this one shows.
   write_list_cache(rows)
-  if args.experimental:
-    rows = recipe_listing(catalog, profile, running, experimental=True)
+  if args.experimental or args.retired:
+    rows = recipe_listing(catalog, profile, running, experimental=args.experimental, retired=args.retired)
   if args.json:
     print(json.dumps(rows, indent=2))
     return 0
@@ -3791,7 +3804,7 @@ def cmd_list(argv):
   paired = f" · linked to {profile['pair']['host']}" if profile.get("pair") else ""
   say(f"This machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}{paired}")
   for row in rows:
-    marks = [mark for mark, on in (("best", row["best"]), ("experimental", row["experimental"]), ("running", row["active"]), ("installed", row["installed"])) if on]
+    marks = [mark for mark, on in (("best", row["best"]), ("experimental", row["experimental"]), ("retired", row["retired"]), ("running", row["active"]), ("installed", row["installed"])) if on]
     tier = f" · third-party ({row['publisher']})" if row["tier"] == "third-party" else ""
     say(f"{'●' if row['available'] else '○'} {row['id']}{' [' + ', '.join(marks) + ']' if marks else ''}")
     say(f"    {row['name']} on {row['runtime']}{tier}")
