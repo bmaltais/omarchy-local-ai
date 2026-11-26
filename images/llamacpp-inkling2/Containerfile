@@ -1,6 +1,6 @@
 # llama.cpp's llama-server, built with Vulkan for AMD and Intel GPUs with the
 # Inkling 2 Vulkan patches (PR #32957 topk_moe bias, PR #32898 compact-bias
-# Flash Attention, and PR #33116 5 Inkling 2 Vulkan op fusions modeled on #33060),
+# Flash Attention, and our Vulkan port of #33060's 5 Inkling 2 op fusions),
 # as runtimes/llamacpp-inkling2.toml runs it, published as
 # ghcr.io/omacom/omarchy-local-ai/llamacpp-inkling2.
 # Everything is from Arch Linux's packages at the pinned base: upstream's own
