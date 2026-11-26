@@ -168,6 +168,20 @@ both_measured = {"hardware": [{"gpu": "nvidia-gb10", "ram_class": 128, "measured
 speeds = [a.load_measurement(SimpleNamespace(root=str(shared)), recipe, {"ram_class": 128, "platform": "aarch64"}, {"family": family})["long"]["decode_tok_s"]
           for recipe, family in ((both_measured, "nvidia-n1x"), (both_measured, "nvidia-gb10"), ({"hardware": both_measured["hardware"][:1]}, "nvidia-n1x"))]
 check("a machine shows its own family's measurement, else its class's", speeds == [50.0, 60.0, 60.0], str(speeds))
+# Speed binds to the chip rather than RAM size: a RAM class without its own record uses the same chip's,
+# preferring exact and then closest RAM class, and own chip family over a sibling family on the same RAM.
+for tag, speed in (("halo64", 73.3), ("halo192", 71.0), ("n1x64", 48.8)):
+  (shared / f"{tag}.toml").write_text(f"[long]\ndecode_tok_s = {speed}\n")
+halo_measured = {"hardware": [{"gpu": "amd-strix-halo", "ram_class": 64, "measured": "halo64.toml"},
+                              {"gpu": "amd-strix-halo", "ram_class": 192, "measured": "halo192.toml"}]}
+n1x_cross_ram = {"hardware": [{"gpu": "nvidia-gb10", "ram_class": 128, "measured": "gb10.toml"},
+                              {"gpu": "nvidia-n1x", "ram_class": 64, "measured": "n1x64.toml"}]}
+chip_speeds = [
+  a.load_measurement(SimpleNamespace(root=str(shared)), halo_measured, {"ram_class": 128, "platform": "x86"}, {"family": "amd-strix-halo"})["long"]["decode_tok_s"],
+  a.load_measurement(SimpleNamespace(root=str(shared)), halo_measured, {"ram_class": 192, "platform": "x86"}, {"family": "amd-strix-halo"})["long"]["decode_tok_s"],
+  a.load_measurement(SimpleNamespace(root=str(shared)), n1x_cross_ram, {"ram_class": 128, "platform": "aarch64"}, {"family": "nvidia-n1x"})["long"]["decode_tok_s"],
+]
+check("a machine reuses its chip's measurement across RAM classes, preferring own chip and RAM class", chip_speeds == [73.3, 71.0, 48.8], str(chip_speeds))
 # An Intel laptop: integrated graphics on the xe driver counts as a GPU.
 drm = Path(os.environ["HOME"]) / "intel-drm"
 for driver in ("xe", "i915"):

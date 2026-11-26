@@ -1354,7 +1354,7 @@ def recipe_listing(catalog, profile, running=(), experimental=False, retired=Fal
       "best": rid in best_ids,
       "active": rid in running,
       # What the card shows: the measured footprint, context and speed at a
-      # long prompt on this machine class.
+      # long prompt on this chip.
       "memory_gib": variant["peak_ram_gib"] if variant else None,
       # What its setup downloads, when the recipe says.
       "download_gib": recipe.get("download_gib"),
@@ -1382,11 +1382,14 @@ def recipe_installed(rid):
 
 
 def load_measurement(catalog, recipe, profile, gpu):
-  """The bench numbers the catalog recorded for this recipe on this machine class: its own
-  family's where it has them, else those of a family sharing the class (a GB10's for an N1x)."""
+  """The bench numbers the catalog recorded for this recipe on this chip: its own
+  family's where it has them, else those of a family sharing the class (a GB10's for an N1x),
+  preferring the machine's RAM class when more than one was measured."""
+  ram = profile.get("ram_class", 0)
   matches = [hw for hw in recipe.get("hardware", [])
-             if gpu_class(hw.get("gpu")) == gpu_class(gpu["family"]) and hw.get("ram_class") == profile["ram_class"] and hw.get("platform") in (None, profile["platform"])]
-  for hw in sorted(matches, key=lambda hw: hw.get("gpu") != gpu["family"])[:1]:
+             if gpu_class(hw.get("gpu")) == gpu_class(gpu["family"])
+             and hw.get("platform") in (None, profile["platform"])]
+  for hw in sorted(matches, key=lambda hw: (hw.get("gpu") != gpu["family"], abs((hw.get("ram_class") or 0) - ram)))[:1]:
     try:
       with open(os.path.join(catalog.root, hw["measured"]), "rb") as handle:
         return tomllib.load(handle)
