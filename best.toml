@@ -29,7 +29,6 @@ gpu = "amd-strix-halo"
 ram_class = 192
 recipes = ["qwen3.8-flash-next-gufo"]
 images = ["flux2-klein-4b-sdcpp", "z-image-turbo-sdcpp"]
-music = ["stable-audio-3-medium-vulkan"]
 
 [[class]]
 gpu = "amd-strix-halo"
@@ -71,4 +70,3 @@ recipes = ["deepseek-v4.1-flash-tensorfold-pair", "glm-5.3-flash-tensorfold-pair
 gpu = "intel-arc-b390"
 ram_class = 64
 recipes = ["inkling-2-mini-llamacpp"]
-music = ["stable-audio-3-medium"]
