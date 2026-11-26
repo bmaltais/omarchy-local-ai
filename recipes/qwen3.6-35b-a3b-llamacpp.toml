@@ -2,6 +2,9 @@ name = "Qwen3.6 35B-A3B"
 runtime = "llamacpp"
 vendor = "qwen"
 architecture = "moe"
+# No longer offered: replaced on 64 GB Arc B390 by Inkling 2 Mini, which is much stronger on agentic
+# coding, adds vision and uses less memory. Kept so an existing setup keeps working.
+retired = true
 
 [[hardware]]
 gpu = "intel-arc-b390"

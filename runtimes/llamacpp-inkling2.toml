@@ -1,0 +1,25 @@
+# llama.cpp's llama-server with the Inkling 2 Vulkan patches (#32957 topk_moe bias, #32898 compact-bias
+# Flash Attention, and our Vulkan port of #33060's 5 Inkling 2 op fusions), built by Omacom from
+# images/llamacpp-inkling2 on Arch Linux with Mesa ANV/RADV. Vulkan on the render node.
+# The key comes from LLAMA_API_KEY and covers every route but /health, which says only whether
+# the model has loaded. --offline keeps the server from fetching anything of its own accord.
+image = "ghcr.io/omacom/omarchy-local-ai/llamacpp-inkling2@sha256:2de51b1b9970f5709b52e9ec8fa5de7fc7e92ce33bea2b488cae697d30d80aaf"
+tier = "third-party"
+review = "reviews/llamacpp-inkling2-2de51b1b9970.toml"
+port = 8080
+command = ["llama-server", "--host", "0.0.0.0", "--port", "8080", "--offline", "--no-webui", "--gpu-layers", "all"]
+# Healthy once the model has loaded: /health answers 503 until then.
+health = { probe = ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:8080/health"] }
+run = { devices = ["render"], group_add = "keep-groups" }
+gpus = ["intel"]
+reserved = ["--host", "--port", "--api-key", "--api-key-file", "--offline", "--webui", "--ui", "--no-webui", "--no-ui", "--path", "--tools", "--tools-runtime", "--agent", "-ag", "--no-agent", "-no-ag", "--allow-unauthenticated-tools", "--mcp-servers-config", "--mcp-servers-json", "--ui-mcp-proxy", "--webui-mcp-proxy", "--no-ui-mcp-proxy", "--no-webui-mcp-proxy", "--rpc", "--props", "--hf-repo", "-hf", "-hfr", "--hf-file", "-hff", "--hf-token", "-hft", "--model-url", "-mu", "--docker-repo", "-dr", "--mmproj-url", "-mmu", "--spec-draft-hf", "-hfd", "-hfrd", "--hf-repo-draft", "--models-dir", "--models-preset", "--slot-save-path", "--media-path", "--log-file", "--ssl-key-file", "--ssl-cert-file", "LLAMA_API_KEY", "HF_TOKEN"]
+
+[inputs]
+model = { arg = "--model" }
+draft = { arg = "--model-draft" }
+ctx = { arg = "--ctx-size" }
+alias = { arg = "--alias" }
+key = { env = "LLAMA_API_KEY" }
+temperature = { arg = "--temp" }
+top_p = { arg = "--top-p" }
+top_k = { arg = "--top-k" }

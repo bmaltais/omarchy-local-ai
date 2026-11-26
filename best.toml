@@ -56,9 +56,11 @@ gpu = "nvidia-gb10-pair"
 ram_class = 128
 recipes = ["deepseek-v4.1-flash-tensorfold-pair", "glm-5.3-flash-tensorfold-pair"]
 
-# On an Arc B390 a mixture-of-experts model generates at 45 tokens a second and a dense 27B at 5.
+# On an Arc B390 a mixture-of-experts model is the sweet spot (a dense 27B runs at 5 tok/s).
+# Inkling 2 Mini leads on agentic coding and vision (same model that beat Qwen3.8 27B at 64 GB NVIDIA)
+# while loading in ~20.5 GiB at 131K context. Qwen3.6 35B-A3B is retired.
 [[class]]
 gpu = "intel-arc-b390"
 ram_class = 64
-recipes = ["qwen3.6-35b-a3b-llamacpp"]
+recipes = ["inkling-2-mini-llamacpp"]
 music = ["stable-audio-3-medium"]
