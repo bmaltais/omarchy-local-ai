@@ -1,0 +1,16 @@
+image = "ghcr.io/omacom/omarchy-local-ai/gufo@sha256:9a2b08be7e440d9878a49686bff5da1d87ed5a8eac3546a18b86b61ee5295215"
+publisher = "Omacom (published by .github/workflows/images.yml as gufo:0.37.0-46 from images/gufo: gufo-org's gufo-runtime 0.37.0 unchanged, with Caddy 2.11.9 in front)"
+reviewer = "Antigravity for David Heinemeier Hansson"
+date = "2026-11-26"
+version = "Gufo 0.37.0 (684b716), ghcr.io/gufo-org/toolboxes/gufo-runtime@sha256:9548e9946c18cab9d135dd5dc2fad47e7bae0285d6240c100bb36a855bb1d4dc; Caddy 2.11.9 (linux amd64 release, SHA-512 from its checksums file, unpacked in alpine@sha256:9db2934886712d877c932e07249c75a59e6ca27adfbccc05261987a17bef2d63)"
+source = "open (MIT), https://github.com/gufo-org/gufo; Caddy open (Apache-2.0), https://github.com/caddyserver/caddy; image recipe images/gufo in https://github.com/omacom/omarchy-local-ai"
+license_url = "https://raw.githubusercontent.com/gufo-org/gufo/684b716a567aee9e016cbe1e4fec22ae9344a7e8/LICENSE"
+license_sha256 = "dc53ee4f56ce33a1587e64df04b0d9ace8abd3e875e2b00f6f9f292405bf1001"
+checked = [
+  "license: MIT for Gufo's code (the LICENSE at 684b716 hashes as above, unchanged since 0.28.1); adapted code and dependencies keep their notices; Caddy is Apache-2.0, shipped in /usr/share/licenses/caddy",
+  "build: images/gufo's Containerfile copies only Caddy, its license, the Caddyfile and serve onto gufo-org's runtime image at the pinned digest; gufo itself is used as gufo-org published it",
+  "behavior: loads models from local paths only; fetches client-supplied image URLs, which the internal network blocks",
+  "auth: Gufo has had no API key since 0.29 (gufo-org/gufo#957: 'Gufo ignores API keys'), so serve puts Gufo on the container's loopback (127.0.0.1:18080) and Caddy, with its admin API, automatic HTTPS and config persistence off, on the model's port, refusing every request without 'Authorization: Bearer $GUFO_API_KEY'; serve refuses to start with an empty key. Checked in CI and locally: no key 401, wrong key 401, right key 200, tailnet Host 200, empty key refused",
+  "the key no longer reaches any command line: it reaches Caddy as GUFO_API_KEY from the Podman secret",
+  "acceptance (2026-11-26): on an HP ZBook Ultra G3a (Ryzen AI Max+ PRO 495, 192 GB), Inkling 2 Mini starts through the engine with read-only root, dropped capabilities and no-new-privileges, passes its health probe, returns 401 without or with a wrong key and 200 with the right key on /, /ready, /health and /v1/models, keeps the key out of ps arguments, and exits 0 on SIGTERM",
+]

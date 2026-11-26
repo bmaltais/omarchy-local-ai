@@ -1,26 +1,24 @@
-# Gufo: the open-source (MIT) Strix Halo engine. Configured by arguments to `gufo serve llm`.
-# It takes its key only as --api-key, so Omarchy substitutes it inside the container from the
-# Podman secret; the key never reaches the unit file but is visible in the process list.
-# Upstream request: an --api-key-file option or environment variable.
-image = "ghcr.io/gufo-org/toolboxes/gufo-runtime@sha256:faaa6e21afb903bea20cbc893aa30239146e68e0252d412a7ff4932a26f236b8"
+# Gufo: the open-source (MIT) Strix Halo engine, configured by arguments to `gufo serve llm`, built by Omacom from
+# images/gufo: gufo-org's own runtime image, unchanged, with Caddy in front. Gufo has had no API key since 0.29, so
+# the image's Caddy answers on the model's port, refuses any request without the key in GUFO_API_KEY and streams the
+# rest to Gufo on the container's own loopback.
+image = "ghcr.io/omacom/omarchy-local-ai/gufo@sha256:9a2b08be7e440d9878a49686bff5da1d87ed5a8eac3546a18b86b61ee5295215"
 tier = "third-party"
-review = "reviews/gufo-faaa6e21afb9.toml"
+review = "reviews/gufo-9a2b08be7e44.toml"
 port = 8080
-command = ["gufo", "serve", "llm", "--host", "0.0.0.0", "--port", "8080"]
-shell = "/bin/bash"
-key_on_cmdline = true
+command = ["serve", "llm", "--port", "8080"]
 health = { probe = ["/bin/sh", "-c", "curl -fsS -o /dev/null -H \"Authorization: Bearer $OMARCHY_LOCAL_KEY\" http://127.0.0.1:8080/ready"] }
 run = { devices = ["render", "kfd"], group_add = "keep-groups", memlock = "unlimited" }
 # Built for the Strix Halo's gfx1151 only.
 gpus = ["amd-strix-halo"]
-reserved = ["--api-key", "--host", "-i", "--port", "-p", "--trace", "--cache-disk"]
+reserved = ["--api-key", "--host", "-i", "--port", "-p", "--trace", "--cache-disk", "GUFO_API_KEY"]
 
 [inputs]
 model = { arg = "--model" }
 draft = { arg = "--dflash-model" }
 ctx = { arg = "--context" }
 alias = { arg = "--served-model-name" }
-key = { arg = "--api-key" }
+key = { env = "GUFO_API_KEY" }
 temperature = { arg = "--temperature" }
 top_p = { arg = "--top-p" }
 top_k = { arg = "--top-k" }
