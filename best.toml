@@ -38,10 +38,13 @@ images = ["flux2-klein-4b-sdcpp-cuda", "z-image-turbo-sdcpp-cuda"]
 videos = ["minimax-h3-sdcpp-cuda"]
 music = ["ace-step-1.5-turbo-acestep-cuda"]
 
+# Inkling 2 Mini leads at 64 GB: in a blind-judged run of Omarchy's theme, plugin, app and game make tasks it
+# averaged 8.5 of 10 to Qwen3.8 27B's 8.0, at about 1.7 times its speed, and fits in 40 GiB with one stream.
+# Nemotron 3.5 Bolt scored 4.4 there and needs the same 40 GiB on the same chips, so it's never the one that fits.
 [[class]]
 gpu = "nvidia-gb10"
 ram_class = 64
-recipes = ["qwen3.8-27b-tensorfold", "nemotron-3.5-bolt-tensorfold"]
+recipes = ["inkling-2-mini-tensorfold", "qwen3.8-27b-tensorfold"]
 
 # Two DGX Sparks cabled through their ConnectX-7 ports: the pair's own class, tried before either Spark's own.
 # DeepSeek V4.1 Flash decodes nearly twice as fast as GLM-5.3 Flash, leads it at coding and holds 1M tokens;
