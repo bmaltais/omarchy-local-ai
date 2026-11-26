@@ -111,6 +111,7 @@ for role in ("model", "draft"):
   check(f"duplicate {role} role is rejected", any(f".{role}: already named" in e for e in a.validate_recipe("model", changed, {"server": runtime})))
 check("hardware rejects ram_class", any("per chip" in e for e in a.validate_recipe("model", dict(recipe, hardware=[{"gpu": "amd-strix-halo", "ram_class": 64, "measured": "measurements/model.toml"}]), {"server": runtime})))
 check("hardware rejects duplicate chip entries", any("duplicate measurement" in e for e in a.validate_recipe("model", dict(recipe, hardware=[{"gpu": "amd-strix-halo", "measured": "measurements/model.toml"}, {"gpu": "amd-strix-halo", "measured": "measurements/model.toml"}]), {"server": runtime})))
+check("hardware rejects non-string platform without crashing", any(".platform" in e for e in a.validate_recipe("model", dict(recipe, hardware=[{"gpu": "amd-strix-halo", "platform": [], "measured": "measurements/model.toml"}]), {"server": runtime})))
 check("identical best selectors are rejected", any("same selectors" in e for e in a.validate_best({"class": [entry, entry]}, {"model": recipe})))
 check("best accepts another RAM class for a measured GPU", not a.validate_best({"class": [dict(entry, ram_class=128)]}, {"model": recipe}))
 check("best cannot recommend on an unmeasured GPU", any("no measured" in e for e in a.validate_best({"class": [dict(entry, gpu="nvidia-gb10")]}, {"model": recipe})))

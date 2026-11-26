@@ -962,8 +962,8 @@ def validate_recipe(rid, recipe, runtimes, root=None):
       errors.append(f"{where}.hardware[{index}].ram_class: measurements are per chip, not per RAM class")
     if not _safe_string(entry.get("gpu"), f"{where}.hardware[{index}].gpu", errors):
       continue
-    if "platform" in entry:
-      _safe_string(entry.get("platform"), f"{where}.hardware[{index}].platform", errors)
+    if "platform" in entry and not _safe_string(entry.get("platform"), f"{where}.hardware[{index}].platform", errors):
+      continue
     hw_key = (entry["gpu"], entry.get("platform"))
     if hw_key in seen_hw:
       errors.append(f"{where}.hardware[{index}]: duplicate measurement for {entry['gpu']}")
