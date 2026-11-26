@@ -1,0 +1,17 @@
+image = "ghcr.io/omacom/omarchy-local-ai/llamacpp-inkling2@sha256:2de51b1b9970f5709b52e9ec8fa5de7fc7e92ce33bea2b488cae697d30d80aaf"
+publisher = "Omacom (built from images/llamacpp-inkling2: ggml-org/llama.cpp b12774 with Inkling 2 Vulkan patches)"
+reviewer = "Antigravity for David Heinemeier Hansson"
+date = "2026-11-26"
+version = "llama.cpp b12774 (171527522610996f5f0acf12334e185156ca8f44) + Inkling 2 Vulkan patches"
+source = "open (MIT), https://github.com/ggml-org/llama.cpp; image recipe images/llamacpp-inkling2/Containerfile"
+license_url = "https://raw.githubusercontent.com/ggml-org/llama.cpp/171527522610996f5f0acf12334e185156ca8f44/LICENSE"
+license_sha256 = "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
+checked = [
+  "license: llama.cpp is MIT (the LICENSE at 17152752 hashes as above); ggml is MIT; its vendored third-party code keeps its notices; the texts ship in /usr/share/licenses/llama.cpp",
+  "build: images/llamacpp-inkling2/Containerfile builds ggml-org/llama.cpp at commit 171527522610996f5f0acf12334e185156ca8f44 with three Vulkan Inkling 2 patches (#32957, #32898, and our Vulkan port of #33060) on docker.io/library/archlinux@sha256:fcee73ea1b96e236248f53a213f71276cc9072d9025b58bce9915e32f19963ae, with vulkan-intel and vulkan-radeon 26.3.1: Vulkan and the CPU backends only, built without OpenSSL so the server has no HTTPS client",
+  "behavior: loads the model and vision projector from local paths under the engine's read-only /models mount; the image carries no model weights; the runtime starts it with --offline and --no-webui and reserves the download, built-in tools, agent, MCP, RPC and web UI flags",
+  "acceptance (2026-11-26): serves with a read-only root, all capabilities dropped, no-new-privileges and only the render node (Vulkan/ANV on an Arc B390), loading bartowski/Inkling-2-Mini-GGUF:Q4_0 + mmproj-f16 in 6 s; it writes nothing to its filesystem",
+  "acceptance (2026-11-26): with --network none it still serves locally and outbound connections fail",
+  "acceptance (2026-11-26): rejects requests without the key or with a wrong key (401) and serves them with it (200) on /v1/models; /health is open by design (200) and says only whether the model has loaded",
+  "acceptance (2026-11-26): stops on SIGTERM with exit code 0",
+]
