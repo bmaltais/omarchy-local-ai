@@ -15,11 +15,11 @@ gpu = "amd-strix-halo"
 ram_class = 192
 measured = "measurements/qwen3.8-flash-next-gufo-strix-halo-192.toml"
 
-# The Unsloth UD-Q4_K_XL target Gufo supports, with its shared-Q8_0 MTP
+# The Unsloth Dynamic 3.1 UD-Q4_K_XL target Gufo supports, with its shared-Q8_0 MTP
 # predictor, at the revision Gufo's own benchmarks use.
 [[artifacts]]
 repo = "unsloth/Qwen3.8-Flash-Next-GGUF"
-revision = "38bb39ee97821de2c9009abb7e93950eec396e66"
+revision = "d96201194f103c906994f283f504209dc8d2a10c"
 license = "other (Qwen3.8-Flash-Next model license, see the model card)"
 files = ["UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf", "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf", "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf", "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf", "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf", "mmproj-BF16.gguf"]
 model = "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"
