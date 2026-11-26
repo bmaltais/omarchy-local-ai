@@ -1248,9 +1248,14 @@ def compatibility(catalog, rid, profile, gpu, ctx=None):
   return pick_variant(recipe, profile, gpu, ctx)
 
 
-def match_class(best, profile, gpu):
-  return next((entry for entry in best["class"]
-               if gpu_class(entry["gpu"]) == gpu_class(gpu["family"]) and entry["ram_class"] == profile["ram_class"]), None)
+def match_class(best, profile, gpu, field="recipes"):
+  """The class this machine takes its `field` list from: its own GPU class at its RAM class, or,
+  where that lists none, the nearest smaller RAM class of the same GPU that does. A bigger machine
+  recommends what a smaller one does until best.toml says otherwise, so a recommendation needs
+  measuring only on the smallest machine that makes it."""
+  same = [entry for entry in best["class"]
+          if gpu_class(entry["gpu"]) == gpu_class(gpu["family"]) and entry["ram_class"] <= profile["ram_class"] and entry.get(field)]
+  return max(same, key=lambda entry: entry["ram_class"], default=None)
 
 
 def resolve_best(catalog, profile, gpu=None, ctx=None, field="recipes"):
@@ -1274,16 +1279,16 @@ def resolve_best(catalog, profile, gpu=None, ctx=None, field="recipes"):
 
 
 def _resolve_class(catalog, profile, gpu, ctx=None, field="recipes"):
-  entry = match_class(catalog.best, profile, gpu)
+  entry = match_class(catalog.best, profile, gpu, field)
+  if entry is None and match_class(catalog.best, profile, gpu) is not None:
+    kind = next((name for name, listed in BEST_FIELDS.items() if listed == field), field)
+    raise LocalError(f"No {kind} model is recommended for this machine yet ({gpu['family']}, {profile['ram_class']} GB)")
   if entry is None:
     near = [rid for rid, recipe in catalog.recipes.items() if any(gpu_class(hw.get("gpu")) == gpu_class(gpu["family"]) for hw in recipe.get("hardware", []))]
     raise LocalError(
       f"No recommendation for this machine yet ({gpu['family']}, {profile['ram_class']} GB, {profile['platform']}).\n"
       + (f"Recipes measured on the same GPU family: {', '.join(near)}" if near else "No recipes are measured on this GPU family yet.")
     )
-  if not entry.get(field):
-    kind = next((name for name, listed in BEST_FIELDS.items() if listed == field), field)
-    raise LocalError(f"No {kind} model is recommended for this machine yet ({gpu['family']}, {profile['ram_class']} GB)")
   skipped = []
   for rid in entry.get(field, []):
     if rid not in catalog.recipes:
