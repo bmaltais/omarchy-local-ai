@@ -1731,6 +1731,29 @@ with patch.object(a, "load_catalog", return_value=trial_catalog), patch.object(a
 shown = {row["id"] for row in json.loads(printed[0])}
 check("list --experimental shows it, and the panel's saved listing still leaves it out",
       shown == {"model", "trial"} and len(saved) == 1 and {row["id"] for row in saved[0]} == {"model"}, repr((shown, saved)))
+# A retired recipe is no longer offered: left out like an experimental one, and kept so a setup keeps working.
+old = dict(copy.deepcopy(recipe), retired=True)
+old_catalog = SimpleNamespace(root=str(repo), recipes={"model": recipe, "trial": trial, "old": old}, runtimes=both, best=images_best)
+check("retired takes only true or false", any(".retired: true or false" in e for e in a.validate_recipe("old", dict(old, retired="yes"), {"server": runtime})))
+check("a retired recipe is otherwise valid", not a.validate_recipe("old", old, {"server": runtime}))
+check("a recipe is experimental or retired, not both", any("experimental or retired, not both" in e for e in a.validate_recipe("old", dict(old, experimental=True), {"server": runtime})))
+check("best.toml can't recommend a retired recipe", any("'old' is retired" in e for e in a.validate_best({"class": [dict(entry, recipes=["old", "model"])]}, {"model": recipe, "old": old})))
+with patch.object(a, "recipe_installed", return_value=False):
+  hidden = {row["id"] for row in a.recipe_listing(old_catalog, profile)}
+  asked = {row["id"]: row for row in a.recipe_listing(old_catalog, profile, retired=True)}
+check("the listing leaves a retired recipe out", hidden == {"model"}, repr(hidden))
+check("asked for retired, it lists that alone and says it's retired", set(asked) == {"model", "old"} and asked["old"]["retired"] and not asked["model"]["retired"], repr(asked))
+with patch.object(a, "recipe_installed", side_effect=lambda rid: rid == "old"):
+  installed = {row["id"] for row in a.recipe_listing(old_catalog, profile)}
+check("once set up, a retired recipe is listed so it can be started, stopped and removed", installed == {"model", "old"}, repr(installed))
+printed, saved = [], []
+with patch.object(a, "load_catalog", return_value=old_catalog), patch.object(a, "machine_profile", return_value=profile), \
+     patch.object(a, "running_models", return_value=set()), patch.object(a, "recipe_installed", return_value=False), \
+     patch.object(a, "write_list_cache", side_effect=saved.append), patch("builtins.print", side_effect=printed.append):
+  a.cmd_list(["--json", "--retired"])
+shown = {row["id"] for row in json.loads(printed[0])}
+check("list --retired shows it, and the panel's saved listing still leaves it out",
+      shown == {"model", "old"} and len(saved) == 1 and {row["id"] for row in saved[0]} == {"model"}, repr((shown, saved)))
 # Video and music models are recommended beside them the same way, each kind its own use best.
 check("best.toml lists video models of their own", not a.validate_best({"class": [dict(entry, videos=["clip"])]}, {"model": recipe, "clip": clip}))
 check("a kind's list takes only that kind", any(".music: 'picture' is of kind image, not music" in e for e in a.validate_best({"class": [dict(entry, music=["picture"])]}, {"model": recipe, "picture": picture})))
