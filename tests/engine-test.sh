@@ -179,9 +179,10 @@ n1x_cross_ram = {"hardware": [{"gpu": "nvidia-gb10", "ram_class": 128, "measured
 chip_speeds = [
   a.load_measurement(SimpleNamespace(root=str(shared)), halo_measured, {"ram_class": 128, "platform": "x86"}, {"family": "amd-strix-halo"})["long"]["decode_tok_s"],
   a.load_measurement(SimpleNamespace(root=str(shared)), halo_measured, {"ram_class": 192, "platform": "x86"}, {"family": "amd-strix-halo"})["long"]["decode_tok_s"],
+  a.load_measurement(SimpleNamespace(root=str(shared)), halo_measured, {"ram_class": 256, "platform": "x86"}, {"family": "amd-strix-halo"})["long"]["decode_tok_s"],
   a.load_measurement(SimpleNamespace(root=str(shared)), n1x_cross_ram, {"ram_class": 128, "platform": "aarch64"}, {"family": "nvidia-n1x"})["long"]["decode_tok_s"],
 ]
-check("a machine reuses its chip's measurement across RAM classes, preferring own chip and RAM class", chip_speeds == [73.3, 71.0, 48.8], str(chip_speeds))
+check("a machine reuses its chip's measurement across RAM classes, preferring own chip and nearest RAM class", chip_speeds == [73.3, 71.0, 71.0, 48.8], str(chip_speeds))
 # An Intel laptop: integrated graphics on the xe driver counts as a GPU.
 drm = Path(os.environ["HOME"]) / "intel-drm"
 for driver in ("xe", "i915"):
