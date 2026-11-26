@@ -7,8 +7,7 @@ input = ["text", "image"]
 
 [[hardware]]
 gpu = "intel-arc-b390"
-ram_class = 64
-measured = "measurements/inkling-2-mini-llamacpp-arc-b390-64.toml"
+measured = "measurements/inkling-2-mini-llamacpp-arc-b390.toml"
 
 # Bartowski's imatrix-calibrated Q4_0 build (15.1 GB, Q6_K output head) in mainline llama.cpp's
 # inkling2_loop layout, plus the F16 vision projector. On Arc B390 Vulkan (which has no native FP4

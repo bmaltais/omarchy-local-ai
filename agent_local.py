@@ -953,10 +953,21 @@ def validate_recipe(rid, recipe, runtimes, root=None):
   if not isinstance(hardware, list) or not hardware:
     errors.append(f"{where}.hardware: needs at least one [[hardware]] entry")
     hardware = []
+  seen_hw = set()
   for index, entry in enumerate(hardware):
-    if not isinstance(entry, dict) or not isinstance(entry.get("gpu"), str) or entry.get("ram_class") not in RAM_CLASSES:
-      errors.append(f"{where}.hardware[{index}]: needs gpu and ram_class (one of {RAM_CLASSES})")
+    if not isinstance(entry, dict):
+      errors.append(f"{where}.hardware[{index}]: must be a table")
       continue
+    if "ram_class" in entry:
+      errors.append(f"{where}.hardware[{index}].ram_class: measurements are per chip, not per RAM class")
+    if not _safe_string(entry.get("gpu"), f"{where}.hardware[{index}].gpu", errors):
+      continue
+    if "platform" in entry and not _safe_string(entry.get("platform"), f"{where}.hardware[{index}].platform", errors):
+      continue
+    hw_key = (entry["gpu"], entry.get("platform"))
+    if hw_key in seen_hw:
+      errors.append(f"{where}.hardware[{index}]: duplicate measurement for {entry['gpu']}")
+    seen_hw.add(hw_key)
     measured = entry.get("measured")
     if _safe_relpath(measured, f"{where}.hardware[{index}].measured", errors) and root and not os.path.isfile(os.path.join(root, measured)):
       errors.append(f"{where}.hardware[{index}].measured: {measured} is missing")
@@ -1133,12 +1144,11 @@ def validate_best(best, recipes):
         errors.append(f"{where}.{field}: '{name}' is {hidden}, so it can't be recommended")
         continue
       qualified = any(
-        hw.get("ram_class") == entry.get("ram_class")
-        and gpu_class(hw.get("gpu")) == gpu_class(entry.get("gpu"))
+        gpu_class(hw.get("gpu")) == gpu_class(entry.get("gpu"))
         for hw in recipe.get("hardware", []) if isinstance(hw, dict)
       )
       if not qualified:
-        errors.append(f"{where}: recipe '{name}' has no measured [[hardware]] entry for this class")
+        errors.append(f"{where}: recipe '{name}' has no measured [[hardware]] entry for this GPU")
   return errors
 
 
@@ -1383,13 +1393,11 @@ def recipe_installed(rid):
 
 def load_measurement(catalog, recipe, profile, gpu):
   """The bench numbers the catalog recorded for this recipe on this chip: its own
-  family's where it has them, else those of a family sharing the class (a GB10's for an N1x),
-  preferring the machine's RAM class when more than one was measured."""
-  ram = profile.get("ram_class", 0)
+  family's where it has them, else those of a family sharing the class (a GB10's for an N1x)."""
   matches = [hw for hw in recipe.get("hardware", [])
              if gpu_class(hw.get("gpu")) == gpu_class(gpu["family"])
              and hw.get("platform") in (None, profile["platform"])]
-  for hw in sorted(matches, key=lambda hw: (hw.get("gpu") != gpu["family"], abs((hw.get("ram_class") or 0) - ram)))[:1]:
+  for hw in sorted(matches, key=lambda hw: hw.get("gpu") != gpu["family"])[:1]:
     try:
       with open(os.path.join(catalog.root, hw["measured"]), "rb") as handle:
         return tomllib.load(handle)

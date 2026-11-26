@@ -13,8 +13,7 @@ input = ["text", "image"]
 # figures are per Spark.
 [[hardware]]
 gpu = "nvidia-gb10-pair"
-ram_class = 128
-measured = "measurements/inkling-2-small-exl3-pair-gb10x2-128.toml"
+measured = "measurements/inkling-2-small-exl3-pair-gb10x2.toml"
 
 # Evanguo12's EXL3 requantization of Thinking Machines' 594B-A17B model for two Sparks: routed experts at 2.55 bits
 # a weight on average, 1.5 to 4 per expert by measured KL and routing share, attention at 6 and the head at 8; the

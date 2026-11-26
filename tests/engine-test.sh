@@ -63,7 +63,7 @@ variant = {"ctx": 4096, "peak_ram_gib": 16, "peak_gpu_gib": 16}
 artifact = {"repo": "test/model", "revision": "b" * 40, "license": "mit",
             "files": ["model.gguf", "tokenizer/*.json"], "model": "model.gguf"}
 recipe = {"name": "Test model", "runtime": "server",
-          "hardware": [{"gpu": "amd-strix-halo", "ram_class": 64, "measured": "measurements/model.toml"}],
+          "hardware": [{"gpu": "amd-strix-halo", "measured": "measurements/model.toml"}],
           "artifacts": [artifact], "variant": [variant]}
 gpu = {"vendor": "amd", "family": "amd-strix-halo", "memory_gib": 48, "render_node": "/dev/dri/renderD128"}
 profile = {"platform": "x86", "ram_class": 64, "ram_gib": 64, "gpus": [gpu]}
@@ -109,8 +109,12 @@ for role in ("model", "draft"):
   changed["artifacts"][0][role] = "model.gguf"
   changed["artifacts"].append(copy.deepcopy(changed["artifacts"][0]))
   check(f"duplicate {role} role is rejected", any(f".{role}: already named" in e for e in a.validate_recipe("model", changed, {"server": runtime})))
+check("hardware rejects ram_class", any("per chip" in e for e in a.validate_recipe("model", dict(recipe, hardware=[{"gpu": "amd-strix-halo", "ram_class": 64, "measured": "measurements/model.toml"}]), {"server": runtime})))
+check("hardware rejects duplicate chip entries", any("duplicate measurement" in e for e in a.validate_recipe("model", dict(recipe, hardware=[{"gpu": "amd-strix-halo", "measured": "measurements/model.toml"}, {"gpu": "amd-strix-halo", "measured": "measurements/model.toml"}]), {"server": runtime})))
+check("hardware rejects non-string platform without crashing", any(".platform" in e for e in a.validate_recipe("model", dict(recipe, hardware=[{"gpu": "amd-strix-halo", "platform": [], "measured": "measurements/model.toml"}]), {"server": runtime})))
 check("identical best selectors are rejected", any("same selectors" in e for e in a.validate_best({"class": [entry, entry]}, {"model": recipe})))
-check("best cannot recommend an unmeasured class", any("no measured" in e for e in a.validate_best({"class": [dict(entry, ram_class=128)]}, {"model": recipe})))
+check("best accepts another RAM class for a measured GPU", not a.validate_best({"class": [dict(entry, ram_class=128)]}, {"model": recipe}))
+check("best cannot recommend on an unmeasured GPU", any("no measured" in e for e in a.validate_best({"class": [dict(entry, gpu="nvidia-gb10")]}, {"model": recipe})))
 
 catalog = SimpleNamespace(recipes={"model": copy.deepcopy(recipe)}, runtimes={"server": runtime}, best={"class": [entry]})
 check("best requires the same GPU", a.match_class({"class": [entry]}, profile, dict(gpu, family="other")) is None)
@@ -156,33 +160,25 @@ check("explicit GPU resolves a memory tie", a.choose_gpu(tied, "amd-other") == r
 with patch.object(a, "platform_name", return_value="aarch64-n1x"), patch.object(a, "amd_gpus", return_value=[]), patch.object(a, "intel_gpus", return_value=[]), patch.object(a, "meminfo", return_value={"MemTotal": 120 * 2**30}):
   n1x = a.machine_profile()
 check("an N1x laptop has a unified NVIDIA GPU of its own family", n1x["ram_class"] == 128 and [(g["vendor"], g["family"], g["memory_gib"]) for g in n1x["gpus"]] == [("nvidia", "nvidia-n1x", 120)])
-spark = dict(recipe, hardware=[{"gpu": "nvidia-gb10", "ram_class": 128, "measured": "measurements/model.toml"}])
+spark = dict(recipe, hardware=[{"gpu": "nvidia-gb10", "measured": "measurements/model.toml"}])
 check("an N1x runs what a GB10 with the same memory runs", a.runtime_supports(dict(runtime, gpus=["nvidia-gb10"]), n1x["gpus"][0]) and a.match_class({"class": [dict(entry, gpu="nvidia-gb10", ram_class=128)]}, n1x, n1x["gpus"][0]) is not None)
 check("best treats the N1x and GB10 as one class", any("same selectors" in e for e in a.validate_best({"class": [dict(entry, gpu="nvidia-gb10", ram_class=128, recipes=["spark"]), dict(entry, gpu="nvidia-n1x", ram_class=128, recipes=["spark"])]}, {"spark": spark})))
-# Families that share a class may each have a measurement: a machine shows its own family's.
+# Families that share a class may each have a measurement: a machine shows its own family's,
+# and one chip measurement applies across every RAM class.
 shared = Path(os.environ["HOME"]) / "shared-measurements"
 shared.mkdir()
-for family, speed in (("gb10", 60.0), ("n1x", 50.0)):
+for family, speed in (("gb10", 60.0), ("n1x", 50.0), ("halo", 73.3)):
   (shared / f"{family}.toml").write_text(f"[long]\ndecode_tok_s = {speed}\n")
-both_measured = {"hardware": [{"gpu": "nvidia-gb10", "ram_class": 128, "measured": "gb10.toml"}, {"gpu": "nvidia-n1x", "ram_class": 128, "measured": "n1x.toml"}]}
+both_measured = {"hardware": [{"gpu": "nvidia-gb10", "measured": "gb10.toml"}, {"gpu": "nvidia-n1x", "measured": "n1x.toml"}]}
 speeds = [a.load_measurement(SimpleNamespace(root=str(shared)), recipe, {"ram_class": 128, "platform": "aarch64"}, {"family": family})["long"]["decode_tok_s"]
           for recipe, family in ((both_measured, "nvidia-n1x"), (both_measured, "nvidia-gb10"), ({"hardware": both_measured["hardware"][:1]}, "nvidia-n1x"))]
 check("a machine shows its own family's measurement, else its class's", speeds == [50.0, 60.0, 60.0], str(speeds))
-# Speed binds to the chip rather than RAM size: a RAM class without its own record uses the same chip's,
-# preferring exact and then closest RAM class, and own chip family over a sibling family on the same RAM.
-for tag, speed in (("halo64", 73.3), ("halo192", 71.0), ("n1x64", 48.8)):
-  (shared / f"{tag}.toml").write_text(f"[long]\ndecode_tok_s = {speed}\n")
-halo_measured = {"hardware": [{"gpu": "amd-strix-halo", "ram_class": 64, "measured": "halo64.toml"},
-                              {"gpu": "amd-strix-halo", "ram_class": 192, "measured": "halo192.toml"}]}
-n1x_cross_ram = {"hardware": [{"gpu": "nvidia-gb10", "ram_class": 128, "measured": "gb10.toml"},
-                              {"gpu": "nvidia-n1x", "ram_class": 64, "measured": "n1x64.toml"}]}
+halo_measured = {"hardware": [{"gpu": "amd-strix-halo", "measured": "halo.toml"}]}
 chip_speeds = [
-  a.load_measurement(SimpleNamespace(root=str(shared)), halo_measured, {"ram_class": 128, "platform": "x86"}, {"family": "amd-strix-halo"})["long"]["decode_tok_s"],
-  a.load_measurement(SimpleNamespace(root=str(shared)), halo_measured, {"ram_class": 192, "platform": "x86"}, {"family": "amd-strix-halo"})["long"]["decode_tok_s"],
-  a.load_measurement(SimpleNamespace(root=str(shared)), halo_measured, {"ram_class": 256, "platform": "x86"}, {"family": "amd-strix-halo"})["long"]["decode_tok_s"],
-  a.load_measurement(SimpleNamespace(root=str(shared)), n1x_cross_ram, {"ram_class": 128, "platform": "aarch64"}, {"family": "nvidia-n1x"})["long"]["decode_tok_s"],
+  a.load_measurement(SimpleNamespace(root=str(shared)), halo_measured, {"ram_class": ram, "platform": "x86"}, {"family": "amd-strix-halo"})["long"]["decode_tok_s"]
+  for ram in (64, 128, 192)
 ]
-check("a machine reuses its chip's measurement across RAM classes, preferring own chip and nearest RAM class", chip_speeds == [73.3, 71.0, 71.0, 48.8], str(chip_speeds))
+check("a chip's measurement applies across every RAM class", chip_speeds == [73.3, 73.3, 73.3], str(chip_speeds))
 # An Intel laptop: integrated graphics on the xe driver counts as a GPU.
 drm = Path(os.environ["HOME"]) / "intel-drm"
 for driver in ("xe", "i915"):
@@ -490,8 +486,8 @@ spark = {"vendor": "nvidia", "family": "nvidia-gb10", "memory_gib": 121.9, "unif
 pair_gpu = dict(spark, family="nvidia-gb10-pair", nodes=2, memory_gib=121.7, peer="10.99.0.2")
 pair_profile = {"platform": "aarch64-gb10", "ram_class": 128, "ram_gib": 121.9, "gpus": [spark, pair_gpu]}
 check("a pair outranks its own node", a.choose_gpu(pair_profile)["family"] == "nvidia-gb10-pair")
-single = dict(recipe, hardware=[{"gpu": "nvidia-gb10", "ram_class": 128, "measured": "m.toml"}], runtime="server")
-paired = dict(recipe, hardware=[{"gpu": "nvidia-gb10-pair", "ram_class": 128, "measured": "m.toml"}], runtime="pair",
+single = dict(recipe, hardware=[{"gpu": "nvidia-gb10", "measured": "m.toml"}], runtime="server")
+paired = dict(recipe, hardware=[{"gpu": "nvidia-gb10-pair", "measured": "m.toml"}], runtime="pair",
               variant=[{"ctx": 4096, "peak_ram_gib": 104, "peak_gpu_gib": 104}])
 check("a pair machine runs single-node recipes on its own GPU", a.recipe_gpu(pair_profile, single)["family"] == "nvidia-gb10" and a.recipe_gpu(pair_profile, paired)["family"] == "nvidia-gb10-pair")
 nv_rt = dict(runtime, run={"devices": ["cdi-nvidia"]}, gpus=["nvidia-gb10"])
@@ -1839,9 +1835,9 @@ pair_meas_dir = Path(os.environ["HOME"], "pair-shared-catalog")
 single_rt = dict(runtime, gpus=["nvidia-gb10"])
 pair_rt = dict(runtime, gpus=["nvidia-gb10-pair"], pair=True)
 cpu_rt = dict(runtime, gpus=["cpu"], run={"tmpfs": "/tmp"})
-single_rec = dict(recipe, runtime="single", hardware=[{"gpu": "nvidia-gb10", "ram_class": 128, "measured": "measurements/single.toml"}])
-pair_rec = dict(recipe, runtime="pair", hardware=[{"gpu": "nvidia-gb10-pair", "ram_class": 128, "measured": "measurements/pair.toml"}])
-cpu_rec = dict(recipe, runtime="cpu", hardware=[{"gpu": "cpu", "ram_class": 128, "measured": "measurements/cpu.toml"}])
+single_rec = dict(recipe, runtime="single", hardware=[{"gpu": "nvidia-gb10", "measured": "measurements/single.toml"}])
+pair_rec = dict(recipe, runtime="pair", hardware=[{"gpu": "nvidia-gb10-pair", "measured": "measurements/pair.toml"}])
+cpu_rec = dict(recipe, runtime="cpu", hardware=[{"gpu": "cpu", "measured": "measurements/cpu.toml"}])
 pair_shared_catalog = SimpleNamespace(root=str(pair_meas_dir),
                                       recipes={"single": single_rec, "pair": pair_rec, "cpu-only": cpu_rec},
                                       runtimes={"single": single_rt, "pair": pair_rt, "cpu": cpu_rt}, best={"class": []})
@@ -1918,7 +1914,7 @@ sa3_cuda_rt = {"image": "registry.example/test/sa3-cuda@sha256:" + "d" * 64, "ti
                "reserved": ["--port", "SA3_API_KEY"], "run": {"devices": ["cdi-nvidia"], "tmpfs": "/tmp"}, "gpus": ["nvidia-gb10"],
                "inputs": {"model": {"arg": "--models"}, "key": {"env": "SA3_API_KEY"}}}
 sa3_cuda_song = {"name": "Stable Audio 3 Medium", "vendor": "stability", "kind": "music", "vocals": False, "runtime": "sa3-cuda",
-                 "hardware": [{"gpu": "nvidia-n1x", "ram_class": 128, "measured": "measurements/model.toml"}],
+                 "hardware": [{"gpu": "nvidia-n1x", "measured": "measurements/model.toml"}],
                  "artifacts": [{"repo": "test/sa3", "revision": "a" * 40, "license": "other", "files": ["dit.gguf"], "dest": "sa3", "model": "."}],
                  "variant": [picture_variant]}
 check("an sa3 music runtime and instrumental recipe validate",
@@ -1945,7 +1941,7 @@ sa3_rt = {"image": "registry.example/test/sa3@sha256:" + "d" * 64, "tier": "omar
           "inputs": {"model": {"arg": "--models"}, "key": {"env": "SA3_API_KEY"}}}
 sa3_variant = {"peak_ram_gib": 4, "peak_gpu_gib": 0}
 sa3_song = {"name": "Stable Audio 3 Medium", "vendor": "stability", "kind": "music", "vocals": False, "runtime": "sa3",
-            "hardware": [{"gpu": "cpu", "ram_class": 64, "measured": "measurements/model.toml"}],
+            "hardware": [{"gpu": "cpu", "measured": "measurements/model.toml"}],
             "artifacts": [{"repo": "test/sa3", "revision": "a" * 40, "license": "other", "files": ["dit.tflite"], "dest": "sa3", "model": "."}],
             "variant": [sa3_variant]}
 check("a CPU music runtime and instrumental recipe validate",
@@ -1981,7 +1977,7 @@ sa3_vk_rt = {"image": "registry.example/test/sa3-vulkan@sha256:" + "e" * 64, "ti
              "gpus": ["amd"], "inputs": {"model": {"arg": "--models"}, "key": {"env": "SA3_API_KEY"}}}
 sa3_vk_variant = {"peak_ram_gib": 4, "peak_gpu_gib": 4}
 sa3_vk_song = {"name": "Stable Audio 3 Medium", "vendor": "stability", "kind": "music", "vocals": False, "runtime": "sa3-vulkan",
-               "hardware": [{"gpu": "amd-strix-halo", "ram_class": 192, "measured": "measurements/model.toml"}],
+               "hardware": [{"gpu": "amd-strix-halo", "measured": "measurements/model.toml"}],
                "artifacts": [
                  {"repo": "test/sa3-m", "revision": "a" * 40, "license": "other", "files": ["dit.gguf", "same.gguf"], "dest": "sa3", "model": "."},
                  {"repo": "test/t5gemma", "revision": "b" * 40, "license": "gemma", "files": ["t5.gguf", "vocab.gguf"], "dest": "sa3"},

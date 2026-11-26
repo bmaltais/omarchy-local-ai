@@ -10,13 +10,7 @@ input = ["text", "image"]
 
 [[hardware]]
 gpu = "nvidia-n1x"
-ram_class = 128
-measured = "measurements/nemotron-3.5-bolt-tensorfold-n1x-128.toml"
-
-[[hardware]]
-gpu = "nvidia-n1x"
-ram_class = 64
-measured = "measurements/nemotron-3.5-bolt-tensorfold-n1x-64.toml"
+measured = "measurements/nemotron-3.5-bolt-tensorfold-n1x.toml"
 
 # IQ2_XXS experts, NVFP4 Mamba projections, Q8_0 attention. The server loads the directory.
 [[artifacts]]

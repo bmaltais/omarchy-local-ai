@@ -12,13 +12,7 @@ download_gib = 7.57
 
 [[hardware]]
 gpu = "amd-strix-halo"
-ram_class = 32
-measured = "measurements/ace-step-1.5-turbo-acestep-strix-halo-32.toml"
-
-[[hardware]]
-gpu = "amd-strix-halo"
-ram_class = 64
-measured = "measurements/ace-step-1.5-turbo-acestep-strix-halo-64.toml"
+measured = "measurements/ace-step-1.5-turbo-acestep-strix-halo.toml"
 
 [[artifacts]]
 repo = "Serveurperso/ACE-Step-1.5-GGUF"

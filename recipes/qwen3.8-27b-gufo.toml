@@ -7,13 +7,7 @@ input = ["text", "image"]
 
 [[hardware]]
 gpu = "amd-strix-halo"
-ram_class = 128
-measured = "measurements/qwen3.8-27b-gufo-strix-halo-128.toml"
-
-[[hardware]]
-gpu = "amd-strix-halo"
-ram_class = 64
-measured = "measurements/qwen3.8-27b-gufo-strix-halo-64.toml"
+measured = "measurements/qwen3.8-27b-gufo-strix-halo.toml"
 
 [[artifacts]]
 repo = "unsloth/Qwen3.8-27B-GGUF"

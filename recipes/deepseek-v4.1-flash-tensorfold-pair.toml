@@ -9,8 +9,7 @@ input = ["text", "image"]
 # figures are per Spark.
 [[hardware]]
 gpu = "nvidia-gb10-pair"
-ram_class = 128
-measured = "measurements/deepseek-v4.1-flash-tensorfold-pair-gb10x2-128.toml"
+measured = "measurements/deepseek-v4.1-flash-tensorfold-pair-gb10x2.toml"
 
 # Mia's AI Lab's EAQ v1 EXL3 quantization at 2.9 bits a weight (experts at 3 bits, 2 in layers 18-22, attention at 5),
 # with the vision tower and the DSpark draft blocks. Each rank's weight file is cut from it on its own Spark.

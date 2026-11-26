@@ -11,8 +11,7 @@ vendor = "bfl"
 
 [[hardware]]
 gpu = "nvidia-n1x"
-ram_class = 128
-measured = "measurements/flux2-klein-4b-sdcpp-cuda-n1x-128.toml"
+measured = "measurements/flux2-klein-4b-sdcpp-cuda-n1x.toml"
 
 [[artifacts]]
 repo = "leejet/FLUX.2-klein-4B-GGUF"

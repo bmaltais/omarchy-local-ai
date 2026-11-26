@@ -11,8 +11,7 @@ vendor = "alibaba"
 
 [[hardware]]
 gpu = "nvidia-n1x"
-ram_class = 128
-measured = "measurements/z-image-turbo-sdcpp-cuda-n1x-128.toml"
+measured = "measurements/z-image-turbo-sdcpp-cuda-n1x.toml"
 
 # Hugging Face redirects Comfy-Org/z_image_turbo here.
 [[artifacts]]

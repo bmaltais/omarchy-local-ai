@@ -7,13 +7,7 @@ input = ["text", "image"]
 
 [[hardware]]
 gpu = "amd-strix-halo"
-ram_class = 64
-measured = "measurements/inkling-2-mini-gufo-strix-halo-64.toml"
-
-[[hardware]]
-gpu = "amd-strix-halo"
-ram_class = 192
-measured = "measurements/inkling-2-mini-gufo-strix-halo-192.toml"
+measured = "measurements/inkling-2-mini-gufo-strix-halo.toml"
 
 # Unsloth's UD-Q4_K_XL target (which preserves the checkpoint's native NVFP4 experts),
 # its Q8_0 DSpark drafter and BF16 vision projector, at the revision Gufo 0.37 pins.

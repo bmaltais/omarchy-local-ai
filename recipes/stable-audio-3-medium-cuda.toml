@@ -16,8 +16,7 @@ download_gib = 4.83
 
 [[hardware]]
 gpu = "nvidia-n1x"
-ram_class = 128
-measured = "measurements/stable-audio-3-medium-cuda-n1x-128.toml"
+measured = "measurements/stable-audio-3-medium-cuda-n1x.toml"
 
 [[artifacts]]
 repo = "thepatch/stable-audio-3-medium-GGUF"
