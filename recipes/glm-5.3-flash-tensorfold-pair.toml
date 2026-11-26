@@ -9,8 +9,7 @@ input = ["text", "image"]
 # figures are per Spark.
 [[hardware]]
 gpu = "nvidia-gb10-pair"
-ram_class = 128
-measured = "measurements/glm-5.3-flash-tensorfold-pair-gb10x2-128.toml"
+measured = "measurements/glm-5.3-flash-tensorfold-pair-gb10x2.toml"
 
 # Mia's AI Lab's EXL3 quantization: routed experts at 4 bits a weight, the rest BF16, which the engine stores at 8.
 # Each rank reads every shard and keeps its half (83.3 GiB a Spark).

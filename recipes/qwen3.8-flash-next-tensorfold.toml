@@ -7,13 +7,11 @@ input = ["text", "image"]
 
 [[hardware]]
 gpu = "nvidia-gb10"
-ram_class = 128
-measured = "measurements/qwen3.8-flash-next-tensorfold-gb10-128.toml"
+measured = "measurements/qwen3.8-flash-next-tensorfold-gb10.toml"
 
 [[hardware]]
 gpu = "nvidia-n1x"
-ram_class = 128
-measured = "measurements/qwen3.8-flash-next-tensorfold-n1x-128.toml"
+measured = "measurements/qwen3.8-flash-next-tensorfold-n1x.toml"
 
 # TensorFold's MLX affine 4-bit, group-32 export with its MTP head, which the native CUDA family serves
 # on its own kernels. It uploads 73 GiB; the n-gram tables stay mapped from the shards.

@@ -16,8 +16,7 @@ download_gib = 3.57
 
 [[hardware]]
 gpu = "amd-strix-halo"
-ram_class = 192
-measured = "measurements/stable-audio-3-medium-vulkan-strix-halo-192.toml"
+measured = "measurements/stable-audio-3-medium-vulkan-strix-halo.toml"
 
 [[artifacts]]
 repo = "thepatch/stable-audio-3-medium-GGUF"

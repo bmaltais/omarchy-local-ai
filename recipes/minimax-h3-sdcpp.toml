@@ -11,8 +11,7 @@ download_gib = 22.64
 
 [[hardware]]
 gpu = "amd-strix-halo"
-ram_class = 64
-measured = "measurements/minimax-h3-sdcpp-strix-halo-64.toml"
+measured = "measurements/minimax-h3-sdcpp-strix-halo.toml"
 
 [[artifacts]]
 repo = "leejet/MiniMax-H3-GGUF"

@@ -1,27 +1,25 @@
 # The recommendation per hardware class, in order. `use best` picks the first recipe in the
 # gpu/ram_class pair that fits the machine; later entries are fallbacks for static reasons only.
 # A bigger machine takes each kind's list from the nearest smaller class of its GPU that has one,
-# until its own class lists that kind: a recommendation is measured on the smallest machine that
-# makes it, and every bigger one of the same GPU inherits it.
+# until its own class lists that kind.
 # Kept by hand, and what the agents panel puts forward: any recipe whose runtime runs on a machine
 # and that fits it can be added from Local AI, but only these are recommended. A recipe may be listed
-# only for classes it has a measurement record for.
+# only for GPUs it has a measurement record for.
 # `recipes` are text models: the agents' default and `use best text`. `images`, `videos` and `music`
-# list the models recommended beside them for each kind, `use best image` and so on, in the same
+# list the models recommended beside them for each kind, `use best <kind>`, in the same
 # order of preference, and never compete with `recipes` or each other.
 
 # No text model fits in the 23 GiB a 32 GB machine leaves beside the desktop, but pictures and
-# songs do.
+# songs do. Bigger Strix Halo classes inherit these image and music picks.
 [[class]]
 gpu = "amd-strix-halo"
 ram_class = 32
 images = ["flux2-klein-4b-sdcpp", "z-image-turbo-sdcpp"]
 music = ["ace-step-1.5-turbo-acestep"]
 
-# 27B also fits at 128 and 192 GB, but on agent work it is much weaker and about a third the
-# speed, so those get Flash Next alone. At 64 GB Inkling 2 Mini leads: on Gufo 0.37 it loads in
-# 31.4 GiB with a 256K window and decodes ~3x faster than Qwen3.8 27B on long prompts (73.3 vs
-# 24.0 tok/s, 1636 vs 568 tok/s prefill).
+# 27B also fits at 128 and 192 GB, but on agent work it is much weaker and slower, so those get
+# Flash Next alone (192 GB inherits from 128 GB). At 64 GB Inkling 2 Mini leads: on Gufo 0.37 it
+# loads in 31.4 GiB with a 256K window and decodes ~5x faster than Qwen3.8 27B on long prompts.
 [[class]]
 gpu = "amd-strix-halo"
 ram_class = 128
@@ -29,17 +27,9 @@ recipes = ["qwen3.8-flash-next-gufo"]
 
 [[class]]
 gpu = "amd-strix-halo"
-ram_class = 192
-recipes = ["qwen3.8-flash-next-gufo"]
-images = ["flux2-klein-4b-sdcpp", "z-image-turbo-sdcpp"]
-
-[[class]]
-gpu = "amd-strix-halo"
 ram_class = 64
 recipes = ["inkling-2-mini-gufo", "qwen3.8-27b-gufo"]
-images = ["flux2-klein-4b-sdcpp", "z-image-turbo-sdcpp"]
 videos = ["minimax-h3-sdcpp"]
-music = ["ace-step-1.5-turbo-acestep"]
 
 # The N1x and the GB10 share these lists (GPU_CLASSES): only memory sets them apart.
 [[class]]

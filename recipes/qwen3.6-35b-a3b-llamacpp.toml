@@ -8,8 +8,7 @@ retired = true
 
 [[hardware]]
 gpu = "intel-arc-b390"
-ram_class = 64
-measured = "measurements/qwen3.6-35b-a3b-llamacpp-arc-b390-64.toml"
+measured = "measurements/qwen3.6-35b-a3b-llamacpp-arc-b390.toml"
 
 # Unsloth's build that keeps the model's own multi-token-prediction head, which drafts the
 # tokens the model then checks: 46 tokens a second against 33 without, at no cost in accuracy.

@@ -14,13 +14,11 @@ download_gib = 2.56
 
 [[hardware]]
 gpu = "cpu"
-ram_class = 64
-measured = "measurements/stable-audio-3-medium-xps14-64.toml"
+measured = "measurements/stable-audio-3-medium-xps14.toml"
 
 [[hardware]]
 gpu = "intel-arc-b390"
-ram_class = 64
-measured = "measurements/stable-audio-3-medium-xps14-64.toml"
+measured = "measurements/stable-audio-3-medium-xps14.toml"
 
 [[artifacts]]
 repo = "stabilityai/stable-audio-3-optimized"
