@@ -1756,6 +1756,8 @@ check("list --retired shows it, and the panel's saved listing still leaves it ou
       shown == {"model", "old"} and len(saved) == 1 and {row["id"] for row in saved[0]} == {"model"}, repr((shown, saved)))
 # Video and music models are recommended beside them the same way, each kind its own use best.
 check("best.toml lists video models of their own", not a.validate_best({"class": [dict(entry, videos=["clip"])]}, {"model": recipe, "clip": clip}))
+check("best.toml lists a class with media models but no text one", not a.validate_best({"class": [dict({k: v for k, v in entry.items() if k != "recipes"}, videos=["clip"])]}, {"model": recipe, "clip": clip}))
+check("best.toml rejects a class that recommends nothing", any("at least one model" in e for e in a.validate_best({"class": [dict(entry, recipes=[])]}, {"model": recipe})))
 check("a kind's list takes only that kind", any(".music: 'picture' is of kind image, not music" in e for e in a.validate_best({"class": [dict(entry, music=["picture"])]}, {"model": recipe, "picture": picture})))
 raises("a kind with nothing recommended says so", lambda: a.resolve_best(img_catalog, profile, gpu, field="videos"), "No video model is recommended")
 said = []
