@@ -1,0 +1,50 @@
+# llama.cpp's llama-server, built with Vulkan for AMD and Intel GPUs with the
+# Inkling 2 Vulkan patches (PR #32957 topk_moe bias, PR #32898 compact-bias
+# Flash Attention, and our Vulkan port of #33060's 5 Inkling 2 op fusions),
+# as runtimes/llamacpp-inkling2.toml runs it, published as
+# ghcr.io/omacom/omarchy-local-ai/llamacpp-inkling2.
+# Everything is from Arch Linux's packages at the pinned base: upstream's own
+# image is Ubuntu, whose older Mesa runs Arc at half the speed.
+
+ARG BASE=docker.io/library/archlinux@sha256:fcee73ea1b96e236248f53a213f71276cc9072d9025b58bce9915e32f19963ae
+
+FROM ${BASE} AS build
+RUN pacman -Syu --noconfirm --needed base-devel cmake ninja git vulkan-headers vulkan-icd-loader shaderc spirv-headers
+# llama.cpp's build tag for COMMIT, which names the published image (b12774-<n>).
+ARG BUILD=b12774
+ARG COMMIT=171527522610996f5f0acf12334e185156ca8f44
+COPY patches/ /patches/
+RUN git init /src \
+ && git -C /src remote add origin https://github.com/ggml-org/llama.cpp \
+ && git -C /src fetch --depth 1 origin "$COMMIT" \
+ && git -C /src checkout --quiet FETCH_HEAD \
+ && git -C /src apply /patches/01-pr32957-vulkan-topk-moe.patch \
+ && git -C /src apply /patches/02-pr32898-vulkan-fa-compact-bias.patch \
+ && git -C /src apply /patches/03-vulkan-inkling2-fusions.patch
+# One CPU backend per instruction set, picked at start, so the image runs on any x86-64.
+# The backends are loaded from beside the server, in /usr/bin.
+RUN cmake -S /src -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+      -DGGML_VULKAN=ON -DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON \
+      -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_OPENSSL=OFF \
+ && cmake --build /build -j"$(nproc)" \
+ && DESTDIR=/out cmake --install /build --strip \
+ && find /out/usr/bin -type f ! -name llama-server ! -name llama-bench ! -name 'libggml-*.so' -delete
+# The licenses of llama.cpp, ggml and the third-party code built in.
+RUN mkdir -p /licenses \
+ && cd /src \
+ && find . -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' \) -print \
+    | while read -r file; do install -Dm644 "$file" "/licenses/${file#./}"; done
+
+FROM ${BASE}
+# The Vulkan loader and Mesa's RADV and ANV drivers, which run AMD and Intel
+# GPUs; curl for the health probe; libgomp for the CPU backends.
+RUN pacman -Syu --noconfirm --needed vulkan-icd-loader vulkan-radeon vulkan-intel curl gcc-libs \
+ && pacman -Scc --noconfirm
+COPY --from=build /out/usr/bin/ /usr/bin/
+COPY --from=build /out/usr/lib/ /usr/lib/
+COPY --from=build /licenses /usr/share/licenses/llama.cpp
+LABEL org.opencontainers.image.source="https://github.com/omacom/omarchy-local-ai"
+LABEL org.opencontainers.image.description="llama.cpp's llama-server with Inkling 2 Vulkan fusions, built for omarchy-local-ai"
+LABEL org.opencontainers.image.licenses="MIT"
+EXPOSE 8080
+CMD ["llama-server", "--host", "0.0.0.0", "--port", "8080"]
