@@ -45,7 +45,7 @@ RUN git init -q /tensorfold && cd /tensorfold && git remote add origin "${TF_REP
     test "$(git rev-parse HEAD)" = "${TF_REF}"
 # MiaAI-Lab's recipe: its engine patches, applied in filename order.
 ARG RECIPE_REPO=https://github.com/MiaAI-Lab/Inkling-2-Mini-DGX-Spark-TensorFold.git
-ARG RECIPE_REF=6061fa89a34d2a245bc4a230f04948f312347a5e
+ARG RECIPE_REF=3b210d1fc6a6a040f99add7119c0a7d78f82468c
 RUN git init -q /src/recipe && cd /src/recipe && git remote add origin "${RECIPE_REPO}" && \
     git fetch -q --depth 1 origin "${RECIPE_REF}" && git checkout -q --detach FETCH_HEAD && \
     test "$(git rev-parse HEAD)" = "${RECIPE_REF}" && \
@@ -89,7 +89,8 @@ RUN ln -s /opt/tensorfold/native/bin/tensorfold-native /usr/local/bin/tensorfold
 ENV CUDA_CACHE_PATH=/tmp/nv \
     TENSORFOLD_MEMORY_RESERVE_GIB=9 \
     TF_INKLING2_ATTN_FP8=1 \
-    TF_INKLING2_PREFILL_TC=1
+    TF_INKLING2_PREFILL_TC=1 \
+    TF_INKLING2_ATTN_FP8_TC=1
 LABEL org.opencontainers.image.source="https://github.com/omacom/omarchy-local-ai"
 LABEL org.opencontainers.image.description="TensorFold's native server for Inkling 2 Mini on one DGX Spark, for omarchy-local-ai"
 WORKDIR /workspace
