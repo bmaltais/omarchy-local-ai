@@ -1,38 +1,37 @@
 recipe = "minimax-h3-sdcpp"
-measured_at = "2026-11-18"
-image = "ghcr.io/omacom/omarchy-local-ai/sdcpp@sha256:f8f635b6afa594b7243916f6e0cf7f798e1fed838899edea093af3f2772bf37e"
+measured_at = "2026-11-27"
+image = "ghcr.io/omacom/omarchy-local-ai/sdcpp@sha256:ce64fc9ea6144680161dd5c6355c2bfb3e33822d829b50b7338ba86cad4063b4"
 load_seconds = 4.0
 fileset = "74f340a66930dc5c"
-method = "one 864x480, 56-frame (2.3 s at 24 fps) clip with sound through /sdcpp/v1/vid_gen on the engine-run server, at its default 4 steps with the turbo LoRA it lists, VAE tiling on; GPU memory from the GTT counter, every half second"
+method = "one 864x480, 56-frame (2.3 s at 24 fps) clip with sound through /sdcpp/v1/vid_gen on the engine-run server, at its default 4 steps with the turbo LoRA it lists, --flash-attn on and --vae-tiling on; GPU memory from the GTT counter, every half second"
 
 [machine]
 platform = "x86"
 gpu = "amd-strix-halo"
-ram_class = 64
-system = "Framework Desktop (AMD Ryzen AI Max 300 Series)"
-kernel = "7.2.15-2-omarchy"
-cpu = "AMD Eng Sample: 100-000001243-50_Y"
+ram_class = 192
+system = "HP HP ZBook Ultra G3a 16 inch Mobile Workstation PC"
+kernel = "7.3.6-1-omarchy"
+cpu = "AMD Ryzen AI Max+ PRO 495 w/ Radeon 8065S"
 
 [memory]
 observed_at_load_gib = 0.0
-min_available_during_bench_gib = 8.5
-total_gib = 62.1
-peak_gpu_gib = 36.2
+min_available_during_bench_gib = 154.2
+total_gib = 188.0
+peak_gpu_gib = 19.6
 
-# A 5 s clip, 864x480 and 124 frames, peaked at 46.7 GiB of GPU memory and took 510 s. A 10 s
-# clip doesn't fit beside the desktop on this machine.
+# A 5 s clip, 864x480 and 124 frames, peaked at 19.7 GiB of GPU memory (21.9 GiB RAM delta) and took 598 s.
 [[clip]]
 frames = 124
-peak_gpu_gib = 46.7
-seconds = 510
+peak_gpu_gib = 19.7
+seconds = 598
 
 [generation]
 width = 864
 height = 480
 steps = 4
 images = 1
-first_image_s = 178.2
-seconds_per_image = 178.2
+first_image_s = 205.5
+seconds_per_image = 205.5
 
 [[artifacts]]
 repo = "leejet/MiniMax-H3-GGUF"
