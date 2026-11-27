@@ -28,16 +28,24 @@ license = "apache-2.0"
 files = ["Inkling-2-Mini-GSQ-RCO-IQ3_S.gguf", "mmproj-Inkling-2-Mini-BF16.gguf"]
 model = "Inkling-2-Mini-GSQ-RCO-IQ3_S.gguf"
 
-# For 64 GB: full 256K window (+4.0 GiB F16 KV over 131K: ~21.1 GiB at load, ~25.2 GiB peak),
+# IncoAI's DFlash2 block-diffusion drafter quantized to Q4_K_M (287 MB), passed via --model-draft.
+[[artifacts]]
+repo = "na0x2c6/Inkling-2-Mini-DFlash2-GGUF"
+revision = "e12c9c89cf07a2e063a7a95cc753165c662976d1"
+license = "apache-2.0"
+files = ["Inkling-2-Mini-DFlash2-Q4_K_M.gguf"]
+draft = "Inkling-2-Mini-DFlash2-Q4_K_M.gguf"
+
+# For 64 GB: full 256K window (25.6 GiB at load with DFlash2 on Strix Halo),
 # keeping cooperative-matrix Vulkan Flash Attention active within a 64 GB Arc B390's ~30 GiB limit.
 [[variant]]
 ctx = 262144
-peak_ram_gib = 27
-peak_gpu_gib = 26
+peak_ram_gib = 29
+peak_gpu_gib = 28
 
-# For 32 GB: measured on a 32 GB XPS 16 (Arc B390) running the Omarchy desktop with a 38K-token
-# prompt: 17.1 GiB at load (~21.2 GiB peak, 6.1 GiB min available) with default F16 KV cache at
-# 131K context, within a 32 GB Arc B390's ~22.9 GiB limit.
+# For 32 GB: measured on a 32 GB XPS 16 (Arc B390) and 32 GB TUXEDO (Strix Point) running the
+# Omarchy desktop with a 38K-token prompt: 19.6-19.8 GiB at load (2.8-3.0 GiB min available)
+# with default F16 KV cache and DFlash2 at 131K context, within a 32 GB laptop's ~22.5 GiB budget.
 [[variant]]
 ctx = 131072
 peak_ram_gib = 22
@@ -49,11 +57,11 @@ temperature = 1.0
 top_p = 1.0
 top_k = 0
 
-# One slot with Flash Attention, F16 KV cache and --ubatch-size 1024 (halves the number of
-# routed-expert dequant passes during prompt prefill for +9-18% faster prefill across Intel
-# Arc B390, AMD Strix Point and Strix Halo at ~1 GiB extra RAM); vision projector on GPU.
-# DSpark speculative decoding is left off: verifying 2-7 draft tokens across 128 MoE experts
-# multiplies memory reads faster than acceptance pays back on Arc B390's ~100 GB/s bandwidth.
+# One slot with Flash Attention, F16 KV cache, --ubatch-size 1024 (+9-18% faster prefill), and
+# DFlash2 block-diffusion drafting capped at --spec-draft-n-max 2 (higher draft lengths read too
+# many routed MoE experts per verification pass on Vulkan; n_max=2 wins +23-39% on 38.6K long
+# decode and +11-35% on edit decode across Arc B390, Strix Point and Strix Halo).
 [server]
 args = ["--parallel", "1", "--ubatch-size", "1024", "--flash-attn", "on", "--jinja",
+        "--spec-type", "draft-dflash2", "--spec-draft-n-max", "2",
         "--mmproj", "/models/mmproj-Inkling-2-Mini-BF16.gguf", "--mmproj-offload"]

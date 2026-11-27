@@ -1,9 +1,9 @@
 recipe = "inkling-2-mini-llamacpp"
 measured_at = "2026-11-27"
-image = "ghcr.io/omacom/omarchy-local-ai/llamacpp-inkling2@sha256:2de51b1b9970f5709b52e9ec8fa5de7fc7e92ce33bea2b488cae697d30d80aaf"
+image = "ghcr.io/omacom/omarchy-local-ai/llamacpp-inkling2@sha256:e96bdc0a5a04901d139dae94a2e79988c6e2f486534015d19a505ef5549d259c"
 ctx = 131072
-load_seconds = 8.0
-fileset = "065e031b87116e1f"
+load_seconds = 9.0
+fileset = "8ad752d62c5fdc23"
 method = "tools/bench: 2 warmups (a 128-token reply, a ~4K-token prompt from the corpus tail), then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
 
 [machine]
@@ -15,34 +15,38 @@ kernel = "7.3.6-1-omarchy"
 cpu = "AMD Ryzen AI 9 HX 370 w/ Radeon 890M"
 
 [memory]
-observed_at_load_gib = 17.8
-min_available_during_bench_gib = 5.4
+observed_at_load_gib = 19.6
+min_available_during_bench_gib = 3.0
 total_gib = 30.5
 
 [short]
 prompt_tokens = 46
 completion_tokens = 512
-ttft_s = 0.63
-prefill_tok_s = 72.6
-decode_tok_s = 23.0
-total_s = 22.83
+ttft_s = 0.64
+prefill_tok_s = 71.9
+decode_tok_s = 20.8
+total_s = 25.16
 
 [long]
 prompt_tokens = 38587
 completion_tokens = 512
-ttft_s = 140.54
-prefill_tok_s = 274.6
-decode_tok_s = 16.9
-total_s = 170.85
+ttft_s = 140.34
+prefill_tok_s = 275.0
+decode_tok_s = 20.8
+total_s = 164.88
 
 [edit]
 prompt_tokens = 2891
 completion_tokens = 512
-ttft_s = 9.54
-prefill_tok_s = 303.0
-decode_tok_s = 21.8
-total_s = 33.0
+ttft_s = 9.43
+prefill_tok_s = 306.6
+decode_tok_s = 24.5
+total_s = 30.25
 
 [[artifacts]]
 repo = "ISTA-DASLab/Inkling-2-Mini-GSQ-RCO-GGUF"
 revision = "f0da1097633dd7c2f5733e4077cff861be122245"
+
+[[artifacts]]
+repo = "na0x2c6/Inkling-2-Mini-DFlash2-GGUF"
+revision = "e12c9c89cf07a2e063a7a95cc753165c662976d1"

@@ -1,48 +1,52 @@
 recipe = "inkling-2-mini-llamacpp"
 measured_at = "2026-11-27"
-image = "ghcr.io/omacom/omarchy-local-ai/llamacpp-inkling2@sha256:2de51b1b9970f5709b52e9ec8fa5de7fc7e92ce33bea2b488cae697d30d80aaf"
+image = "ghcr.io/omacom/omarchy-local-ai/llamacpp-inkling2@sha256:e96bdc0a5a04901d139dae94a2e79988c6e2f486534015d19a505ef5549d259c"
 ctx = 262144
-load_seconds = 6.0
-fileset = "065e031b87116e1f"
+load_seconds = 11.0
+fileset = "8ad752d62c5fdc23"
 method = "tools/bench: 2 warmups (a 128-token reply, a ~4K-token prompt from the corpus tail), then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
 
 [machine]
 platform = "x86"
 gpu = "amd-strix-halo"
-ram_class = 128
-system = "HP HP ZBook Ultra G1a 14 inch Mobile Workstation PC"
+ram_class = 192
+system = "HP HP ZBook Ultra G3a 16 inch Mobile Workstation PC"
 kernel = "7.3.6-1-omarchy"
-cpu = "AMD RYZEN AI MAX+ PRO 395 w/ Radeon 8060S"
+cpu = "AMD Ryzen AI Max+ PRO 495 w/ Radeon 8065S"
 
 [memory]
-observed_at_load_gib = 23.3
-min_available_during_bench_gib = 89.4
-total_gib = 125.1
+observed_at_load_gib = 25.6
+min_available_during_bench_gib = 145.7
+total_gib = 188.0
 
 [short]
 prompt_tokens = 46
 completion_tokens = 512
-ttft_s = 0.46
-prefill_tok_s = 99.9
-decode_tok_s = 44.0
-total_s = 12.08
+ttft_s = 0.56
+prefill_tok_s = 82.2
+decode_tok_s = 40.1
+total_s = 13.29
 
 [long]
 prompt_tokens = 38587
 completion_tokens = 512
-ttft_s = 73.35
-prefill_tok_s = 526.1
-decode_tok_s = 33.3
-total_s = 88.7
+ttft_s = 71.91
+prefill_tok_s = 536.6
+decode_tok_s = 42.6
+total_s = 83.91
 
 [edit]
 prompt_tokens = 2891
 completion_tokens = 512
-ttft_s = 5.3
-prefill_tok_s = 545.7
-decode_tok_s = 41.2
-total_s = 17.7
+ttft_s = 5.39
+prefill_tok_s = 536.4
+decode_tok_s = 42.3
+total_s = 17.48
 
 [[artifacts]]
 repo = "ISTA-DASLab/Inkling-2-Mini-GSQ-RCO-GGUF"
 revision = "f0da1097633dd7c2f5733e4077cff861be122245"
+
+[[artifacts]]
+repo = "na0x2c6/Inkling-2-Mini-DFlash2-GGUF"
+revision = "e12c9c89cf07a2e063a7a95cc753165c662976d1"
