@@ -1321,6 +1321,7 @@ def recipe_listing(catalog, profile, running=(), experimental=False, retired=Fal
   asks for those too."""
   shown = {"experimental": experimental, "retired": retired}
   rows = []
+  ranks = {}
   try:
     gpu = choose_gpu(profile)
   except LocalError as error:
@@ -1344,11 +1345,27 @@ def recipe_listing(catalog, profile, running=(), experimental=False, retired=Fal
       own, variant, reason = None, None, gpu_error
     review = load_review(catalog, runtime) if runtime.get("tier") == "third-party" else {}
     measured = load_measurement(catalog, recipe, profile, own) if variant else {}
+    kind = recipe_kind(recipe)
+    field = BEST_FIELDS.get(kind, "recipes")
+    cls = match_class(catalog.best, profile, own, field) if own and not runtime_is_cpu(runtime) else None
+    cls_list = cls.get(field, []) if cls else []
+    cls_rank = len(cls_list) - cls_list.index(rid) if rid in cls_list else 0
+    specific_gpu = own is not None and not runtime_is_cpu(runtime) and gpu_class(own["family"]) in runtime.get("gpus", [])
+    ranks[rid] = (
+      not recipe.get("experimental") and not recipe.get("retired"),
+      not runtime_is_cpu(runtime),
+      rid in best_ids,
+      cls_rank,
+      specific_gpu,
+      bool(measured),
+      (variant.get("ctx") or 0) if variant else 0,
+      variant["peak_ram_gib"] if variant else 0,
+    )
     rows.append({
       "id": rid,
-      "kind": recipe_kind(recipe),
+      "kind": kind,
       "edit": bool(recipe.get("edit")),
-      **({"vocals": bool(recipe.get("vocals", True))} if recipe_kind(recipe) == "music" else {}),
+      **({"vocals": bool(recipe.get("vocals", True))} if kind == "music" else {}),
       "name": recipe.get("name", rid),
       "runtime": recipe.get("runtime", ""),
       "tier": runtime.get("tier", ""),
@@ -1372,17 +1389,27 @@ def recipe_listing(catalog, profile, running=(), experimental=False, retired=Fal
       "decode_tok_s": measured.get("long", {}).get("decode_tok_s"),
       "prefill_tok_s": measured.get("long", {}).get("prefill_tok_s"),
     })
-  # When a GPU-accelerated recipe with the same (kind, name) already runs on this machine,
-  # keep the CPU fallback out of available listings so apps and `list` pick the faster GPU build.
-  gpu_available = {
-    (row["kind"], row["name"])
-    for row in rows
-    if row["available"] and not runtime_is_cpu(catalog.runtimes.get(row["runtime"], {}))
-  }
+  # Only offer one build of each (kind, name) on a machine: keep the strongest fitting recipe
+  # (non-hidden over experimental/retired, GPU over CPU, recommended over not, chip-specific
+  # runtime over vendor-wide, measured on this chip over unmeasured, then larger context and
+  # memory footprint) and hide the smaller/fallback builds unless already installed.
+  winners = {}
   for row in rows:
-    if row["available"] and not row["installed"] and runtime_is_cpu(catalog.runtimes.get(row["runtime"], {})) and (row["kind"], row["name"]) in gpu_available:
+    if not row["available"]:
+      continue
+    key = (row["kind"], row["name"])
+    rank = ranks[row["id"]]
+    if key not in winners or rank > winners[key][0]:
+      winners[key] = (rank, row)
+  for row in rows:
+    key = (row["kind"], row["name"])
+    if row["available"] and not row["installed"] and key in winners and winners[key][1]["id"] != row["id"]:
+      winner = winners[key][1]
       row["available"] = False
-      row["reason"] = "A GPU build runs on this machine"
+      if runtime_is_cpu(catalog.runtimes.get(row["runtime"], {})) and not runtime_is_cpu(catalog.runtimes.get(winner["runtime"], {})):
+        row["reason"] = "A GPU build runs on this machine"
+      else:
+        row["reason"] = f"Superseded by {winner['id']} on this machine"
   return rows
 
 
