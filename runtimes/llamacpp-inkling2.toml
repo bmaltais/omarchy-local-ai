@@ -11,7 +11,7 @@ command = ["llama-server", "--host", "0.0.0.0", "--port", "8080", "--offline", "
 # Healthy once the model has loaded: /health answers 503 until then.
 health = { probe = ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:8080/health"] }
 run = { devices = ["render"], group_add = "keep-groups" }
-gpus = ["intel"]
+gpus = ["amd", "intel"]
 reserved = ["--host", "--port", "--api-key", "--api-key-file", "--offline", "--webui", "--ui", "--no-webui", "--no-ui", "--path", "--tools", "--tools-runtime", "--agent", "-ag", "--no-agent", "-no-ag", "--allow-unauthenticated-tools", "--mcp-servers-config", "--mcp-servers-json", "--ui-mcp-proxy", "--webui-mcp-proxy", "--no-ui-mcp-proxy", "--no-webui-mcp-proxy", "--rpc", "--props", "--hf-repo", "-hf", "-hfr", "--hf-file", "-hff", "--hf-token", "-hft", "--model-url", "-mu", "--docker-repo", "-dr", "--mmproj-url", "-mmu", "--spec-draft-hf", "-hfd", "-hfrd", "--hf-repo-draft", "--models-dir", "--models-preset", "--slot-save-path", "--media-path", "--log-file", "--ssl-key-file", "--ssl-cert-file", "LLAMA_API_KEY", "HF_TOKEN"]
 
 [inputs]
