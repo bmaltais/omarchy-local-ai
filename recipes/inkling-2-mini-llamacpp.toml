@@ -9,6 +9,10 @@ input = ["text", "image"]
 gpu = "intel-arc-b390"
 measured = "measurements/inkling-2-mini-llamacpp-arc-b390.toml"
 
+[[hardware]]
+gpu = "amd-strix-point"
+measured = "measurements/inkling-2-mini-llamacpp-strix-point.toml"
+
 # ISTA-DASLab's GSQ-RCO mixed-precision IQ3_S build (11.43 GB: 10.50 GB on GPU, 0.93 GB BF16
 # token embedding in system RAM; 99.2% task recovery against the NVFP4/MXFP8 base checkpoint)
 # plus the BF16 vision projector. Cuts 3.6 GB vs Q4_0 so 131K context fits inside a 32 GB

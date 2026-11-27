@@ -64,3 +64,10 @@ recipes = ["deepseek-v4.1-flash-tensorfold-pair", "glm-5.3-flash-tensorfold-pair
 gpu = "intel-arc-b390"
 ram_class = 32
 recipes = ["inkling-2-mini-llamacpp"]
+
+# On Strix Point (Ryzen AI 9 HX 370 / Radeon 890M), Inkling 2 Mini's GSQ-RCO IQ3_S build runs
+# via Vulkan RADV in ~16.3 GiB at load (131K context on 32 GB, 256K on 64 GB).
+[[class]]
+gpu = "amd-strix-point"
+ram_class = 32
+recipes = ["inkling-2-mini-llamacpp"]
