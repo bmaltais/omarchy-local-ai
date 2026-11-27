@@ -9,11 +9,13 @@
 # list the models recommended beside them for each kind, `use best <kind>`, in the same
 # order of preference, and never compete with `recipes` or each other.
 
-# No text model fits in the 23 GiB a 32 GB machine leaves beside the desktop, but pictures and
-# songs do. Bigger Strix Halo classes inherit these image and music picks.
+# On 32 GB Strix Halo, Inkling 2 Mini's GSQ-RCO IQ3_S build fits in the ~23 GiB left beside
+# the desktop (131K context via Vulkan RADV), alongside pictures and songs. Bigger Strix Halo
+# classes inherit the image and music picks and switch text to Gufo.
 [[class]]
 gpu = "amd-strix-halo"
 ram_class = 32
+recipes = ["inkling-2-mini-llamacpp"]
 images = ["flux2-klein-4b-sdcpp", "z-image-turbo-sdcpp"]
 music = ["ace-step-1.5-turbo-acestep"]
 
