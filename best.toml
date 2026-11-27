@@ -1,14 +1,25 @@
 # The recommendation per hardware class, in order. `use best` picks the first recipe in the
-# exact gpu/ram_class pair that fits the machine; later entries are fallbacks for static reasons only.
+# gpu/ram_class pair that fits the machine; later entries are fallbacks for static reasons only.
+# A bigger machine takes each kind's list from the nearest smaller class of its GPU that has one,
+# until its own class lists that kind.
 # Kept by hand, and what the agents panel puts forward: any recipe whose runtime runs on a machine
 # and that fits it can be added from Local AI, but only these are recommended. A recipe may be listed
-# only for classes it has a measurement record for.
+# only for GPUs it has a measurement record for.
 # `recipes` are text models: the agents' default and `use best text`. `images`, `videos` and `music`
-# list the models recommended beside them for each kind, `use best image` and so on, in the same
+# list the models recommended beside them for each kind, `use best <kind>`, in the same
 # order of preference, and never compete with `recipes` or each other.
 
-# 27B also fits at 128 and 192 GB, but on agent work it is much weaker and about a third the
-# speed, so those get Flash Next alone. At 64 GB only 27B fits.
+# No text model fits in the 23 GiB a 32 GB machine leaves beside the desktop, but pictures and
+# songs do. Bigger Strix Halo classes inherit these image and music picks.
+[[class]]
+gpu = "amd-strix-halo"
+ram_class = 32
+images = ["flux2-klein-4b-sdcpp", "z-image-turbo-sdcpp"]
+music = ["ace-step-1.5-turbo-acestep"]
+
+# 27B also fits at 128 and 192 GB, but on agent work it is much weaker and slower, so those get
+# Flash Next alone (192 GB inherits from 128 GB). At 64 GB Inkling 2 Mini leads: on Gufo 0.37 it
+# loads in 31.4 GiB with a 256K window and decodes ~5x faster than Qwen3.8 27B on long prompts.
 [[class]]
 gpu = "amd-strix-halo"
 ram_class = 128
@@ -16,32 +27,26 @@ recipes = ["qwen3.8-flash-next-gufo"]
 
 [[class]]
 gpu = "amd-strix-halo"
-ram_class = 192
-recipes = ["qwen3.8-flash-next-gufo"]
-images = ["flux2-klein-4b-sdcpp", "z-image-turbo-sdcpp"]
-music = ["stable-audio-3-medium-vulkan"]
-
-[[class]]
-gpu = "amd-strix-halo"
 ram_class = 64
-recipes = ["qwen3.8-27b-gufo"]
-images = ["flux2-klein-4b-sdcpp", "z-image-turbo-sdcpp"]
+recipes = ["inkling-2-mini-gufo", "qwen3.8-27b-gufo"]
 videos = ["minimax-h3-sdcpp"]
-music = ["ace-step-1.5-turbo-acestep"]
 
 # The N1x and the GB10 share these lists (GPU_CLASSES): only memory sets them apart.
 [[class]]
 gpu = "nvidia-gb10"
 ram_class = 128
-recipes = ["qwen3.8-flash-next-tensorfold", "nemotron-3.5-bolt-tensorfold", "qwen3.8-27b-tensorfold"]
+recipes = ["qwen3.8-flash-next-tensorfold", "inkling-2-mini-tensorfold"]
 images = ["flux2-klein-4b-sdcpp-cuda", "z-image-turbo-sdcpp-cuda"]
 videos = ["minimax-h3-sdcpp-cuda"]
 music = ["ace-step-1.5-turbo-acestep-cuda"]
 
+# Inkling 2 Mini leads at 64 GB: in a blind-judged run of Omarchy's theme, plugin, app and game make tasks it
+# averaged 8.5 of 10 to Qwen3.8 27B's 8.0, at about 1.7 times its speed, and fits in 40 GiB with one stream.
+# Nemotron 3.5 Bolt, which scored 4.4 there, is retired.
 [[class]]
 gpu = "nvidia-gb10"
 ram_class = 64
-recipes = ["nemotron-3.5-bolt-tensorfold", "qwen3.8-27b-tensorfold"]
+recipes = ["inkling-2-mini-tensorfold", "qwen3.8-27b-tensorfold"]
 
 # Two DGX Sparks cabled through their ConnectX-7 ports: the pair's own class, tried before either Spark's own.
 # DeepSeek V4.1 Flash decodes nearly twice as fast as GLM-5.3 Flash, leads it at coding and holds 1M tokens;
@@ -51,9 +56,10 @@ gpu = "nvidia-gb10-pair"
 ram_class = 128
 recipes = ["deepseek-v4.1-flash-tensorfold-pair", "glm-5.3-flash-tensorfold-pair"]
 
-# On an Arc B390 a mixture-of-experts model generates at 45 tokens a second and a dense 27B at 5.
+# On an Arc B390 a mixture-of-experts model is the sweet spot (a dense 27B runs at 5 tok/s).
+# Inkling 2 Mini leads on agentic coding and vision (same model that beat Qwen3.8 27B at 64 GB NVIDIA)
+# while loading in ~20.5 GiB at 131K context. Qwen3.6 35B-A3B is retired.
 [[class]]
 gpu = "intel-arc-b390"
 ram_class = 64
-recipes = ["qwen3.6-35b-a3b-llamacpp"]
-music = ["stable-audio-3-medium"]
+recipes = ["inkling-2-mini-llamacpp"]

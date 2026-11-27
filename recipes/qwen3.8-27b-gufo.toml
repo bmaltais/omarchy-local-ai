@@ -7,17 +7,11 @@ input = ["text", "image"]
 
 [[hardware]]
 gpu = "amd-strix-halo"
-ram_class = 128
-measured = "measurements/qwen3.8-27b-gufo-strix-halo-128.toml"
-
-[[hardware]]
-gpu = "amd-strix-halo"
-ram_class = 64
-measured = "measurements/qwen3.8-27b-gufo-strix-halo-64.toml"
+measured = "measurements/qwen3.8-27b-gufo-strix-halo.toml"
 
 [[artifacts]]
 repo = "unsloth/Qwen3.8-27B-GGUF"
-revision = "4ca720788d1e01f1bff70c033e0d0028fd02e502"
+revision = "ce331efc48d5722b4b8041f72793e530eae18d9b"
 license = "apache-2.0"
 files = ["Qwen3.8-27B-UD-Q4_K_XL.gguf", "mmproj-BF16.gguf"]
 model = "Qwen3.8-27B-UD-Q4_K_XL.gguf"

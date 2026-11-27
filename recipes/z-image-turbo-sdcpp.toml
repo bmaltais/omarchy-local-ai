@@ -9,13 +9,7 @@ download_gib = 10.42
 
 [[hardware]]
 gpu = "amd-strix-halo"
-ram_class = 64
-measured = "measurements/z-image-turbo-sdcpp-strix-halo-64.toml"
-
-[[hardware]]
-gpu = "amd-strix-halo"
-ram_class = 192
-measured = "measurements/z-image-turbo-sdcpp-strix-halo-192.toml"
+measured = "measurements/z-image-turbo-sdcpp-strix-halo.toml"
 
 [[artifacts]]
 repo = "leejet/Z-Image-Turbo-GGUF"

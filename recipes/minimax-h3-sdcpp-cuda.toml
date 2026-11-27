@@ -14,8 +14,7 @@ download_gib = 41.47
 
 [[hardware]]
 gpu = "nvidia-n1x"
-ram_class = 128
-measured = "measurements/minimax-h3-sdcpp-cuda-n1x-128.toml"
+measured = "measurements/minimax-h3-sdcpp-cuda-n1x.toml"
 
 [[artifacts]]
 repo = "Comfy-Org/MiniMax-H3"

@@ -23,6 +23,7 @@ import posixpath
 import pty
 import random
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -48,11 +49,17 @@ SECRET = "omarchy-agent-local-key"
 KEY_ENV = "OMARCHY_LOCAL_KEY"
 KEY_PLACEHOLDER = "@OMARCHY_LOCAL_KEY@"
 RESERVE_GIB = 8
+# Recipes left out of the listings and the recommendations: kept for trying by name, or no longer offered.
+HIDDEN_FLAGS = ("experimental", "retired")
 # This engine's own entry script, which the units and detached setups it writes run by path.
 ENGINE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "omarchy-local-ai")
 # How often a setup rewrites its progress for the panel, and the window its speed is averaged over.
 PROGRESS_PUBLISH_SECONDS = 0.5
 PROGRESS_WINDOW_SECONDS = 4
+# Share of a pulled image's compressed size reserved on the bar for unpacking its layers to disk,
+# and the typical wchar-to-compressed ratio used to pace writes within large layers.
+IMAGE_EXTRACT_WEIGHT = 0.4
+IMAGE_UNPACK_RATIO = 3.5
 NOT_ENOUGH_MEMORY = "Not enough memory to start model"
 REBOOT_FOR_GPU_MEMORY = "Reboot to raise the GPU memory limit"
 # The kernel lets a GPU map at most half of RAM. A unified-memory AMD or Intel GPU has next to no
@@ -949,9 +956,13 @@ def validate_recipe(rid, recipe, runtimes, root=None, user=False):
   # Whether a music model sings with lyrics; omitted means true.
   if "vocals" in recipe and (not isinstance(recipe["vocals"], bool) or kind != "music"):
     errors.append(f"{where}.vocals: true or false, for music models only")
-  # A model kept for trying by name: out of the listings until it's set up, and never recommended.
-  if "experimental" in recipe and not isinstance(recipe["experimental"], bool):
-    errors.append(f"{where}.experimental: true or false")
+  # A model kept for trying by name (experimental) or no longer offered (retired): out of the
+  # listings until it's set up, and never recommended.
+  for flag in HIDDEN_FLAGS:
+    if flag in recipe and not isinstance(recipe[flag], bool):
+      errors.append(f"{where}.{flag}: true or false")
+  if all(recipe.get(flag) is True for flag in HIDDEN_FLAGS):
+    errors.append(f"{where}: experimental or retired, not both")
   # What a setup downloads, for a first-run screen to say before it starts.
   if "download_gib" in recipe and (not isinstance(recipe["download_gib"], (int, float)) or isinstance(recipe["download_gib"], bool)
                                    or not math.isfinite(recipe["download_gib"]) or recipe["download_gib"] <= 0):
@@ -973,10 +984,23 @@ def validate_recipe(rid, recipe, runtimes, root=None, user=False):
   if not isinstance(hardware, list) or not hardware:
     errors.append(f"{where}.hardware: needs at least one [[hardware]] entry")
     hardware = []
+  seen_hw = set()
   for index, entry in enumerate(hardware):
-    if not isinstance(entry, dict) or not isinstance(entry.get("gpu"), str) or entry.get("ram_class") not in RAM_CLASSES:
-      errors.append(f"{where}.hardware[{index}]: needs gpu and ram_class (one of {RAM_CLASSES})")
+    if not isinstance(entry, dict):
+      errors.append(f"{where}.hardware[{index}]: must be a table")
       continue
+    # Recipes of the user's own written before measurements went per chip (startdgx's drafts among
+    # them) carry a ram_class the engine no longer reads; it's ignored there so they keep loading.
+    if "ram_class" in entry and not user:
+      errors.append(f"{where}.hardware[{index}].ram_class: measurements are per chip, not per RAM class")
+    if not _safe_string(entry.get("gpu"), f"{where}.hardware[{index}].gpu", errors):
+      continue
+    if "platform" in entry and not _safe_string(entry.get("platform"), f"{where}.hardware[{index}].platform", errors):
+      continue
+    hw_key = (entry["gpu"], entry.get("platform"))
+    if hw_key in seen_hw:
+      errors.append(f"{where}.hardware[{index}]: duplicate measurement for {entry['gpu']}")
+    seen_hw.add(hw_key)
     measured = entry.get("measured")
     if user and measured is None:
       continue
@@ -1126,9 +1150,14 @@ def validate_best(best, recipes):
     if selectors in seen:
       errors.append(f"{where}: same selectors as class[{seen[selectors]}]")
     seen[selectors] = index
+    # A machine too small for any text model can still be recommended pictures, clips or music,
+    # so a class needs a list of some kind, not necessarily text.
     names = entry.get("recipes", [])
-    if not isinstance(names, list) or not names:
-      errors.append(f"{where}.recipes: must be a non-empty list")
+    if not isinstance(names, list):
+      errors.append(f"{where}.recipes: must be a list")
+      continue
+    if not any(entry.get(field) for field in BEST_FIELDS.values()):
+      errors.append(f"{where}: must recommend at least one model ({', '.join(BEST_FIELDS.values())})")
       continue
     # `recipes` choose the agents' model and `use best text`; the other kinds' lists, the models
     # recommended beside it, each its own `use best <kind>`.
@@ -1147,16 +1176,16 @@ def validate_best(best, recipes):
       if recipe_kind(recipe) != kind:
         errors.append(f"{where}.{field}: '{name}' is of kind {recipe_kind(recipe)}, not {kind}")
         continue
-      if recipe.get("experimental"):
-        errors.append(f"{where}.{field}: '{name}' is experimental, so it can't be recommended")
+      hidden = next((flag for flag in HIDDEN_FLAGS if recipe.get(flag)), None)
+      if hidden:
+        errors.append(f"{where}.{field}: '{name}' is {hidden}, so it can't be recommended")
         continue
       qualified = any(
-        hw.get("ram_class") == entry.get("ram_class")
-        and gpu_class(hw.get("gpu")) == gpu_class(entry.get("gpu"))
+        gpu_class(hw.get("gpu")) == gpu_class(entry.get("gpu"))
         for hw in recipe.get("hardware", []) if isinstance(hw, dict)
       )
       if not qualified:
-        errors.append(f"{where}: recipe '{name}' has no measured [[hardware]] entry for this class")
+        errors.append(f"{where}: recipe '{name}' has no measured [[hardware]] entry for this GPU")
   return errors
 
 
@@ -1331,9 +1360,14 @@ def compatibility(catalog, rid, profile, gpu, ctx=None):
   return pick_variant(recipe, profile, gpu, ctx, rid)
 
 
-def match_class(best, profile, gpu):
-  return next((entry for entry in best["class"]
-               if gpu_class(entry["gpu"]) == gpu_class(gpu["family"]) and entry["ram_class"] == profile["ram_class"]), None)
+def match_class(best, profile, gpu, field="recipes"):
+  """The class this machine takes its `field` list from: its own GPU class at its RAM class, or,
+  where that lists none, the nearest smaller RAM class of the same GPU that does. A bigger machine
+  recommends what a smaller one does until best.toml says otherwise, so a recommendation needs
+  measuring only on the smallest machine that makes it."""
+  same = [entry for entry in best["class"]
+          if gpu_class(entry["gpu"]) == gpu_class(gpu["family"]) and entry["ram_class"] <= profile["ram_class"] and entry.get(field)]
+  return max(same, key=lambda entry: entry["ram_class"], default=None)
 
 
 def resolve_best(catalog, profile, gpu=None, ctx=None, field="recipes"):
@@ -1357,16 +1391,16 @@ def resolve_best(catalog, profile, gpu=None, ctx=None, field="recipes"):
 
 
 def _resolve_class(catalog, profile, gpu, ctx=None, field="recipes"):
-  entry = match_class(catalog.best, profile, gpu)
+  entry = match_class(catalog.best, profile, gpu, field)
+  if entry is None and match_class(catalog.best, profile, gpu) is not None:
+    kind = next((name for name, listed in BEST_FIELDS.items() if listed == field), field)
+    raise LocalError(f"No {kind} model is recommended for this machine yet ({gpu['family']}, {profile['ram_class']} GB)")
   if entry is None:
     near = [rid for rid, recipe in catalog.recipes.items() if any(gpu_class(hw.get("gpu")) == gpu_class(gpu["family"]) for hw in recipe.get("hardware", []))]
     raise LocalError(
       f"No recommendation for this machine yet ({gpu['family']}, {profile['ram_class']} GB, {profile['platform']}).\n"
       + (f"Recipes measured on the same GPU family: {', '.join(near)}" if near else "No recipes are measured on this GPU family yet.")
     )
-  if not entry.get(field):
-    kind = next((name for name, listed in BEST_FIELDS.items() if listed == field), field)
-    raise LocalError(f"No {kind} model is recommended for this machine yet ({gpu['family']}, {profile['ram_class']} GB)")
   skipped = []
   for rid in entry.get(field, []):
     if rid not in catalog.recipes:
@@ -1386,9 +1420,11 @@ def _resolve_class(catalog, profile, gpu, ctx=None, field="recipes"):
 GPU_BUILD_RUNS = "A GPU build runs on this machine"
 
 
-def recipe_listing(catalog, profile, running=(), machines=True, experimental=False):
-  """The catalog's recipes for this machine. An experimental one is left out unless it's set up
-  here, so it can still be started, stopped and removed, or experimental asks for them all."""
+def recipe_listing(catalog, profile, running=(), machines=True, experimental=False, retired=False):
+  """The catalog's recipes for this machine. An experimental or retired one is left out unless
+  it's set up here, so it can still be started, stopped and removed, or experimental or retired
+  asks for those too."""
+  shown = {"experimental": experimental, "retired": retired}
   rows = []
   try:
     gpu = choose_gpu(profile)
@@ -1403,7 +1439,7 @@ def recipe_listing(catalog, profile, running=(), machines=True, experimental=Fal
         pass
   for rid in sorted(catalog.recipes):
     recipe = catalog.recipes[rid]
-    if recipe.get("experimental") and not experimental and not recipe_installed(rid):
+    if any(recipe.get(flag) and not shown[flag] for flag in HIDDEN_FLAGS) and not recipe_installed(rid):
       continue
     runtime = catalog.runtimes.get(recipe.get("runtime"), {})
     if gpu or runtime_is_cpu(runtime):
@@ -1427,13 +1463,14 @@ def recipe_listing(catalog, profile, running=(), machines=True, experimental=Fal
       "user": rid in catalog.user,
       "installed": recipe_installed(rid),
       "experimental": bool(recipe.get("experimental")),
+      "retired": bool(recipe.get("retired")),
       "available": variant is not None,
       "reason": "" if variant else reason,
       # The recommendation of its kind: the agents' model, or the image model beside it.
       "best": rid in best_ids,
       "active": rid in running,
       # What the card shows: the measured footprint, context and speed at a
-      # long prompt on this machine class.
+      # long prompt on this chip.
       "source": variant_source(variant) if variant else None,
       "memory_gib": variant["peak_ram_gib"] if variant else None,
       # What its setup downloads, when the recipe says.
@@ -1457,7 +1494,7 @@ def recipe_listing(catalog, profile, running=(), machines=True, experimental=Fal
   # A machine's best is offered only for a kind (text or image) this machine has no best of its own for.
   local_best_kinds = {row["kind"] for row in rows if row["best"]}
   for host, there in (load_machines() if machines else {}).items():
-    for row, far in zip(rows, recipe_listing(catalog, there, running, machines=False)):
+    for row, far in zip(rows, recipe_listing(catalog, there, running, machines=False, experimental=experimental, retired=retired)):
       if row["reason"] == GPU_BUILD_RUNS:
         continue
       if not row["available"] and far["available"]:
@@ -1473,10 +1510,11 @@ def recipe_installed(rid):
 
 
 def load_measurement(catalog, recipe, profile, gpu):
-  """The bench numbers the catalog recorded for this recipe on this machine class: its own
+  """The bench numbers the catalog recorded for this recipe on this chip: its own
   family's where it has them, else those of a family sharing the class (a GB10's for an N1x)."""
   matches = [hw for hw in recipe.get("hardware", [])
-             if gpu_class(hw.get("gpu")) == gpu_class(gpu["family"]) and hw.get("ram_class") == profile["ram_class"] and hw.get("platform") in (None, profile["platform"])]
+             if gpu_class(hw.get("gpu")) == gpu_class(gpu["family"])
+             and hw.get("platform") in (None, profile["platform"])]
   for hw in sorted(matches, key=lambda hw: hw.get("gpu") != gpu["family"])[:1]:
     try:
       with open(os.path.join(catalog.root, hw["measured"]), "rb") as handle:
@@ -1609,6 +1647,8 @@ class Progress:
     self.total = total
     self.done = 0
     self.image = (0, 0)
+    self.extract = (0, 0)
+    self.skipped = 0
     self.lock = threading.Lock()
     self.last = 0
     self.published = 0
@@ -1620,6 +1660,14 @@ class Progress:
   def grow(self, amount):
     with self.lock:
       self.total += amount
+    self.publish(force=True)
+
+  def expect_image(self, total):
+    """Reserve the runtime image's download and unpack share before weights start,
+    so the bar advances straight to 100% instead of jumping back when the pull begins."""
+    with self.lock:
+      self.image = (0, total)
+      self.extract = (0, int(total * IMAGE_EXTRACT_WEIGHT))
     self.publish(force=True)
 
   def add(self, amount):
@@ -1640,22 +1688,31 @@ class Progress:
       self.samples = [(at, done + amount) for at, done in self.samples]
     self.publish()
 
-  def pulled(self, got, total):
-    """The runtime image's layers so far, which count toward the same bar."""
+  def pulled(self, got, total, skipped=0, extract_done=None, extract_total=None):
+    """The runtime image's layers so far, which count toward the same bar.
+    Skipped layers already in Podman's store advance the bar without counting as speed,
+    and unpacking progress advances the bar without inflating the network rate."""
     with self.lock:
+      delta_skipped = max(0, skipped - self.skipped)
+      if delta_skipped:
+        self.skipped = skipped
+        self.samples = [(at, done + delta_skipped) for at, done in self.samples]
       self.image = (got, total)
+      if extract_done is not None and extract_total is not None:
+        self.extract = (extract_done, extract_total)
     self.publish()
 
   def snapshot(self):
     with self.lock:
-      done = self.done + self.image[0]
-      total = self.total + self.image[1]
+      downloaded = self.done + self.image[0]
+      done = downloaded + self.extract[0]
+      total = self.total + self.image[1] + self.extract[1]
       now = time.time()
-      self.samples.append((now, done))
+      self.samples.append((now, downloaded))
       while len(self.samples) > 2 and now - self.samples[1][0] > PROGRESS_WINDOW_SECONDS:
         self.samples.pop(0)
       first_time, first_done = self.samples[0]
-      rate = (done - first_done) / (now - first_time) if now - first_time > 0.2 else 0
+      rate = (downloaded - first_done) / (now - first_time) if now - first_time > 0.2 else 0
       return done, total, rate
 
   def publish(self, force=False):
@@ -1696,7 +1753,7 @@ def download(record, progress):
         else:
           mode = "ab" if offset else "wb"
         with open(part, mode) as handle:
-          while chunk := response.read(8 * 2**20):
+          while chunk := response.read(2 * 2**20):
             handle.write(chunk)
             progress.add(len(chunk))
       break
@@ -2198,62 +2255,196 @@ def ensure_key():
 # Podman's per-layer bars, as it draws them on a terminal: "Copying blob
 # <id> [===>---] 1.2GiB / 3.4GiB | 80 MiB/s", then "Copying blob <id> done".
 PULL_BAR_RE = re.compile(r"Copying blob (\w+) .*?([\d.]+)\s*([KMG]?i?B|b) / ([\d.]+)\s*([KMG]?i?B|b)")
-PULL_DONE_RE = re.compile(r"Copying blob (\w+) (?:done|skipped)")
+PULL_DONE_RE = re.compile(r"Copying blob (\w+) (done|skipped)")
 PULL_UNITS = {"b": 1, "B": 1, "KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "KB": 1e3, "MB": 1e6, "GB": 1e9}
+OVERLAY_LAYER_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-def ensure_image(image, progress=None):
+def expected_image_layers(image):
+  """Compressed layer sizes of a pinned image not yet in Podman's store, keyed by
+  the 12-hex prefix Podman prints on its pull bars. Empty when already present or
+  when the registry can't be reached."""
+  try:
+    if subprocess.run(["podman", "image", "exists", image]).returncode == 0:
+      return {}
+    layers = image_layers(image)
+  except (LocalError, OSError):
+    return {}
+  return {digest.rpartition(":")[2][:12]: size for digest, size in layers.items() if size > 0}
+
+
+def _podman_overlay_dir():
+  try:
+    result = subprocess.run(["podman", "info", "--format", "{{.Store.GraphRoot}}"], capture_output=True, text=True, timeout=5)
+    root = result.stdout.strip() if result.returncode == 0 else ""
+  except (OSError, subprocess.SubprocessError):
+    root = ""
+  if not root:
+    base = os.environ.get("XDG_DATA_HOME") or os.path.join(home(), ".local", "share")
+    root = os.path.join(base, "containers", "storage")
+  return os.path.join(root, "overlay")
+
+
+def _overlay_layer_ids(overlay_dir):
+  try:
+    return {name for name in os.listdir(overlay_dir) if OVERLAY_LAYER_RE.match(name)}
+  except OSError:
+    return set()
+
+
+def _proc_write_bytes(pid):
+  # wchar counts write() syscalls immediately without Linux page-cache writeback lag.
+  try:
+    with open(f"/proc/{pid}/io") as handle:
+      for line in handle:
+        if line.startswith("wchar:"):
+          return int(line.split(":", 1)[1].strip())
+  except (OSError, ValueError):
+    pass
+  return 0
+
+
+def _track_dir_bytes(path, seen):
+  """High-water sum of files written under a pull's temp dir, so exact byte
+  progress stays monotonic even if Podman removes blobs as layers commit."""
+  for root, _, names in os.walk(path):
+    for name in names:
+      filepath = os.path.join(root, name)
+      try:
+        size = os.path.getsize(filepath)
+      except OSError:
+        continue
+      if size > seen.get(filepath, 0):
+        seen[filepath] = size
+  return sum(seen.values())
+
+
+def _extract_fraction(extracted_layers, layers_to_extract, unpacked_bytes, compressed_bytes):
+  """How far through unpacking Podman's layers are (0..0.98 while running): blends
+  committed overlay layers with uncompressed disk writes so multi-GB layers keep moving."""
+  if layers_to_extract <= 0 or compressed_bytes <= 0:
+    return 1.0
+  layer_frac = min(1.0, max(0, extracted_layers) / layers_to_extract)
+  est_unpacked = max(1.0, compressed_bytes * IMAGE_UNPACK_RATIO)
+  raw_write = max(0, unpacked_bytes) / est_unpacked
+  write_frac = raw_write if raw_write <= 0.85 else 0.85 + 0.13 * (1 - math.exp(-(raw_write - 0.85) / 0.5))
+  return min(0.98, 0.5 * layer_frac + 0.5 * write_frac)
+
+
+def ensure_image(image, progress=None, expected_layers=None, rid=None):
   if subprocess.run(["podman", "image", "exists", image]).returncode == 0:
+    if progress:
+      progress.pulled(0, 0, extract_done=0, extract_total=0)
     return
   say(f"Pulling the runtime image {image.split('@')[0]}")
+  if expected_layers is None:
+    expected_layers = expected_image_layers(image)
+  layers = {lid: (0.0, float(size)) for lid, size in expected_layers.items()}
   # Podman only draws byte progress on a terminal, one redrawn bar per layer,
   # which scrolls into a wall of lines in a narrow window. It draws to a
   # pseudo-terminal here instead, and its bars become the one progress line
   # downloads use. Run from a systemd unit's environment, Podman would also
-  # cap the pull at five minutes, too short for a large image.
+  # cap the pull at five minutes, too short for a large image. Giving Podman a
+  # private TMPDIR lets us read exact blob bytes as they land (Podman rounds
+  # GiB bars to 0.1 GiB), and tracking overlay commits + disk writes keeps the
+  # bar moving while layers unpack after the network download finishes.
   env = {key: value for key, value in os.environ.items() if key not in ("NOTIFY_SOCKET", "INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID")}
-  master, slave = pty.openpty()
-  fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 400, 0, 0))
-  process = subprocess.Popen(["podman", "pull", image], stdin=subprocess.DEVNULL, stdout=slave, stderr=slave, env=env)
-  os.close(slave)
-  layers = {}
-  started = time.time()
-  shown = started
-  pending = ""
-  lines = []
-  while True:
+  overlay_dir = _podman_overlay_dir()
+  existing_overlay = _overlay_layer_ids(overlay_dir)
+  staging = ensure_dir(os.path.join(data_dir(), "staging"))
+  with tempfile.TemporaryDirectory(prefix="podman-pull-", dir=staging) as pull_tmp:
+    env["TMPDIR"] = pull_tmp
+    if rid:
+      update_installing(rid, pull_tmp=os.path.basename(pull_tmp))
+    master, slave = pty.openpty()
+    rows = max(200, len(layers) + 20)
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, 400, 0, 0))
+    process = subprocess.Popen(["podman", "pull", image], stdin=subprocess.DEVNULL, stdout=slave, stderr=slave, env=env)
+    os.close(slave)
+    done_blobs = set()
+    skipped_blobs = set()
+    skipped_bytes = 0.0
+    seen_tmp = {}
+    best_blob_got = 0.0
+    best_extract_frac = 0.0
+    started = time.time()
+    shown = started
+    pending = ""
+    lines = []
+    eof = False
     try:
-      chunk = os.read(master, 65536)
-    except OSError:
-      break
-    if not chunk:
-      break
-    pending += re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "\n", chunk.decode("utf-8", "replace"))
-    *complete, pending = re.split(r"[\r\n]", pending)
-    for line in (line.strip() for line in complete):
-      if not line:
-        continue
-      bar = PULL_BAR_RE.search(line)
-      done = PULL_DONE_RE.search(line)
-      if bar:
-        layers[bar.group(1)] = (float(bar.group(2)) * PULL_UNITS.get(bar.group(3), 1), float(bar.group(4)) * PULL_UNITS.get(bar.group(5), 1))
-      elif done and done.group(1) in layers:
-        total = layers[done.group(1)][1]
-        layers[done.group(1)] = (total, total)
-      elif "Copying blob" not in line:
-        lines.append(line)
-    now = time.time()
-    if layers and progress:
-      progress.pulled(sum(value[0] for value in layers.values()), sum(value[1] for value in layers.values()))
-    if layers and now - shown >= 5:
-      shown = now
-      got = sum(value[0] for value in layers.values())
-      total = sum(value[1] for value in layers.values())
-      say(f"  {gib(got):6.1f} / {gib(total):.1f} GiB  {got / max(now - started, 0.001) / 2**20:6.0f} MiB/s")
-  os.close(master)
-  if process.wait() != 0:
+      while not eof:
+        ready, _, _ = select.select([master], [], [], 0.25)
+        if ready:
+          try:
+            chunk = os.read(master, 65536)
+          except OSError:
+            chunk = b""
+          if not chunk:
+            eof = True
+          else:
+            pending += re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "\n", chunk.decode("utf-8", "replace"))
+            *complete, pending = re.split(r"[\r\n]", pending)
+            for line in (line.strip() for line in complete):
+              if not line:
+                continue
+              bar = PULL_BAR_RE.search(line)
+              done = PULL_DONE_RE.search(line)
+              if bar:
+                lid = bar.group(1)
+                got = float(bar.group(2)) * PULL_UNITS.get(bar.group(3), 1)
+                tot = float(expected_layers[lid]) if lid in expected_layers else float(bar.group(4)) * PULL_UNITS.get(bar.group(5), 1)
+                prev_got = layers[lid][0] if lid in layers else 0.0
+                layers[lid] = (max(prev_got, min(got, tot)), tot)
+              elif done:
+                lid, status = done.group(1), done.group(2)
+                done_blobs.add(lid)
+                if status == "skipped":
+                  skipped_blobs.add(lid)
+                if lid in layers:
+                  total = layers[lid][1]
+                  layers[lid] = (total, total)
+              elif "Copying blob" not in line:
+                lines.append(line)
+        now = time.time()
+        pty_total = sum(value[1] for value in layers.values())
+        pty_got = sum(value[0] for value in layers.values())
+        skipped_bytes = sum(layers[lid][1] for lid in skipped_blobs if lid in layers)
+        tmp_bytes = _track_dir_bytes(pull_tmp, seen_tmp)
+        blob_got = min(pty_total, max(pty_got, skipped_bytes + tmp_bytes)) if pty_total > 0 else float(tmp_bytes)
+        best_blob_got = max(best_blob_got, blob_got)
+        extract_total = int(pty_total * IMAGE_EXTRACT_WEIGHT)
+        layers_to_extract = max(0, len(layers) - len(skipped_blobs))
+        compressed_to_extract = max(0.0, pty_total - skipped_bytes)
+        extracted_layers = len(_overlay_layer_ids(overlay_dir) - existing_overlay)
+        unpacked_bytes = max(0, _proc_write_bytes(process.pid) - tmp_bytes)
+        if pty_total > 0:
+          if layers_to_extract > 0 and compressed_to_extract > 0:
+            extract_frac = max(best_extract_frac, _extract_fraction(extracted_layers, layers_to_extract, unpacked_bytes, compressed_to_extract))
+          else:
+            extract_frac = 1.0
+          best_extract_frac = extract_frac
+          extract_got = int(extract_total * extract_frac)
+          if progress:
+            progress.pulled(best_blob_got, pty_total, skipped=skipped_bytes, extract_done=extract_got, extract_total=extract_total)
+          if now - shown >= 5:
+            shown = now
+            if best_blob_got < pty_total * 0.995:
+              say(f"  {gib(best_blob_got):6.1f} / {gib(pty_total):.1f} GiB  {best_blob_got / max(now - started, 0.001) / 2**20:6.0f} MiB/s")
+            else:
+              say(f"  unpacking {min(extracted_layers, layers_to_extract)}/{layers_to_extract} layers ({int(extract_frac * 100)}%)")
+    finally:
+      os.close(master)
+      rc = process.wait()
+      if rid:
+        update_installing(rid, pull_tmp="")
+  if rc != 0:
     raise LocalError(f"Can't pull {image}" + ("\n" + "\n".join(lines[-5:]) if lines else ""))
   total = sum(value[1] for value in layers.values())
+  if progress and total > 0:
+    extract_total = int(total * IMAGE_EXTRACT_WEIGHT)
+    progress.pulled(total, total, skipped=skipped_bytes, extract_done=extract_total, extract_total=extract_total)
+    progress.publish(force=True)
   say(f"  {gib(total):6.1f} / {gib(total):.1f} GiB  in {time.time() - started:.0f}s")
 
 
@@ -3602,6 +3793,8 @@ def cmd_use(argv):
       raise LocalError(f"{rid} can't run on this machine: {reason}")
     if recipe.get("experimental"):
       say(f"{rid} is experimental: kept for trying, and not recommended for any machine")
+    elif recipe.get("retired"):
+      say(f"{rid} is retired: no longer offered or recommended, and kept so a setup of it keeps working")
   measured_load = load_measurement(catalog, catalog.recipes[rid], profile, gpu).get("load_seconds")
   # Before detaching: sudo needs this terminal.
   prepare_host(gpu)
@@ -3710,11 +3903,16 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
     say(f"  weights: {license_name}")
   # A first setup's download shows on its own row, an update's on the model's (update_progress).
   progress = Progress(rid=rid)
+  image_plan = None
+  if any(not os.path.isfile(blob_path(record)) for record in files):
+    image_plan = expected_image_layers(runtime["image"])
+    if image_plan:
+      progress.expect_image(sum(image_plan.values()))
   fileset = materialize(rid, files, roles, args.seed, progress)
   if fresh:
     # Until the manifest exists, removal knows the image from the record.
     update_installing(rid, image=runtime["image"])
-  ensure_image(runtime["image"], progress)
+  ensure_image(runtime["image"], progress, expected_layers=image_plan, rid=rid)
   key = ensure_key()
   if runtime.get("pair"):
     if not profile.get("pair"):
@@ -3808,6 +4006,7 @@ def cmd_list(argv):
   parser = argparse.ArgumentParser(prog="omarchy models list")
   parser.add_argument("--json", action="store_true")
   parser.add_argument("--experimental", action="store_true", help="also list the experimental models, which are kept for trying by name")
+  parser.add_argument("--retired", action="store_true", help="also list the retired models, which are no longer offered")
   args = parser.parse_args(argv)
   profile = machine_profile()
   catalog = load_catalog()
@@ -3817,8 +4016,8 @@ def cmd_list(argv):
   rows = recipe_listing(catalog, profile, running)
   # The panel's cache stays the default listing, whatever this one shows.
   write_list_cache(rows)
-  if args.experimental:
-    rows = recipe_listing(catalog, profile, running, experimental=True)
+  if args.experimental or args.retired:
+    rows = recipe_listing(catalog, profile, running, experimental=args.experimental, retired=args.retired)
   if args.json:
     print(json.dumps(rows, indent=2))
     return 0
@@ -3828,7 +4027,7 @@ def cmd_list(argv):
                      for host, there in load_machines().items())
   say(f"This machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}{paired}{machines}")
   for row in rows:
-    marks = [mark for mark, on in (("yours", row["user"]), ("best", row["best"]), ("experimental", row["experimental"]), ("running", row["active"]), ("installed", row["installed"])) if on]
+    marks = [mark for mark, on in (("yours", row["user"]), ("best", row["best"]), ("experimental", row["experimental"]), ("retired", row["retired"]), ("running", row["active"]), ("installed", row["installed"])) if on]
     tier = f" · third-party ({row['publisher']})" if row["tier"] == "third-party" else ""
     say(f"{'●' if row['available'] else '○'} {row['id']}{' [' + ', '.join(marks) + ']' if marks else ''}")
     say(f"    {row['name']} on {row['runtime']}{tier}")
@@ -4571,6 +4770,18 @@ def _start(args, catalog, profile):
   return 0
 
 
+def _remove_pull_tmp(setting_up):
+  pull_tmp = (setting_up or {}).get("pull_tmp")
+  if not isinstance(pull_tmp, str) or not re.fullmatch(r"podman-pull-[^/]+", pull_tmp):
+    return 0
+  path = os.path.join(data_dir(), "staging", pull_tmp)
+  if not os.path.isdir(path):
+    return 0
+  freed = sum(os.path.getsize(os.path.join(r, n)) for r, _, ns in os.walk(path) for n in ns if os.path.isfile(os.path.join(r, n)))
+  shutil.rmtree(path, ignore_errors=True)
+  return freed
+
+
 def cmd_remove(argv):
   parser = argparse.ArgumentParser(prog="omarchy models remove")
   parser.add_argument("recipe")
@@ -4605,6 +4816,7 @@ def cmd_remove(argv):
           if os.path.exists(path):
             freed += os.path.getsize(path)
             os.unlink(path)
+      freed += _remove_pull_tmp(setting_up)
       write_status(catalog, profile)
       refresh_list_cache(catalog, profile)
       say(f"Cancelled the setup of {rid}" + (f", freeing {gib(freed):.1f} GiB" if freed else ""))
@@ -4626,7 +4838,8 @@ def cmd_remove(argv):
       if manifest:
         pair_remove(manifest, args.local_only)
       result = _remove_files(rid)
-      # An update cancelled above leaves its progress behind.
+      # An update cancelled above leaves its progress and pull staging behind.
+      _remove_pull_tmp(load_installing(rid) or setting_up)
       clear_installing(rid)
       if size_gib > 1:
         write_atomic(os.path.join(state_dir(), "removal_rate"), f"{(time.time() - deleting) / size_gib:.4f}\n")
@@ -5464,18 +5677,19 @@ def serve_off(path):
 
 def shared_listing(record, catalog, profile, dns):
   """What other machines on the tailnet see: the shared models and their state."""
-  try:
-    gpu = choose_gpu(profile)
-  except LocalError:
-    gpu = None
   models = []
   for rid in shared_recipes():
     model = record["models"].get(rid)
     if not model:
       continue
-    recipe = catalog.recipes.get(rid) or (load_model(rid) or {}).get("recipe") or {}
-    measured = load_measurement(catalog, recipe, profile, gpu).get("long", {}) if gpu and recipe else {}
     manifest = load_model(rid) or {}
+    recipe = catalog.recipes.get(rid) or manifest.get("recipe") or {}
+    runtime = catalog.runtimes.get(recipe.get("runtime")) or manifest.get("runtime")
+    try:
+      gpu = recipe_gpu(profile, recipe, manifest.get("gpu"), runtime) if recipe else None
+    except LocalError:
+      gpu = None
+    measured = load_measurement(catalog, recipe, profile, gpu).get("long", {}) if gpu and recipe else {}
     models.append({
       "recipe": rid,
       "name": model["name"],

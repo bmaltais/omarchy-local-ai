@@ -1,0 +1,97 @@
+# Inkling 2 Mini on one DGX Spark: TensorFold's native server with the Inkling 2 Mini CUDA engine (ashhart/TensorFold
+# PR #4441, from Jürgen Schmied's fork) and MiaAI-Lab's Inkling-2-Mini-DGX-Spark-TensorFold patches, as
+# runtimes/tensorfold-inkling2.toml runs it, published as ghcr.io/omacom/omarchy-local-ai/tensorfold-inkling2.
+# MiaAI-Lab's scripts/prepare.sh Dockerfile with its pins, the patches fetched from the recipe at RECIPE_REF; curl
+# added for the health probe. Built on NVIDIA's PyTorch container, which the recipe builds on.
+
+# nvcr.io/nvidia/pytorch:26.07-py3 for arm64
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch@sha256:7531d90bcbe0e43e1f7363029c7e145ce90eebeb494a7b4695fdba0329d7c3c3
+
+# PNG is built into the engine; JPEG and WebP go through these two pinned decoders, which the engine loads from
+# <binary dir>/../lib.
+FROM ${BASE_IMAGE} AS codecs
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends cmake make && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /opt/codecs/lib /opt/codecs/doc && \
+    curl -fsSL --retry 3 -o /tmp/libjpeg-turbo.tar.gz "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.1.4.1/libjpeg-turbo-3.1.4.1.tar.gz" && \
+    echo "ecae8008e2cc9ade2f2c1bb9d5e6d4fb73e7c433866a056bd82980741571a022  /tmp/libjpeg-turbo.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/libjpeg-turbo.tar.gz -C /tmp && \
+    cmake -S /tmp/libjpeg-turbo-3.1.4.1 -B /tmp/build-jpeg -DCMAKE_BUILD_TYPE=Release -DENABLE_SHARED=ON -DENABLE_STATIC=OFF -DWITH_TURBOJPEG=ON && \
+    cmake --build /tmp/build-jpeg --target turbojpeg -j"$(nproc)" && \
+    cp -a /tmp/build-jpeg/libturbojpeg.so.0* /opt/codecs/lib/ && \
+    cp /tmp/libjpeg-turbo-3.1.4.1/LICENSE.md /opt/codecs/doc/libjpeg-turbo-LICENSE.md && \
+    curl -fsSL --retry 3 -o /tmp/libwebp.tar.gz "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.6.0.tar.gz" && \
+    echo "e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564  /tmp/libwebp.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/libwebp.tar.gz -C /tmp && \
+    cmake -S /tmp/libwebp-1.6.0 -B /tmp/build-webp -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DWEBP_BUILD_ANIM_UTILS=OFF -DWEBP_BUILD_CWEBP=OFF -DWEBP_BUILD_DWEBP=OFF -DWEBP_BUILD_GIF2WEBP=OFF -DWEBP_BUILD_IMG2WEBP=OFF -DWEBP_BUILD_VWEBP=OFF -DWEBP_BUILD_WEBPINFO=OFF -DWEBP_BUILD_WEBPMUX=OFF -DWEBP_BUILD_EXTRAS=OFF -DWEBP_BUILD_LIBWEBPMUX=OFF && \
+    cmake --build /tmp/build-webp --target webpdecoder -j"$(nproc)" && \
+    cp -a /tmp/build-webp/libwebpdecoder.so.3* /opt/codecs/lib/ && \
+    cp /tmp/libwebp-1.6.0/COPYING /opt/codecs/doc/libwebp-BSD-3-Clause.txt && \
+    rm -rf /tmp/libjpeg-turbo* /tmp/build-jpeg /tmp/libwebp* /tmp/build-webp
+
+FROM ${BASE_IMAGE} AS build
+ARG ZIG_VERSION=0.17.0
+ARG ZIG_SHA256=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
+RUN curl -fsSL -o /tmp/zig.tar.xz "https://ziglang.org/download/${ZIG_VERSION}/zig-aarch64-linux-${ZIG_VERSION}.tar.xz" && \
+    echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c - && \
+    mkdir -p /opt/zig && tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1 && rm /tmp/zig.tar.xz && \
+    /opt/zig/zig version
+# The engine: PR #4441's head, which tags the published image (dc2ca8a1-<n>).
+ARG TF_REPO=https://github.com/jschmied/TensorFold.git
+ARG TF_REF=dc2ca8a1785df6ee5c8489ee7cd18e29cf7b4568
+RUN git init -q /tensorfold && cd /tensorfold && git remote add origin "${TF_REPO}" && \
+    git fetch -q --depth 1 origin "${TF_REF}" && git checkout -q --detach FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "${TF_REF}"
+# MiaAI-Lab's recipe: its engine patches, applied in filename order.
+ARG RECIPE_REPO=https://github.com/MiaAI-Lab/Inkling-2-Mini-DGX-Spark-TensorFold.git
+ARG RECIPE_REF=6061fa89a34d2a245bc4a230f04948f312347a5e
+RUN git init -q /src/recipe && cd /src/recipe && git remote add origin "${RECIPE_REPO}" && \
+    git fetch -q --depth 1 origin "${RECIPE_REF}" && git checkout -q --detach FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "${RECIPE_REF}" && \
+    mkdir -p /opt/tf-patches && cp patches/*.patch /opt/tf-patches/ && rm -rf /src/recipe && \
+    cd /tensorfold && \
+    for p in /opt/tf-patches/*.patch; do echo "applying ${p##*/}"; git apply --check "$p" && git apply "$p" || exit 1; done
+# fatbins + native only: the kernels are embedded in tensorfold-native.
+ARG NATIVE_FP_DECODE=1
+RUN cd /tensorfold && NFP=false && if [ "${NATIVE_FP_DECODE}" = 1 ]; then NFP=true; fi && \
+    /opt/zig/zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Doptimize=fast -Dnative-fp-decode=$NFP --prefix /opt/tensorfold \
+      -j"$(nproc)" fatbins native && \
+    test -x /opt/tensorfold/native/bin/tensorfold-native
+# libtfgrammar.so (structured output, required tool calls) over xgrammar v0.2.8 at its pinned commit; the engine
+# finds it in <binary dir>/../lib.
+ARG XGRAMMAR_REPO=https://github.com/mlc-ai/xgrammar
+ARG XGRAMMAR_TAG=v0.2.8
+ARG XGRAMMAR_REF=97787376faee5ed8466cfad57c99855e4ce2f6aa
+RUN git clone -q --depth 1 --branch "${XGRAMMAR_TAG}" --recurse-submodules --shallow-submodules "${XGRAMMAR_REPO}" /opt/xgrammar && \
+    test "$(git -C /opt/xgrammar rev-parse HEAD)" = "${XGRAMMAR_REF}" && \
+    cd /tensorfold && /opt/zig/zig build grammar -Dxgrammar=/opt/xgrammar -Doptimize=ReleaseFast --prefix /opt/tensorfold -j"$(nproc)" && \
+    test -s /opt/tensorfold/native/lib/libtfgrammar.so && \
+    mkdir -p /opt/tensorfold/share/doc/tensorfold/LICENSES-grammar && \
+    cp /opt/xgrammar/LICENSE /opt/tensorfold/share/doc/tensorfold/LICENSES-grammar/xgrammar-Apache-2.0.txt && \
+    cp /opt/xgrammar/NOTICE /opt/tensorfold/share/doc/tensorfold/LICENSES-grammar/xgrammar-NOTICE.txt && \
+    cp /opt/xgrammar/3rdparty/dlpack/LICENSE /opt/tensorfold/share/doc/tensorfold/LICENSES-grammar/dlpack-Apache-2.0.txt
+RUN mkdir -p /opt/tensorfold/share/doc/tensorfold && cd /tensorfold && \
+    for f in LICENSE LICENSE.md LICENSES NOTICE THIRD_PARTY_NOTICES.md; do \
+      if [ -e "$f" ]; then cp -a "$f" /opt/tensorfold/share/doc/tensorfold/ || exit 1; fi; done
+
+FROM ${BASE_IMAGE}
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=build /opt/tensorfold /opt/tensorfold
+COPY --from=codecs /opt/codecs/lib/ /opt/tensorfold/native/lib/
+COPY --from=codecs /opt/codecs/doc/ /opt/tensorfold/share/doc/tensorfold/LICENSES-codecs/
+RUN ln -s /opt/tensorfold/native/bin/tensorfold-native /usr/local/bin/tensorfold-native
+# The driver's compiled-kernel cache, in the tmpfs the runtime mounts under the read-only root. MiaAI-Lab's serving
+# defaults: 9 GiB kept free (12.2 by default), which goes to the prompt cache; the attention projections in FP8 and
+# the prompt's experts on the FP4/MXFP8 tensor cores, which its own test set scores 732 of 734 with and without.
+ENV CUDA_CACHE_PATH=/tmp/nv \
+    TENSORFOLD_MEMORY_RESERVE_GIB=9 \
+    TF_INKLING2_ATTN_FP8=1 \
+    TF_INKLING2_PREFILL_TC=1
+LABEL org.opencontainers.image.source="https://github.com/omacom/omarchy-local-ai"
+LABEL org.opencontainers.image.description="TensorFold's native server for Inkling 2 Mini on one DGX Spark, for omarchy-local-ai"
+WORKDIR /workspace
+ENTRYPOINT []
+CMD ["tensorfold-native", "--help"]

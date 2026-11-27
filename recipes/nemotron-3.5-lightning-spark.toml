@@ -13,8 +13,7 @@ args = ["--max-tokens", "16384"]
 
 [[hardware]]
 gpu = "nvidia-gb10"
-ram_class = 128
-measured = "measurements/nemotron-3.5-lightning-spark-gb10-128.toml"
+measured = "measurements/nemotron-3.5-lightning-spark-gb10.toml"
 
 [[artifacts]]
 repo = "TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"

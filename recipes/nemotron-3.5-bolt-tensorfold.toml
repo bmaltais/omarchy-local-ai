@@ -2,18 +2,15 @@ name = "Nemotron 3.5 Bolt"
 runtime = "tensorfold-bolt"
 vendor = "nvidia"
 architecture = "moe"
+# No longer offered: in a blind-judged run of Omarchy's theme, plugin, app and game make tasks it averaged 4.4 of 10
+# to Inkling 2 Mini's 8.5 and Qwen3.8 27B's 8.0, and it needs as much memory as either. Kept so a setup keeps working.
+retired = true
 # Screenshots and photos through the checkpoint's own RADIO tower, which --vision loads.
 input = ["text", "image"]
 
 [[hardware]]
 gpu = "nvidia-n1x"
-ram_class = 128
-measured = "measurements/nemotron-3.5-bolt-tensorfold-n1x-128.toml"
-
-[[hardware]]
-gpu = "nvidia-n1x"
-ram_class = 64
-measured = "measurements/nemotron-3.5-bolt-tensorfold-n1x-64.toml"
+measured = "measurements/nemotron-3.5-bolt-tensorfold-n1x.toml"
 
 # IQ2_XXS experts, NVFP4 Mamba projections, Q8_0 attention. The server loads the directory.
 [[artifacts]]

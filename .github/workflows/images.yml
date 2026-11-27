@@ -50,17 +50,17 @@ jobs:
           # Where each image runs decides the runner(s) it's built on; the check runs in the built image.
           # Multi-arch images list two runners (amd64 arm64) and are merged into one manifest list on publish.
           declare -A runner=(
-            [llamacpp]=ubuntu-latest [sdcpp]=ubuntu-latest [acestep]=ubuntu-latest [stable-audio-3-vulkan]=ubuntu-latest
+            [llamacpp]=ubuntu-latest [llamacpp-inkling2]=ubuntu-latest [gufo]=ubuntu-latest [sdcpp]=ubuntu-latest [acestep]=ubuntu-latest [stable-audio-3-vulkan]=ubuntu-latest
             [stable-audio-3]="ubuntu-latest ubuntu-24.04-arm"
             [sdcpp-cuda]=ubuntu-24.04-arm [acestep-cuda]=ubuntu-24.04-arm [stable-audio-3-cuda]=ubuntu-24.04-arm [tensorfold]=ubuntu-24.04-arm
-            [tensorfold-dsv41]=ubuntu-24.04-arm [tensorfold-glm53]=ubuntu-24.04-arm [tensorfold-nemotron-bolt]=ubuntu-24.04-arm [llamacpp-hy4]=ubuntu-24.04-arm [inkling2-exl3]=ubuntu-24.04-arm
+            [tensorfold-dsv41]=ubuntu-24.04-arm [tensorfold-glm53]=ubuntu-24.04-arm [tensorfold-nemotron-bolt]=ubuntu-24.04-arm [llamacpp-hy4]=ubuntu-24.04-arm [inkling2-exl3]=ubuntu-24.04-arm [tensorfold-inkling2]=ubuntu-24.04-arm
           )
           declare -A check=(
-            [llamacpp]="llama-server --version" [sdcpp]="command -v sd-server" [acestep]="command -v ace-server" [stable-audio-3-vulkan]="command -v sa3-server && sa3-server --help >/dev/null 2>&1"
+            [llamacpp]="llama-server --version" [llamacpp-inkling2]="llama-server --version" [gufo]="gufo --version && command -v serve caddy" [sdcpp]="command -v sd-server" [acestep]="command -v ace-server" [stable-audio-3-vulkan]="command -v sa3-server && sa3-server --help >/dev/null 2>&1"
             [stable-audio-3]="command -v sa3-server && sa3-server --help >/dev/null && python3 -c 'import ai_edge_litert, numpy, sentencepiece' && command -v ffmpeg"
             [sdcpp-cuda]="command -v sd-server" [acestep-cuda]="command -v ace-server" [stable-audio-3-cuda]="command -v sa3-server" [tensorfold]="command -v tensorfold-native"
             [tensorfold-dsv41]="command -v tensorfold-native" [tensorfold-glm53]="command -v tensorfold-native"
-            [tensorfold-nemotron-bolt]="command -v tensorfold-native" [llamacpp-hy4]="command -v llama-server" [inkling2-exl3]="command -v serve && python3 -c 'import exllamav3, fastapi, transformers'"
+            [tensorfold-nemotron-bolt]="command -v tensorfold-native" [tensorfold-inkling2]="command -v tensorfold-native" [llamacpp-hy4]="command -v llama-server" [inkling2-exl3]="command -v serve && python3 -c 'import exllamav3, fastapi, transformers'"
           )
           all=$(ls images)
           case $EVENT in
@@ -196,6 +196,26 @@ jobs:
             echo "no key $none, wrong key $wrong, right key $right, another Host $shared, listening on $bound"
             [ "$none" = 401 ] && [ "$wrong" = 401 ] && [ "$right" = 200 ] && [ "$shared" = 200 ] && [ "$bound" = "0100007F:1F90 " ]'
 
+      # Gufo has no key of its own since 0.29, so the image's Caddy is the only thing that checks one: with a stub in
+      # Gufo's place, it has to refuse no key and a wrong one and pass the right one under any Host (a shared model's
+      # requests carry the tailnet name), and serve has to refuse an empty key.
+      - name: Check Caddy refuses Gufo requests without the key
+        if: matrix.name == 'gufo'
+        env:
+          TAG: ${{ steps.name.outputs.tag }}
+        run: |
+          podman run --rm --network none --entrypoint bash "$TAG" -c '
+            GUFO_API_KEY=right CADDY_PORT=8080 CADDY_UPSTREAM=127.0.0.1:18080 \
+              caddy run --config /etc/caddy/Caddyfile --adapter caddyfile 2>/dev/null &
+            caddy respond --listen 127.0.0.1:18080 --body ok 2>/dev/null &
+            for _ in $(seq 20); do curl -s -o /dev/null http://127.0.0.1:8080/ && break; sleep 0.5; done
+            code() { curl -s -o /dev/null -w "%{http_code}" "$@" http://127.0.0.1:8080/v1/models; }
+            none=$(code); wrong=$(code -H "Authorization: Bearer wrong"); right=$(code -H "Authorization: Bearer right")
+            shared=$(code -H "Authorization: Bearer right" -H "Host: strix.example.ts.net")
+            GUFO_API_KEY= serve llm 2>/dev/null && empty=started || empty=refused
+            echo "no key $none, wrong key $wrong, right key $right, another Host $shared, empty key $empty"
+            [ "$none" = 401 ] && [ "$wrong" = 401 ] && [ "$right" = 200 ] && [ "$shared" = 200 ] && [ "$empty" = refused ]'
+
       # The runner's own CPU may have AVX-512, so running the server here proves nothing about
       # the laptops it ships to: its code must stop at AVX2.
       - name: Check the server runs on any x86-64 with AVX2
@@ -219,7 +239,7 @@ jobs:
 
       # The Vulkan images run on AMD and Intel GPUs alike, through Mesa's RADV and ANV.
       - name: Check the image carries Mesa's AMD and Intel drivers
-        if: matrix.name == 'llamacpp' || matrix.name == 'sdcpp' || matrix.name == 'acestep' || matrix.name == 'stable-audio-3-vulkan'
+        if: matrix.name == 'llamacpp' || matrix.name == 'llamacpp-inkling2' || matrix.name == 'sdcpp' || matrix.name == 'acestep' || matrix.name == 'stable-audio-3-vulkan'
         env:
           TAG: ${{ steps.name.outputs.tag }}
         run: podman run --rm --network none --entrypoint ls "$TAG" /usr/share/vulkan/icd.d/radeon_icd.json /usr/share/vulkan/icd.d/intel_icd.json

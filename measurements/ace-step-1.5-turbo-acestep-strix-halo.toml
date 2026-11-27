@@ -1,0 +1,33 @@
+# Measured on a 128 GB Strix Halo with 96 GB set aside as VRAM in its firmware, which leaves
+# Linux 31 GiB: the 32 GB class as the engine sees it. The model ran from that VRAM, so its
+# GPU peak and speed stand for the chip, and its RAM figures for a 32 GB machine's.
+recipe = "ace-step-1.5-turbo-acestep"
+measured_at = "2026-11-26"
+image = "ghcr.io/omacom/omarchy-local-ai/acestep@sha256:93d2296c887c1973cde30944be7ea70dee11ed85942f255229c01e8aa50c69e4"
+load_seconds = 0.6
+fileset = "75ca030f848772d4"
+method = "a 60 s and a 180 s song with given lyrics through /lm then /synth on the engine-run server, the turbo model's own 8 steps, to 128 kbit/s MP3; GPU memory from the GPU's memory counters over their level before, every half second"
+
+[machine]
+platform = "x86"
+gpu = "amd-strix-halo"
+ram_class = 32
+system = "AZW GTR Pro"
+kernel = "7.2.15-6-omarchy"
+cpu = "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S"
+
+[memory]
+observed_at_load_gib = 0.1
+min_available_during_bench_gib = 20.0
+total_gib = 31.0
+peak_gpu_gib = 6.8
+
+[music]
+song_60s_written_s = 12.8
+song_60s_rendered_s = 8.5
+song_180s_written_s = 25.7
+song_180s_rendered_s = 20.1
+
+[[artifacts]]
+repo = "Serveurperso/ACE-Step-1.5-GGUF"
+revision = "666ac70204440867d8c01ba4b119cc79c95b370a"

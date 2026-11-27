@@ -12,8 +12,7 @@ download_gib = 7.57
 
 [[hardware]]
 gpu = "nvidia-n1x"
-ram_class = 128
-measured = "measurements/ace-step-1.5-turbo-acestep-cuda-n1x-128.toml"
+measured = "measurements/ace-step-1.5-turbo-acestep-cuda-n1x.toml"
 
 [[artifacts]]
 repo = "Serveurperso/ACE-Step-1.5-GGUF"

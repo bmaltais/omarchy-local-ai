@@ -11,13 +11,11 @@ input = ["text", "image"]
 # the original model.
 [[hardware]]
 gpu = "nvidia-gb10"
-ram_class = 128
-measured = "measurements/qwen3.8-27b-tensorfold-gb10-128.toml"
+measured = "measurements/qwen3.8-27b-tensorfold-gb10.toml"
 
 [[hardware]]
 gpu = "nvidia-n1x"
-ram_class = 64
-measured = "measurements/qwen3.8-27b-tensorfold-n1x-64.toml"
+measured = "measurements/qwen3.8-27b-tensorfold-n1x.toml"
 
 # daguoagi's MLX affine 4-bit, group-64 export of huihui-ai/Huihui-Qwen3.8-27B-abliterated: the
 # layout TensorFold's own export has, vision tower included. The server loads the directory.

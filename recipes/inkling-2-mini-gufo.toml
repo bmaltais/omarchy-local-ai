@@ -1,0 +1,38 @@
+name = "Inkling 2 Mini"
+runtime = "gufo"
+vendor = "thinkingmachines"
+architecture = "moe"
+# Screenshots and photos through its vision projector, which loads on first use.
+input = ["text", "image"]
+
+[[hardware]]
+gpu = "amd-strix-halo"
+measured = "measurements/inkling-2-mini-gufo-strix-halo.toml"
+
+# Unsloth's UD-Q4_K_XL target (which preserves the checkpoint's native NVFP4 experts),
+# its Q8_0 DSpark drafter and BF16 vision projector, at the revision Gufo 0.37 pins.
+[[artifacts]]
+repo = "unsloth/Inkling-2-Mini-GGUF"
+revision = "8078d149286eec7193795413b9e0643da6d11fa1"
+license = "apache-2.0"
+files = ["Inkling-2-Mini-UD-Q4_K_XL.gguf", "dspark-Inkling-2-Mini-Q8_0.gguf", "mmproj-BF16.gguf"]
+model = "Inkling-2-Mini-UD-Q4_K_XL.gguf"
+
+# Full 256K window with demand-mapped K/V (8 global attention layers, 32 KiB/token) and a 4 GiB RAM
+# prompt cache. Measured 31.4 GiB at load (6 s) and ~34 GiB peak during a ~38K-token bench, leaving
+# headroom for the full 256K window (~38-40 GiB peak) on a 64 GB Strix Halo machine.
+[[variant]]
+ctx = 262144
+peak_ram_gib = 40
+peak_gpu_gib = 38
+
+# The checkpoint's generation defaults: temperature 1.0, no top-p or top-k cut.
+[sampling]
+temperature = 1.0
+top_p = 1.0
+top_k = 0
+
+# DSpark takes its drafter through --dspark-model and images their projector through --mmproj;
+# the paths are where the recipe's files are mounted.
+[server]
+args = ["--speculative", "dspark", "--dspark-model", "/models/dspark-Inkling-2-Mini-Q8_0.gguf", "--mmproj", "/models/mmproj-BF16.gguf", "--cache-ram-bytes", "4294967296"]

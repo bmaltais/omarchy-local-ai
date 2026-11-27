@@ -5,19 +5,20 @@ name = "Stable Audio 3 Medium"
 vendor = "stability"
 kind = "music"
 vocals = false
+# Instrumental only: it takes no lyrics, so it can't stand in for ACE-Step's songs with vocals and
+# is kept for trying by name rather than offered.
+experimental = true
 runtime = "stable-audio-3"
 # What a setup downloads: the four files pinned below, not the runtime image.
 download_gib = 2.56
 
 [[hardware]]
 gpu = "cpu"
-ram_class = 64
-measured = "measurements/stable-audio-3-medium-xps14-64.toml"
+measured = "measurements/stable-audio-3-medium-xps14.toml"
 
 [[hardware]]
 gpu = "intel-arc-b390"
-ram_class = 64
-measured = "measurements/stable-audio-3-medium-xps14-64.toml"
+measured = "measurements/stable-audio-3-medium-xps14.toml"
 
 [[artifacts]]
 repo = "stabilityai/stable-audio-3-optimized"

@@ -51,11 +51,11 @@ The real records are the examples and source of values:
 | Path | Rules |
 | --- | --- |
 | [catalog.toml](../catalog.toml) | The catalog schema, 1. |
-| [recipes/](../recipes/) | Name, runtime, pinned artifacts, measured hardware, context variants, sampling and optional server arguments. `kind` is `text` (the default: chat models for the agents) `image` (image generation, whose variants may omit `ctx`), `video` (clips) or `music` (songs; `vocals = false` marks an instrumental-only model), which run like image models. Vendor names the panel logo; architecture is `dense` or `moe`; `input` is `["text"]` (the default) or `["text", "image"]`, which the agent overlays declare so agents can send screenshots. `experimental = true` keeps a recipe for trying by name: `list` and the panel leave it out until it's set up (`list --experimental` shows it), `use <recipe>` says so, and `best.toml` can't recommend it. It needs the same pinned image, review and measurement as any other. |
+| [recipes/](../recipes/) | Name, runtime, pinned artifacts, measured hardware, context variants, sampling and optional server arguments. `kind` is `text` (the default: chat models for the agents) `image` (image generation, whose variants may omit `ctx`), `video` (clips) or `music` (songs; `vocals = false` marks an instrumental-only model), which run like image models. Vendor names the panel logo; architecture is `dense` or `moe`; `input` is `["text"]` (the default) or `["text", "image"]`, which the agent overlays declare so agents can send screenshots. `experimental = true` keeps a recipe for trying by name: `list` and the panel leave it out until it's set up (`list --experimental` shows it), `use <recipe>` says so, and `best.toml` can't recommend it. It needs the same pinned image, review and measurement as any other. `retired = true` marks a recipe no longer offered, kept so a setup of it keeps working: `list` and the panel leave it out the same way (`list --retired` shows it), and `best.toml` can't recommend it. A recipe is one or the other, not both. |
 | [runtimes/](../runtimes/) | Digest-pinned image, `gpus` (the vendors, `amd`, `intel` or `nvidia`, GPU classes such as `amd-strix-halo`, or `["cpu"]` for CPU-only runtimes with no GPU devices, each reachable through its devices), tier, port, command, standard input mappings, reserved options, nonempty `health.probe` argv and `api` (`openai`, the default, `sdcpp`, `acestep` or `sa3`), which selects the post-start check; an `openai` runtime must map `alias`. A paired runtime adds `listen` (its bind flags), `@PORT@` in its probe and a `[pair]` table: `nodes = 2`, `master_port`, optional `prepare` and `worker` commands (without one, rank 1 runs the head's own invocation, for servers that compare the ranks' arguments), an optional served `model` under `/prepared`, an optional `state` path where each rank's folder is mounted writable for the server's caches (else read-only at `/prepared`), and `env`, `head_env` and `worker_env` (any names but the link's `NCCL_SOCKET_IFNAME`, `NCCL_IB_HCA` and `NCCL_IB_GID_INDEX`, which the engine sets), whose values may hold `@RANK@`, `@WORLD@`, `@MASTER_ADDR@`, `@MASTER_PORT@`, `@CTX@`, `@RDMA_DEVICES@`, `@GID_INDEX@` and `@SOCKET_IFNAME@`. |
 | [reviews/](../reviews/) | Third-party image digest, publisher, reviewer, date, license URL/hash and checked properties. |
-| [measurements/](../measurements/) | Speed and memory on one machine class, the evidence `best.toml` recommends by, artifact identities, context, memory, load time and short, long and code-edit prompt timings; for an image model, seconds per image at a size and step count instead. |
-| [best.toml](../best.toml) | Unique classes requiring both `gpu` and `ram_class`, with an ordered list of measured text recipes (`recipes`) and optionally of measured image models (`images`), each holding only its kind. |
+| [measurements/](../measurements/) | Speed and memory per chip, the evidence `best.toml` recommends by, artifact identities, context, memory, load time and short, long and code-edit prompt timings; for an image model, seconds per image at a size and step count instead. |
+| [best.toml](../best.toml) | Unique classes requiring both `gpu` and `ram_class`, with ordered lists of models measured on that GPU class, each holding only its kind: text recipes (`recipes`), image models (`images`), video models (`videos`) and music models (`music`). A class needs at least one; a machine too small for any text model may list only the others. A machine with no list of a kind at its own class takes it from the nearest smaller class of the same GPU that has one. |
 
 IDs contain lowercase alphanumeric components separated by single dots or hyphens.
 Artifact repositories are `owner/name`, revisions are 40-hex commits, and files,
@@ -85,7 +85,8 @@ Recipes you write live in `~/.local/state/omarchy/agent-local/recipes/<id>.toml`
 models and machines files, so an engine update or reinstall leaves them. The catalog loads the
 curated recipes, then yours. A recipe of yours whose id equals a curated id is rejected, naming the
 clash; it never shadows. Yours go through the same `validate_recipe` as curated ones, with one
-difference: a `[[hardware]]` entry may omit `measured`, the bench file only the catalog ships. A file
+difference: a `[[hardware]]` entry may omit `measured`, the bench file only the catalog ships. It may also
+carry a `ram_class`, which recipes written before measurements went per chip have; it is ignored. A file
 in the folder that fails validation is skipped (and reported by `recipe list`), not fatal.
 
 | Command | Effect |
@@ -126,7 +127,8 @@ boundary: the folder is yours, and a file you place there by hand is read as wri
 
 ## Lifecycle
 
-`use best <kind>` (`text`, `image`, `video` or `music`) matches the GPU class and RAM class, tries the
+`use best <kind>` (`text`, `image`, `video` or `music`) matches the GPU class and RAM class (or, for a kind
+that class doesn't list, the nearest smaller RAM class that does), tries the
 class's recipes of that kind (`recipes` for text, else `images`, `videos` or `music` in `best.toml`)
 in order; `use best` alone lists each kind's pick for this machine and sets nothing up. It checks that the runtime runs on the GPU and that the recipe fits, and
 chooses the largest fitting context, and at the same context the variant with the larger memory peak that fits.
@@ -322,8 +324,8 @@ log from the peer. Transition timestamps are Unix milliseconds. Pending activati
 the current manifest's observations until the new setup has been measured.
 
 `list.json` rows contain `id`, `kind`, `name`, `user`, `runtime`, `tier`, `publisher`,
-`vendor`, `architecture`, `installed`, `experimental`, `available`, `reason`, `best`, `active`,
-`source`, `memory_gib`, `context`, `decode_tok_s` and `prefill_tok_s`. An experimental recipe has a row only
+`vendor`, `architecture`, `installed`, `experimental`, `retired`, `available`, `reason`, `best`, `active`,
+`source`, `memory_gib`, `context`, `decode_tok_s` and `prefill_tok_s`. An experimental or retired recipe has a row only
 once it's set up. `best` marks the
 recommendation of the row's kind: the class's first fitting text recipe and, apart from it,
 its first fitting image model. Unavailable variants have null memory/context, as image models
