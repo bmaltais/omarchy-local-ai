@@ -4334,6 +4334,8 @@ def status_record(catalog, profile):
       row["vendor"] = vendor
     if recipe_kind(cat) == "music" and "vocals" in cat:
       row["vocals"] = bool(cat["vocals"])
+    # Retired after it was set up: it keeps working, and the panel says it's no longer offered.
+    row["retired"] = bool(cat.get("retired"))
     row.update(update_fields(rid, load_model(rid), catalog, profile))
     # An update under way: how far its download has got, until it's done.
     record = load_installing(rid)
