@@ -1,4 +1,4 @@
-# TensorFold's native server, tensorfold-native, from its signed upstream release (1.2.10) with no patches,
+# TensorFold's native server, tensorfold-native, from its signed upstream release (1.3.6) with no patches,
 # unpacked onto debian:trixie-slim by images/tensorfold. Its CUDA kernels are embedded in the
 # executable and the driver's libcuda arrives through CDI, so the image holds no CUDA toolkit or PyTorch;
 # it adds cuBLASLt for --vision and libjpeg-turbo and libwebp for JPEG and WebP pictures.
@@ -6,9 +6,9 @@
 # TENSORFOLD_API_KEY. The image sets TENSORFOLD_MEMORY_RESERVE_GIB=9 (12.2 by default), which gives the
 # difference to the prompt cache, and TF_FLASHNEXT_CHUNK_SOLO=3072, which only Flash Next reads.
 # Published by Omacom from images/tensorfold.
-image = "ghcr.io/omacom/omarchy-local-ai/tensorfold@sha256:795038783aaf902bcd8b377f73beae8224e75a83e7dbcdb783521ef46bf25aa2"
+image = "ghcr.io/omacom/omarchy-local-ai/tensorfold@sha256:139b817d6b55d27e9f80c78ebe82d67c7e09b4926283aa74891c91b58d1e6aa8"
 tier = "third-party"
-review = "reviews/tensorfold-795038783aaf.toml"
+review = "reviews/tensorfold-139b817d6b55.toml"
 port = 8888
 command = ["tensorfold-native", "serve", "--host", "0.0.0.0", "--port", "8888", "--no-update-check"]
 health = { probe = ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:8888/health"] }

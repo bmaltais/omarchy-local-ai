@@ -1,49 +1,48 @@
 recipe = "qwen3.8-flash-next-tensorfold"
-measured_at = "2026-11-03"
-catalog_version = "0.4.0"
-image = "ghcr.io/omacom/omarchy-local-ai/tensorfold@sha256:c88821d872e22f9dc6148173816b654e2c6dcd712fae50bc5e95915e3f817856"
+measured_at = "2026-11-27"
+image = "ghcr.io/omacom/omarchy-local-ai/tensorfold@sha256:139b817d6b55d27e9f80c78ebe82d67c7e09b4926283aa74891c91b58d1e6aa8"
 ctx = 262144
-load_seconds = 66.0
+load_seconds = 73.0
 fileset = "e7759ea18ac20345"
-method = "tools/bench: 1 warmup, then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
+method = "tools/bench: 2 warmups (a 128-token reply, a ~4K-token prompt from the corpus tail), then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
 
 [machine]
 platform = "aarch64-gb10"
 gpu = "nvidia-gb10"
 ram_class = 128
 system = "NVIDIA NVIDIA_DGX_Spark"
-kernel = "7.3.0-9-omarchy"
+kernel = "7.3.6-6-omarchy"
 cpu = "Cortex-X925 + Cortex-A725"
-gpu_driver = "615.78.08"
+gpu_driver = "620.73.04"
 
 [memory]
-observed_at_load_gib = 83.1
-min_available_during_bench_gib = 19.4
+observed_at_load_gib = 80.4
+min_available_during_bench_gib = 29.6
 total_gib = 121.9
 
 [short]
 prompt_tokens = 41
 completion_tokens = 45
-ttft_s = 0.18
-prefill_tok_s = 231.2
-decode_tok_s = 89.0
-total_s = 0.67
+ttft_s = 0.12
+prefill_tok_s = 352.8
+decode_tok_s = 109.5
+total_s = 0.52
 
 [long]
 prompt_tokens = 31705
 completion_tokens = 512
-ttft_s = 18.76
-prefill_tok_s = 1690.0
+ttft_s = 16.81
+prefill_tok_s = 1886.0
 decode_tok_s = 61.8
-total_s = 27.03
+total_s = 25.09
 
 [edit]
 prompt_tokens = 2306
 completion_tokens = 512
-ttft_s = 1.28
-prefill_tok_s = 1804.2
-decode_tok_s = 311.2
-total_s = 2.92
+ttft_s = 1.25
+prefill_tok_s = 1845.2
+decode_tok_s = 325.2
+total_s = 2.82
 
 [[artifacts]]
 repo = "TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP"
