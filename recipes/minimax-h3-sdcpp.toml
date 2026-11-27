@@ -36,18 +36,23 @@ vae = "vae/minimax_h3_video_vae_fp16.safetensors"
 audio_vae = "vae/minimax_h3_audio_vae_fp32.safetensors"
 lora = "loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"
 
-# Measured: 36.2 GiB of GPU memory at its peak, making a 2.3 s 864x480 clip in 178 s.
+# Measured on Strix Halo with --flash-attn on and --vae-tiling: 19.6 GiB of GPU memory at its peak
+# (~21.2 GiB RAM delta), making a 2.3 s 864x480 clip in 206 s.
 [[variant]]
-peak_ram_gib = 38
-peak_gpu_gib = 38
+peak_ram_gib = 24
+peak_gpu_gib = 22
 
-# Clips are 24 fps, up to the 15 s H3 is made for. GPU memory grows with the clip: 36.2 GiB at its
-# peak for 56 frames, 46.7 for 124, both at 864x480; about 0.155 GiB a frame, from the peak above.
+# Clips are 24 fps, up to the 15 s H3 is made for. With Flash Attention and VAE tiling, peak GPU
+# memory stays flat at 19.6-19.7 GiB between 56 and 124 frames, and host RAM grows by ~0.7 GiB
+# over those 68 frames (~0.01 GiB/frame, budgeted at 0.02).
 [video]
 fps = 24
 max_seconds = 15
 reference_frames = 56
-gib_per_frame = 0.155
+gib_per_frame = 0.02
 
+# sd-server's --flash-attn auto micro-probe disables Flash Attention on RADV Vulkan0, which makes
+# MiniMax H3's 3D video attention ~6.5x slower (233 s/step vs 36 s/step) and doubles peak memory.
+# Forcing --flash-attn on with --vae-tiling keeps weights in unified GPU memory without CPU offload.
 [server]
-args = ["--cfg-scale", "1.0", "--steps", "4", "--offload-to-cpu"]
+args = ["--cfg-scale", "1.0", "--steps", "4", "--flash-attn", "on", "--vae-tiling"]
