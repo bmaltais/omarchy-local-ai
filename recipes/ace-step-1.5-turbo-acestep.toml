@@ -14,6 +14,14 @@ download_gib = 7.57
 gpu = "amd-strix-halo"
 measured = "measurements/ace-step-1.5-turbo-acestep-strix-halo.toml"
 
+[[hardware]]
+gpu = "intel-arc-b390"
+measured = "measurements/ace-step-1.5-turbo-acestep-arc-b390.toml"
+
+[[hardware]]
+gpu = "amd-strix-point"
+measured = "measurements/ace-step-1.5-turbo-acestep-strix-point.toml"
+
 [[artifacts]]
 repo = "Serveurperso/ACE-Step-1.5-GGUF"
 revision = "666ac70204440867d8c01ba4b119cc79c95b370a"

@@ -1,0 +1,29 @@
+recipe = "ace-step-1.5-turbo-acestep"
+measured_at = "2026-11-27"
+image = "ghcr.io/omacom/omarchy-local-ai/acestep@sha256:93d2296c887c1973cde30944be7ea70dee11ed85942f255229c01e8aa50c69e4"
+load_seconds = 3.0
+fileset = "75ca030f848772d4"
+method = "a 60 s and a 180 s song with given lyrics through /lm then /synth on the engine-run server, the turbo model's own 8 steps, to 128 kbit/s MP3"
+
+[machine]
+platform = "x86"
+gpu = "intel-arc-b390"
+ram_class = 32
+system = "Dell Inc. XPS 16 DA16260"
+kernel = "7.3.6-1-omarchy"
+cpu = "Intel(R) Core(TM) Ultra X7 358H"
+
+[memory]
+observed_at_load_gib = 0.1
+min_available_during_bench_gib = 12.4
+total_gib = 30.9
+
+[music]
+song_60s_written_s = 24.1
+song_60s_rendered_s = 10.8
+song_180s_written_s = 52.2
+song_180s_rendered_s = 26.2
+
+[[artifacts]]
+repo = "Serveurperso/ACE-Step-1.5-GGUF"
+revision = "666ac70204440867d8c01ba4b119cc79c95b370a"

@@ -11,6 +11,14 @@ download_gib = 10.42
 gpu = "amd-strix-halo"
 measured = "measurements/z-image-turbo-sdcpp-strix-halo.toml"
 
+[[hardware]]
+gpu = "intel-arc-b390"
+measured = "measurements/z-image-turbo-sdcpp-arc-b390.toml"
+
+[[hardware]]
+gpu = "amd-strix-point"
+measured = "measurements/z-image-turbo-sdcpp-strix-point.toml"
+
 [[artifacts]]
 repo = "leejet/Z-Image-Turbo-GGUF"
 revision = "c61c0e422dc8b541b7548cf33a4ef8302b0f8085"
@@ -33,10 +41,10 @@ license = "apache-2.0"
 files = ["split_files/vae/ae.safetensors"]
 vae = "split_files/vae/ae.safetensors"
 
-# Measured: about 13 GiB of GPU memory generating at 1024x1024.
+# Measured: 10.8-14.5 GiB of GPU memory (10.8 on Strix Point, ~13 on Strix Halo, 14.5 on Arc B390) generating at 1024x1024.
 [[variant]]
-peak_ram_gib = 14
-peak_gpu_gib = 14
+peak_ram_gib = 15
+peak_gpu_gib = 15
 
 # The VAE decodes in 512-pixel tiles: on an Arc B390 a whole 1024x1024 image takes 16 s, as its
 # buffer can't be pinned, and tiles 6 s, with no seam to see.
