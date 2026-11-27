@@ -1,6 +1,6 @@
 # llama.cpp's llama-server, built with Vulkan for AMD and Intel GPUs with the
-# Inkling 2 Vulkan patches (PR #32957 topk_moe bias, PR #32898 compact-bias
-# Flash Attention, and our Vulkan port of #33060's 5 Inkling 2 op fusions),
+# Inkling 2 Vulkan patches (PR #32957 topk_moe bias and our Vulkan port of
+# #33060's 5 Inkling 2 op fusions; #32898 and #33073 DFlash2 are upstream),
 # as runtimes/llamacpp-inkling2.toml runs it, published as
 # ghcr.io/omacom/omarchy-local-ai/llamacpp-inkling2.
 # Everything is from Arch Linux's packages at the pinned base: upstream's own
@@ -10,17 +10,16 @@ ARG BASE=docker.io/library/archlinux@sha256:fcee73ea1b96e236248f53a213f71276cc90
 
 FROM ${BASE} AS build
 RUN pacman -Syu --noconfirm --needed base-devel cmake ninja git vulkan-headers vulkan-icd-loader shaderc spirv-headers
-# llama.cpp's build tag for COMMIT, which names the published image (b12774-<n>).
-ARG BUILD=b12774
-ARG COMMIT=171527522610996f5f0acf12334e185156ca8f44
+# llama.cpp's build tag for COMMIT, which names the published image (b12817-<n>).
+ARG BUILD=b12817
+ARG COMMIT=15fcfc7357f8de73671d39e7d8c594e1beb3052d
 COPY patches/ /patches/
 RUN git init /src \
  && git -C /src remote add origin https://github.com/ggml-org/llama.cpp \
  && git -C /src fetch --depth 1 origin "$COMMIT" \
  && git -C /src checkout --quiet FETCH_HEAD \
  && git -C /src apply /patches/01-pr32957-vulkan-topk-moe.patch \
- && git -C /src apply /patches/02-pr32898-vulkan-fa-compact-bias.patch \
- && git -C /src apply /patches/03-vulkan-inkling2-fusions.patch
+ && git -C /src apply /patches/02-vulkan-inkling2-fusions.patch
 # One CPU backend per instruction set, picked at start, so the image runs on any x86-64.
 # The backends are loaded from beside the server, in /usr/bin.
 RUN cmake -S /src -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
