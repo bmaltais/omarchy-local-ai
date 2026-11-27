@@ -1,48 +1,52 @@
 recipe = "inkling-2-mini-llamacpp"
-measured_at = "2026-11-26"
-image = "ghcr.io/omacom/omarchy-local-ai/llamacpp-inkling2@sha256:2de51b1b9970f5709b52e9ec8fa5de7fc7e92ce33bea2b488cae697d30d80aaf"
+measured_at = "2026-11-27"
+image = "ghcr.io/omacom/omarchy-local-ai/llamacpp-inkling2@sha256:e96bdc0a5a04901d139dae94a2e79988c6e2f486534015d19a505ef5549d259c"
 ctx = 131072
-load_seconds = 6.0
-fileset = "0232a3345ce89948"
+load_seconds = 11.0
+fileset = "8ad752d62c5fdc23"
 method = "tools/bench: 2 warmups (a 128-token reply, a ~4K-token prompt from the corpus tail), then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed"
 
 [machine]
 platform = "x86"
 gpu = "intel-arc-b390"
-ram_class = 64
-system = "Dell Inc. XPS 14 DA14260"
-kernel = "7.2.15-6-omarchy"
+ram_class = 32
+system = "Dell Inc. XPS 16 DA16260"
+kernel = "7.3.6-1-omarchy"
 cpu = "Intel(R) Core(TM) Ultra X7 358H"
 
 [memory]
-observed_at_load_gib = 20.5
-min_available_during_bench_gib = 32.0
-total_gib = 62.3
+observed_at_load_gib = 19.8
+min_available_during_bench_gib = 2.8
+total_gib = 30.9
 
 [short]
 prompt_tokens = 46
 completion_tokens = 512
-ttft_s = 1.31
-prefill_tok_s = 35.0
-decode_tok_s = 16.3
-total_s = 32.57
+ttft_s = 0.74
+prefill_tok_s = 62.2
+decode_tok_s = 29.3
+total_s = 18.21
 
 [long]
 prompt_tokens = 38587
 completion_tokens = 512
-ttft_s = 212.83
-prefill_tok_s = 181.3
-decode_tok_s = 11.6
-total_s = 257.02
+ttft_s = 98.51
+prefill_tok_s = 391.7
+decode_tok_s = 25.6
+total_s = 118.49
 
 [edit]
 prompt_tokens = 2891
 completion_tokens = 512
-ttft_s = 13.66
-prefill_tok_s = 211.7
-decode_tok_s = 14.8
-total_s = 48.18
+ttft_s = 6.17
+prefill_tok_s = 468.3
+decode_tok_s = 31.8
+total_s = 22.24
 
 [[artifacts]]
-repo = "bartowski/Inkling-2-Mini-GGUF"
-revision = "ad66863fd3b7f3236c0b7a0862412c9e00f78a6e"
+repo = "ISTA-DASLab/Inkling-2-Mini-GSQ-RCO-GGUF"
+revision = "f0da1097633dd7c2f5733e4077cff861be122245"
+
+[[artifacts]]
+repo = "na0x2c6/Inkling-2-Mini-DFlash2-GGUF"
+revision = "e12c9c89cf07a2e063a7a95cc753165c662976d1"

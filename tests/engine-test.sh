@@ -2220,6 +2220,40 @@ check("best stays the text recommendation, and image models resolve on their own
 rows = {row["id"]: row for row in a.recipe_listing(img_catalog, profile)}
 check("list rows carry their kind and the best of each kind", (rows["picture"]["kind"], rows["model"]["kind"]) == ("image", "text") and rows["picture"]["best"] and rows["model"]["best"]
       and rows["picture"]["available"] and rows["picture"]["context"] is None and rows["picture"]["reason"] == "", repr(rows["picture"]))
+# Only one build of each (kind, name) is offered on a machine: the build aimed at a bigger or
+# more specific GPU hides smaller/generic fallbacks when it fits, and the fallback surfaces when
+# it does not.
+small_rt = dict(copy.deepcopy(runtime), gpus=["amd"])
+big_rt = dict(copy.deepcopy(runtime), gpus=["amd-strix-halo"])
+small_rec = dict(copy.deepcopy(recipe), runtime="small", variant=[{"ctx": 131072, "peak_ram_gib": 22, "peak_gpu_gib": 21}])
+big_rec = dict(copy.deepcopy(recipe), runtime="big", variant=[{"ctx": 262144, "peak_ram_gib": 40, "peak_gpu_gib": 38}])
+dedup_catalog = SimpleNamespace(
+  root=str(repo),
+  recipes={"model-small": small_rec, "model-big": big_rec},
+  runtimes={"small": small_rt, "big": big_rt},
+  best={"class": [dict(entry, recipes=["model-big"])]},
+  user=set(),
+)
+big_prof = {"platform": "x86", "ram_gib": 62.0, "ram_class": 64, "gpus": [dict(gpu, memory_gib=54.0, max_memory_gib=54.0)]}
+small_prof = {"platform": "x86", "ram_gib": 30.5, "ram_class": 32, "gpus": [dict(gpu, memory_gib=22.9, max_memory_gib=22.9)]}
+with patch.object(a, "recipe_installed", return_value=False):
+  on_big = {row["id"]: row for row in a.recipe_listing(dedup_catalog, big_prof)}
+  on_small = {row["id"]: row for row in a.recipe_listing(dedup_catalog, small_prof)}
+check("a bigger machine offers only the stronger build of the same model",
+      on_big["model-big"]["available"] and not on_big["model-small"]["available"]
+      and "model-big" in on_big["model-small"]["reason"], repr(on_big))
+check("a smaller machine falls back to the smaller build alone",
+      on_small["model-small"]["available"] and not on_small["model-big"]["available"], repr(on_small))
+with patch.object(a, "recipe_installed", side_effect=lambda rid: rid == "model-small"):
+  on_big_installed = {row["id"]: row for row in a.recipe_listing(dedup_catalog, big_prof)}
+check("an already-installed fallback stays listed alongside the stronger build",
+      on_big_installed["model-big"]["available"] and on_big_installed["model-small"]["available"], repr(on_big_installed))
+# The fork's machines: a build left out here because a stronger one runs here isn't offered on a machine.
+with patch.object(a, "recipe_installed", return_value=False), patch.object(a, "load_machines", return_value={"me@small": small_prof}):
+  with_machine = {row["id"]: row for row in a.recipe_listing(dedup_catalog, big_prof)}
+check("a build superseded here isn't offered on a machine that runs it",
+      with_machine["model-big"]["available"] and "machine" not in with_machine["model-big"]
+      and not with_machine["model-small"]["available"] and "machine" not in with_machine["model-small"], repr(with_machine))
 # An experimental recipe is kept for trying by name: listed once set up or when asked for, never recommended.
 trial = dict(copy.deepcopy(recipe), experimental=True)
 trial_catalog = SimpleNamespace(root=str(repo), recipes={"model": recipe, "trial": trial}, runtimes=both, best=images_best, user=set(), user_errors={})
