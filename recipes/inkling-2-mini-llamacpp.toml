@@ -20,9 +20,16 @@ license = "apache-2.0"
 files = ["Inkling-2-Mini-GSQ-RCO-IQ3_S.gguf", "mmproj-Inkling-2-Mini-BF16.gguf"]
 model = "Inkling-2-Mini-GSQ-RCO-IQ3_S.gguf"
 
-# Measured on a 32 GB XPS 16 (Arc B390) running the Omarchy desktop with a 38K-token prompt:
-# ~17.1 GiB at load (~21.2 GiB peak) with default F16 KV cache at 131K context, keeping
-# cooperative-matrix Vulkan Flash Attention active within a 32 GB Arc B390's ~22.9 GiB limit.
+# For 64 GB: full 256K window (+4.0 GiB F16 KV over 131K: ~21.1 GiB at load, ~25.2 GiB peak),
+# keeping cooperative-matrix Vulkan Flash Attention active within a 64 GB Arc B390's ~30 GiB limit.
+[[variant]]
+ctx = 262144
+peak_ram_gib = 27
+peak_gpu_gib = 26
+
+# For 32 GB: measured on a 32 GB XPS 16 (Arc B390) running the Omarchy desktop with a 38K-token
+# prompt: 17.1 GiB at load (~21.2 GiB peak, 6.1 GiB min available) with default F16 KV cache at
+# 131K context, within a 32 GB Arc B390's ~22.9 GiB limit.
 [[variant]]
 ctx = 131072
 peak_ram_gib = 22
