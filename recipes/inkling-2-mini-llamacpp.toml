@@ -9,24 +9,24 @@ input = ["text", "image"]
 gpu = "intel-arc-b390"
 measured = "measurements/inkling-2-mini-llamacpp-arc-b390.toml"
 
-# Bartowski's imatrix-calibrated Q4_0 build (15.1 GB, Q6_K output head) in mainline llama.cpp's
-# inkling2_loop layout, plus the F16 vision projector. On Arc B390 Vulkan (which has no native FP4
-# hardware), Q4_0 experts run ~30% faster than NVFP4 while cutting the Q8_0 attention/head overhead
-# that slows down UD-Q4_K_XL.
+# ISTA-DASLab's GSQ-RCO mixed-precision IQ3_S build (11.43 GB: 10.50 GB on GPU, 0.93 GB BF16
+# token embedding in system RAM; 99.2% task recovery against the NVFP4/MXFP8 base checkpoint)
+# plus the BF16 vision projector. Cuts 3.6 GB vs Q4_0 so 131K context fits inside a 32 GB
+# Arc B390's ~23 GiB budget beside the desktop.
 [[artifacts]]
-repo = "bartowski/Inkling-2-Mini-GGUF"
-revision = "ad66863fd3b7f3236c0b7a0862412c9e00f78a6e"
+repo = "ISTA-DASLab/Inkling-2-Mini-GSQ-RCO-GGUF"
+revision = "f0da1097633dd7c2f5733e4077cff861be122245"
 license = "apache-2.0"
-files = ["Inkling-2-Mini-Q4_0.gguf", "mmproj-Inkling-2-Mini-f16.gguf"]
-model = "Inkling-2-Mini-Q4_0.gguf"
+files = ["Inkling-2-Mini-GSQ-RCO-IQ3_S.gguf", "mmproj-Inkling-2-Mini-BF16.gguf"]
+model = "Inkling-2-Mini-GSQ-RCO-IQ3_S.gguf"
 
-# Measured on a 64 GB XPS 14 (Arc B390) running the Omarchy desktop with a 38K-token prompt:
-# 20.5 GiB at load (~22 GiB peak) with default F16 KV cache at 131K context, keeping cooperative-matrix
-# Vulkan Flash Attention active (~2x faster long-context prefill than Q4_0 KV) within Arc B390's ~30 GiB limit.
+# Measured on a 32 GB XPS 16 (Arc B390) running the Omarchy desktop with a 38K-token prompt:
+# ~17.1 GiB at load (~21.2 GiB peak) with default F16 KV cache at 131K context, keeping
+# cooperative-matrix Vulkan Flash Attention active within a 32 GB Arc B390's ~22.9 GiB limit.
 [[variant]]
 ctx = 131072
-peak_ram_gib = 25
-peak_gpu_gib = 22
+peak_ram_gib = 22
+peak_gpu_gib = 21
 
 # Thinking Machines' generation defaults: temperature 1.0, no top-p or top-k cut.
 [sampling]
@@ -39,4 +39,4 @@ top_k = 0
 # multiplies memory reads faster than acceptance pays back on Arc B390's ~100 GB/s bandwidth.
 [server]
 args = ["--parallel", "1", "--flash-attn", "on", "--jinja",
-        "--mmproj", "/models/mmproj-Inkling-2-Mini-f16.gguf", "--mmproj-offload"]
+        "--mmproj", "/models/mmproj-Inkling-2-Mini-BF16.gguf", "--mmproj-offload"]
