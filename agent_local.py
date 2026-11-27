@@ -1895,6 +1895,12 @@ def materialize(rid, files, roles, seed_dir=None, progress=None):
   """Fetch a run's files and link them into their own file-set directory.
   Returns the file set id the unit mounts."""
   validate_files(files, roles)
+  fileset = fileset_id(files)
+  target = fileset_dir(rid, fileset)
+  # The directory is named for its exact files, so one that's there holds them all. It may be a link
+  # to a copy on another disk (startdgx's model store) whose blobs are gone: nothing to fetch either way.
+  if os.path.isdir(target):
+    return fileset
   missing = [record for record in files if not os.path.isfile(blob_path(record))]
   missing = [record for record in missing if not adopt_seed(record, seed_dir)]
   if missing and load_installing(rid) is not None:
@@ -1911,10 +1917,6 @@ def materialize(rid, files, roles, seed_dir=None, progress=None):
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
       for future in [pool.submit(download, record, progress) for record in missing]:
         future.result()
-  fileset = fileset_id(files)
-  target = fileset_dir(rid, fileset)
-  if os.path.isdir(target):
-    return fileset
   staging = target + ".partial"
   shutil.rmtree(staging, ignore_errors=True)
   ensure_dir(staging)
@@ -5072,9 +5074,11 @@ def _remove_files(rid, setup_image=None):
   freed = 0
   # A blob stays only while another recipe's files link it. A link from
   # outside the store, like the --seed copy it was set up from, isn't a
-  # reason to keep it, though dropping it frees no space.
+  # reason to keep it, though dropping it frees no space. A file set that is
+  # a link to a copy on another disk (startdgx's model store, whose blobs
+  # are links to that copy) is followed, so its blobs count as used.
   used = set()
-  for directory, _, names in os.walk(os.path.join(data_dir(), "models")):
+  for directory, _, names in os.walk(os.path.join(data_dir(), "models"), followlinks=True):
     for name in names:
       try:
         info = os.stat(os.path.join(directory, name))

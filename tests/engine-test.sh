@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 import shlex
 import subprocess
@@ -395,6 +396,20 @@ first_set = a.materialize("swap", [old], {"model": "w/model.gguf"})
 second_set = a.materialize("swap", [new], {"model": "w/model.gguf"})
 check("each file set gets its own directory", first_set != second_set)
 check("setting up a new file set leaves the previous one intact", Path(a.fileset_dir("swap", first_set), "w/model.gguf").read_bytes() == b"old")
+# A file set moved to another disk (startdgx's model store: the folder a link to the copy) whose blobs are gone
+# is set up again without a download: its folder is named for its exact files.
+moved_rec = {"dest": "w/model.gguf", "size": 5, "sha256": hashlib.sha256(b"moved").hexdigest()}
+plant(moved_rec, b"moved")
+moved_set = a.materialize("moved", [moved_rec], {"model": "w/model.gguf"})
+moved_copy = Path(os.environ["HOME"], "store-copy", "moved", moved_set)
+shutil.copytree(a.fileset_dir("moved", moved_set), moved_copy)
+shutil.rmtree(a.fileset_dir("moved", moved_set))
+os.symlink(moved_copy, a.fileset_dir("moved", moved_set))
+os.unlink(a.blob_path(moved_rec))
+with patch.object(a, "download", side_effect=AssertionError("downloaded")) as fetched:
+  again = a.materialize("moved", [moved_rec], {"model": "w/model.gguf"})
+check("a file set moved to another disk is set up again without downloading its blobs", again == moved_set and not fetched.called
+      and os.path.islink(a.fileset_dir("moved", moved_set)))
 
 # Exercise typed unit generation, then the real Quadlet parser without starting services.
 hostile = '50% $HOME "quoted space" \\tail'
@@ -842,6 +857,18 @@ with patch.object(a, "write_unit_files"):
   a._remove_files("gone")
 check("removal drops a blob only a seed copy still links", not (store / "blobs/sha256/seeded").exists() and (seed / "seeded").read_text() == "seeded")
 check("removal keeps a blob another recipe links", (store / "blobs/sha256/kept").exists())
+# startdgx's model store: a moved model's folder is a link to its copy on another disk, and its blobs are links
+# to that copy. Removing another model keeps them.
+store_copy = Path(os.environ["HOME"]) / "usb" / "parked" / "set"
+store_copy.mkdir(parents=True)
+(store_copy / "weights").write_text("parked")
+(store / "models" / "parked").mkdir(parents=True)
+os.symlink(store_copy, store / "models" / "parked" / "set")
+os.symlink(store_copy / "weights", store / "blobs/sha256/parked")
+(store / "models" / "gone").mkdir(parents=True, exist_ok=True)
+with patch.object(a, "write_unit_files"):
+  a._remove_files("gone")
+check("removal keeps the blob links of a model moved to another disk", os.path.islink(store / "blobs/sha256/parked") and (store / "blobs/sha256/parked").read_text() == "parked")
 
 # An interrupted removal leaves the model listed, so remove can finish it.
 Path(a.model_manifest_path("halfway")).parent.mkdir(parents=True, exist_ok=True)
