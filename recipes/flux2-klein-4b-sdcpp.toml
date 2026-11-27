@@ -13,6 +13,14 @@ download_gib = 8.3
 gpu = "amd-strix-halo"
 measured = "measurements/flux2-klein-4b-sdcpp-strix-halo.toml"
 
+[[hardware]]
+gpu = "intel-arc-b390"
+measured = "measurements/flux2-klein-4b-sdcpp-arc-b390.toml"
+
+[[hardware]]
+gpu = "amd-strix-point"
+measured = "measurements/flux2-klein-4b-sdcpp-strix-point.toml"
+
 [[artifacts]]
 repo = "leejet/FLUX.2-klein-4B-GGUF"
 revision = "3b1f5a9dc3abb32238b053aeb3d823c30afdacbd"
@@ -34,10 +42,10 @@ license = "apache-2.0"
 files = ["split_files/vae/flux2-vae.safetensors"]
 vae = "split_files/vae/flux2-vae.safetensors"
 
-# Measured: 9.7 GiB of GPU memory at its peak, generating at 1024x1024.
+# Measured: 8.1-11.6 GiB of GPU memory at its peak (8.1 on Strix Point, 9.7 on Strix Halo, 11.6 on Arc B390), generating at 1024x1024.
 [[variant]]
-peak_ram_gib = 11
-peak_gpu_gib = 11
+peak_ram_gib = 12
+peak_gpu_gib = 12
 
 # The VAE decodes in 512-pixel tiles: on an Arc B390 a whole 1024x1024 image takes 16 s, as its
 # buffer can't be pinned, and tiles 6 s, with no seam to see.

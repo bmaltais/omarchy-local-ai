@@ -20,12 +20,13 @@ images = ["flux2-klein-4b-sdcpp", "z-image-turbo-sdcpp"]
 music = ["ace-step-1.5-turbo-acestep"]
 
 # 27B also fits at 128 and 192 GB, but on agent work it is much weaker and slower, so those get
-# Flash Next alone (192 GB inherits from 128 GB). At 64 GB Inkling 2 Mini leads: on Gufo 0.37 it
-# loads in 31.4 GiB with a 256K window and decodes ~5x faster than Qwen3.8 27B on long prompts.
+# Flash Next first with Inkling 2 Mini as the fast secondary option (192 GB inherits from 128 GB).
+# At 64 GB Inkling 2 Mini leads: on Gufo 0.37 it loads in 31.4 GiB with a 256K window and decodes
+# ~5x faster than Qwen3.8 27B on long prompts.
 [[class]]
 gpu = "amd-strix-halo"
 ram_class = 128
-recipes = ["qwen3.8-flash-next-gufo"]
+recipes = ["qwen3.8-flash-next-gufo", "inkling-2-mini-gufo"]
 
 [[class]]
 gpu = "amd-strix-halo"
@@ -34,21 +35,23 @@ recipes = ["inkling-2-mini-gufo", "qwen3.8-27b-gufo"]
 videos = ["minimax-h3-sdcpp"]
 
 # The N1x and the GB10 share these lists (GPU_CLASSES): only memory sets them apart.
+# 128 GB inherits images, videos and music from 64 GB.
 [[class]]
 gpu = "nvidia-gb10"
 ram_class = 128
 recipes = ["qwen3.8-flash-next-tensorfold", "inkling-2-mini-tensorfold"]
-images = ["flux2-klein-4b-sdcpp-cuda", "z-image-turbo-sdcpp-cuda"]
-videos = ["minimax-h3-sdcpp-cuda"]
-music = ["ace-step-1.5-turbo-acestep-cuda"]
 
 # Inkling 2 Mini leads at 64 GB: in a blind-judged run of Omarchy's theme, plugin, app and game make tasks it
-# averaged 8.5 of 10 to Qwen3.8 27B's 8.0, at about 1.7 times its speed, and fits in 40 GiB with one stream.
+# averaged 8.5 of 10 to Qwen3.8 27B's 8.0, at about 1.7 times its speed, and fits in 41 GiB with one stream.
+# All four CUDA image, video and music models fit comfortably at 64 GB too (MiniMax H3 leaves 9.5 GiB free).
 # Nemotron 3.5 Bolt, which scored 4.4 there, is retired.
 [[class]]
 gpu = "nvidia-gb10"
 ram_class = 64
 recipes = ["inkling-2-mini-tensorfold", "qwen3.8-27b-tensorfold"]
+images = ["flux2-klein-4b-sdcpp-cuda", "z-image-turbo-sdcpp-cuda"]
+videos = ["minimax-h3-sdcpp-cuda"]
+music = ["ace-step-1.5-turbo-acestep-cuda"]
 
 # Two DGX Sparks cabled through their ConnectX-7 ports: the pair's own class, tried before either Spark's own.
 # DeepSeek V4.1 Flash decodes nearly twice as fast as GLM-5.3 Flash, leads it at coding and holds 1M tokens;
@@ -60,16 +63,21 @@ recipes = ["deepseek-v4.1-flash-tensorfold-pair", "glm-5.3-flash-tensorfold-pair
 
 # On an Arc B390 a mixture-of-experts model is the sweet spot (a dense 27B runs at 5 tok/s).
 # Inkling 2 Mini leads on agentic coding and vision (same model that beat Qwen3.8 27B at 64 GB NVIDIA)
-# and ISTA-DASLab's GSQ-RCO IQ3_S build fits in 32 GB (~17 GiB at load, 131K context). Bigger Arc B390
-# classes inherit this pick. Qwen3.6 35B-A3B is retired.
+# and ISTA-DASLab's GSQ-RCO IQ3_S build fits in 32 GB (~18 GiB at load, 131K context), alongside image
+# and music generation via Vulkan. Bigger Arc B390 classes inherit these picks. Qwen3.6 35B-A3B is retired.
 [[class]]
 gpu = "intel-arc-b390"
 ram_class = 32
 recipes = ["inkling-2-mini-llamacpp"]
+images = ["flux2-klein-4b-sdcpp", "z-image-turbo-sdcpp"]
+music = ["ace-step-1.5-turbo-acestep"]
 
 # On Strix Point (Ryzen AI 9 HX 370 / Radeon 890M), Inkling 2 Mini's GSQ-RCO IQ3_S build runs
-# via Vulkan RADV in ~16.3 GiB at load (131K context on 32 GB, 256K on 64 GB).
+# via Vulkan RADV in ~18 GiB at load (131K context on 32 GB, 256K on 64 GB), alongside image and
+# music generation via Vulkan.
 [[class]]
 gpu = "amd-strix-point"
 ram_class = 32
 recipes = ["inkling-2-mini-llamacpp"]
+images = ["flux2-klein-4b-sdcpp", "z-image-turbo-sdcpp"]
+music = ["ace-step-1.5-turbo-acestep"]
