@@ -15,33 +15,33 @@ kernel = "7.3.6-1-omarchy"
 cpu = "Intel(R) Core(TM) Ultra X7 358H"
 
 [memory]
-observed_at_load_gib = 17.1
-min_available_during_bench_gib = 6.1
+observed_at_load_gib = 18.2
+min_available_during_bench_gib = 5.1
 total_gib = 30.9
 
 [short]
 prompt_tokens = 46
 completion_tokens = 512
-ttft_s = 0.7
-prefill_tok_s = 65.4
+ttft_s = 0.74
+prefill_tok_s = 62.1
 decode_tok_s = 26.1
-total_s = 20.28
+total_s = 20.34
 
 [long]
 prompt_tokens = 38587
 completion_tokens = 512
-ttft_s = 106.75
-prefill_tok_s = 361.5
-decode_tok_s = 18.7
-total_s = 134.07
+ttft_s = 97.72
+prefill_tok_s = 394.9
+decode_tok_s = 18.4
+total_s = 125.5
 
 [edit]
 prompt_tokens = 2891
 completion_tokens = 512
-ttft_s = 6.76
-prefill_tok_s = 427.7
-decode_tok_s = 24.1
-total_s = 28.0
+ttft_s = 6.27
+prefill_tok_s = 461.5
+decode_tok_s = 23.6
+total_s = 27.92
 
 [[artifacts]]
 repo = "ISTA-DASLab/Inkling-2-Mini-GSQ-RCO-GGUF"
