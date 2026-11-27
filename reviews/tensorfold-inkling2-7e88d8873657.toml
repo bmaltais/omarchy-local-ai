@@ -1,0 +1,18 @@
+image = "ghcr.io/omacom/omarchy-local-ai/tensorfold-inkling2@sha256:7e88d8873657e0cf105a89e3a3d1ebed1908208440a07987706c219f4f38b158"
+publisher = "Omacom (published by .github/workflows/images.yml as tensorfold-inkling2:dc2ca8a1-50 from images/tensorfold-inkling2: jschmied/TensorFold dc2ca8a1 with MiaAI-Lab's Inkling-2-Mini-DGX-Spark-TensorFold patches at 3b210d1f)"
+reviewer = "Antigravity for David Heinemeier Hansson"
+date = "2026-11-27"
+version = "TensorFold at dc2ca8a1785df6ee5c8489ee7cd18e29cf7b4568 (the head of ashhart/TensorFold PR #4441, Jürgen Schmied's Inkling 2 Mini CUDA engine, on main 1587c8ca) with MiaAI-Lab's 30 patches at 3b210d1fc6a6a040f99add7119c0a7d78f82468c, built with Zig 0.17.0 and libtfgrammar over xgrammar v0.2.8 (97787376) on nvcr.io/nvidia/pytorch 26.07 (arm64)"
+source = "open (Apache-2.0), https://github.com/jschmied/TensorFold and https://github.com/MiaAI-Lab/Inkling-2-Mini-DGX-Spark-TensorFold; image recipe images/tensorfold-inkling2 in https://github.com/omacom/omarchy-local-ai"
+license_url = "https://raw.githubusercontent.com/jschmied/TensorFold/dc2ca8a1785df6ee5c8489ee7cd18e29cf7b4568/LICENSE"
+license_sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+checked = [
+  "license: TensorFold at dc2ca8a1 is Apache-2.0 (its LICENSE hashes as above); MiaAI-Lab's recipe is Apache-2.0 (LICENSE at 3b210d1f, SHA-256 c95bae1d1ce0235ecccd3560b772ec1efb97f348a79f0fbe0a634f0c2ccefe2c, NOTICE bba9030778b49c91a73c5e6c95793f3b7d80f9861180ce92aada9fd6c3c659b9); xgrammar and dlpack Apache-2.0, libjpeg-turbo and libwebp BSD-style, their texts in /opt/tensorfold/share/doc/tensorfold; the base is NVIDIA's PyTorch container under its own terms, as the other TensorFold images are",
+  "build: images/tensorfold-inkling2's Containerfile applies MiaAI-Lab's 30 patches (0001-0030) fetched at 3b210d1f on top of jschmied/TensorFold dc2ca8a1, with Zig 0.17.0 and both image decoders checked by SHA-256, xgrammar at its pinned commit, curl for the health probe, and MiaAI-Lab's serving environment (TENSORFOLD_MEMORY_RESERVE_GIB=9, TF_INKLING2_ATTN_FP8=1, TF_INKLING2_ATTN_FP8_TC=1, TF_INKLING2_PREFILL_TC=1) with CUDA_CACHE_PATH in the tmpfs; built and published by .github/workflows/images.yml (run 45991501192)",
+  "behavior: tensorfold-native serves the model directory given as its argument with the DFlash2 drafter directory passed via --drafter; the image carries no weights; the runtime starts it with --no-update-check and reserves the learning, recall, recording, dashboard, URL-fetching and key flags",
+  "acceptance (2026-11-27): serves Inkling 2 Mini + DFlash2 on a 64 GB N1x laptop running the desktop with a read-only root, all capabilities dropped (CapEff 0), no-new-privileges and the GPU through CDI; loads in 25 s (32.7 GiB), 78.3 tok/s on a short reply, 3,544.2 tok/s prefill and 79.2 tok/s decode at 38.6K, 92.2 tok/s on the edit",
+  "acceptance (2026-11-27): outbound connections from the container fail",
+  "acceptance (2026-11-27): rejects requests without the key or with a wrong one (401) and serves them with it (200) on /v1/models; /health is open by design (200)",
+  "acceptance (2026-11-27): identifies a PNG image through the vision tower, and emits a structured tool call on /v1/chat/completions",
+  "acceptance (2026-11-27): stops on SIGTERM in 1.1 s and releases memory at once",
+]
