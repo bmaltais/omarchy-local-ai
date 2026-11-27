@@ -1,0 +1,19 @@
+image = "ghcr.io/omacom/omarchy-local-ai/tensorfold@sha256:139b817d6b55d27e9f80c78ebe82d67c7e09b4926283aa74891c91b58d1e6aa8"
+publisher = "Omacom (published by .github/workflows/images.yml as tensorfold:1.3.6-52 from images/tensorfold, TensorFold's signed upstream release with no patches)"
+reviewer = "Antigravity for David Heinemeier Hansson"
+date = "2026-11-27"
+version = "TensorFold 1.3.6 (f56b1420), linux-aarch64 release archive"
+source = "open"
+license_url = "https://raw.githubusercontent.com/ashhart/TensorFold/f56b1420ff3e17fa531d90eb97bef41053cd852d/LICENSE"
+license_sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+checked = [
+  "license: TensorFold is Apache-2.0 (the archive's LICENSE equals the repository's at f56b1420); its archive ships the notices of what it builds in or adapts in /opt/tensorfold/LICENSES: xgrammar and dlpack (Apache-2.0), PyTorch (BSD-3-Clause), Pillow (MIT-CMU), avx_mathfun (zlib), AOTriton and the MIT kernels it adapts (MiaAI-Lab's among them), and the model licenses of families it can serve (NVIDIA OpenMDW 1.1, LFM Open 1.0, Kimi K3)",
+  "license: libturbojpeg 3.1.4.1 (BSD-3-Clause, IJG and zlib) and libwebpdecoder 1.6.0 (BSD-3-Clause and its patent grant) ship with their texts beside TensorFold's; the base is debian:trixie-slim with curl and ca-certificates, under their Debian licenses in /usr/share/doc",
+  "license: libcublasLt.so.13 (cuBLAS 13.8.0.4) is a redistributable under NVIDIA's CUDA EULA, Attachment A, shipped inside this value-added runtime with the EULA text at /opt/tensorfold/LICENSES/NVIDIA-CUDA-EULA-cuBLAS.txt",
+  "build: images/tensorfold's Containerfile checks the release archive against the SHA-256 the v1.3.6 release publishes (7f979048 for linux-aarch64, 78a9cd35 for linux-x86_64) and the archive's own SHA256SUMS, and builds libjpeg-turbo and libwebp from source releases pinned by checksum; nothing from TensorFold is compiled or patched; built and published by .github/workflows/images.yml (run 45993507974)",
+  "build: cuBLASLt is extracted from NVIDIA's libcublas-13-4_13.8.0.4-1 package, checked against its pinned SHA-256; the image carries no CUDA toolkit and no Python, the kernels are embedded in tensorfold-native and libcuda comes from the CDI spec",
+  "acceptance (2026-11-27): starts and serves on the internal network with outbound connections failing, read-only root (writing to / fails), all capabilities dropped (CapEff 0), no-new-privileges, on a DGX Spark (GB10) and a 128 GB N1x",
+  "acceptance (2026-11-27): rejects requests without the key or with a wrong one on /v1/models (401) and serves them with it (200); /health is open by design (200)",
+  "behavior: the image sets TENSORFOLD_MEMORY_RESERVE_GIB=9 and TF_FLASHNEXT_CHUNK_SOLO=3072, tuning only, as before; Qwen3.8 Flash Next and Qwen3.8 27B start with their recipes' unchanged arguments and load into 80-82 GiB and 70 GiB on 128 GB GB10 and N1x",
+  "acceptance: --no-update-check is fixed in the runtime command and TENSORFOLD_NO_UPDATE_CHECK=1 in the image, so it does not check for updates; learning, recall, recording, the dashboard and open metrics are reserved and stay off",
+]
