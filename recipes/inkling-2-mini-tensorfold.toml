@@ -14,9 +14,8 @@ gpu = "nvidia-n1x"
 measured = "measurements/inkling-2-mini-tensorfold-n1x.toml"
 
 # Thinking Machines' own checkpoint, at the precision it was trained in: NVFP4 experts in layers 0-19, MXFP8 in
-# 20-23, the rest BF16 (19.5 GB), and the 3-layer DSpark drafter beside it, which --drafter reads from the same
-# folder. A 26.4B-A3.4B looped mixture of experts: its middle 12 layers run three times a token. The revision
-# MiaAI-Lab's recipe pins.
+# 20-23, the rest BF16 (19.5 GB). A 26.4B-A3.4B looped mixture of experts: its middle 12 layers run three times
+# a token. The revision MiaAI-Lab's recipe pins.
 [[artifacts]]
 repo = "thinkingmachines/Inkling-2-Mini"
 revision = "7a67ae2314b44ef05c87fd1d4d311c58aaeb18f6"
@@ -24,6 +23,14 @@ license = "apache-2.0"
 files = ["*.safetensors", "*.json", "*.jinja", "tiktoken/*"]
 dest = "model"
 model = "."
+
+# IncoAI's DFlash2 block-diffusion drafter for Inkling 2 Mini (0.9 GB), passed to --drafter.
+[[artifacts]]
+repo = "incoai/Inkling-2-Mini-DFlash2"
+revision = "4f9088ea66c21f2b99ed657d1941c306b03e84d2"
+license = "apache-2.0"
+files = ["*.safetensors", "config.json"]
+dest = "drafter"
 draft = "."
 
 # Measured on a DGX Spark running the Omarchy desktop: 69.9 GiB at load, with the eight windows' FP8 K/V and the
@@ -35,12 +42,12 @@ peak_gpu_gib = 70
 args = ["--parallel", "8"]
 
 # For 64 GB: one stream at the full 256K window (5.56 GiB FP8 K/V) and an 8 GiB prompt cache.
-# Measured on an N1x laptop running the Omarchy desktop: 29.8 GiB at load (19 s), 18.7 GiB free
+# Measured on an N1x laptop running the Omarchy desktop: 32.7 GiB at load (25 s), 17.4 GiB free
 # at the lowest during bench, with headroom for the 8 GiB prompt cache to fill.
 [[variant]]
 ctx = 262144
-peak_ram_gib = 40
-peak_gpu_gib = 40
+peak_ram_gib = 41
+peak_gpu_gib = 41
 args = ["--parallel", "1", "--prompt-cache-gib", "8"]
 
 # The checkpoint's generation defaults: temperature 1.0, no top-p or top-k cut.
